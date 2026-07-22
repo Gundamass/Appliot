@@ -294,3 +294,5 @@ git diff --check
 Final output summary: both actual-path frozen installs exited `0`; the root install rebuilt `better-sqlite3` via the final relative bootstrap and `node-gyp@12.1.0` on mapped `Z:`, while the `apps/api` frozen install exited `0` from a fresh dependency state. The focused wrapper/bootstrap suite was `13/13`, contracts `5/5`, API `12/12`, root workspace `17/17`; all typechecks/builds/diff check exited `0`.
 
 Final implementation commit: `0def2d631d98a7f37b74c6438d55c7fefc1a5c5e` (`fix: harden native install bootstrap`).
+
+Commit set: `0def2d631d98a7f37b74c6438d55c7fefc1a5c5e` (implementation), `4177e8eda55d3cf640415339916b5c9c33bd165c` (report evidence), and `169306c9fcd601df65a94e90a3041bf5f77231ae` (ignored recovery backups).
