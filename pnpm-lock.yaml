@@ -34,6 +34,9 @@ importers:
 
   apps/api:
     dependencies:
+      '@fastify/busboy':
+        specifier: 3.2.0
+        version: 3.2.0
       '@fastify/multipart':
         specifier: 9.2.1
         version: 9.2.1
