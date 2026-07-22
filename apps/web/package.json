@@ -1,0 +1,28 @@
+{
+  "name": "@resume/web",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "dev": "vite",
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p ../../tsconfig.json",
+    "build": "vite build"
+  },
+  "dependencies": {
+    "@resume/contracts": "workspace:*",
+    "lucide-react": "1.25.0",
+    "react": "19.2.8",
+    "react-dom": "19.2.8",
+    "zod": "3.25.67"
+  },
+  "devDependencies": {
+    "@testing-library/jest-dom": "7.0.0",
+    "@testing-library/react": "16.3.2",
+    "@testing-library/user-event": "14.6.1",
+    "@types/react": "19.2.14",
+    "@types/react-dom": "19.2.3",
+    "jsdom": "29.1.1",
+    "vite": "8.1.5",
+    "vitest": "3.2.4"
+  }
+}
