@@ -1,0 +1,16 @@
+{
+  "name": "resume-application-assistant",
+  "private": true,
+  "packageManager": "pnpm@10.13.1",
+  "engines": { "node": ">=24.14.1" },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit",
+    "build": "pnpm -r build"
+  },
+  "devDependencies": {
+    "@types/node": "24.0.0",
+    "typescript": "5.8.3",
+    "vitest": "3.2.4"
+  }
+}
