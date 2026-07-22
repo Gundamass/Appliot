@@ -193,14 +193,47 @@ function isAsciiWord(character: string | undefined): boolean {
 
 function hasNearbyNegation(source: string, start: number, end: number): boolean {
   const before = source.slice(Math.max(0, start - 32), start);
-  const after = source.slice(end, Math.min(source.length, end + 32));
-  const precedingNegation = /(?:\b(?:no|not|never|without|lacks?|does\s+not|do\s+not|did\s+not|has\s+not|have\s+not|cannot|can't)\b[^.!?;，。！？；]{0,20}|(?:未持有|未获得|未通过|没有|不具备|并无|无)[^，。！？；]{0,12})$/;
-  const followingContradiction = /^(?:[^.!?;，。！？；]{0,20}\b(?:no|not|false|absent|none)\b|[^，。！？；]{0,12}(?:否|没有|未持有|不具备|无))/;
-  return precedingNegation.test(before) || followingContradiction.test(after);
+  const after = source.slice(end, Math.min(source.length, end + 48));
+  return hasPrecedingNegation(before) || hasImmediateNegativeAnswer(after);
+}
+
+function hasPrecedingNegation(context: string): boolean {
+  const english = /\b(?:no|not|never|without|lacks?|does\s+not|do\s+not|did\s+not|has\s+not|have\s+not|cannot|can't)\b[^.!?;，。！？；\n]{0,20}$/;
+  const chinese = /(?:未持有|未获得|未通过|没有|不具备|并无|无)[^，。！？；\n]{0,12}$/;
+  return english.test(context) || chinese.test(context);
+}
+
+function hasImmediateNegativeAnswer(context: string): boolean {
+  const separatorIndex = findAnswerSeparator(context);
+  if (separatorIndex < 0 || separatorIndex > 24) return false;
+  const answer = context.slice(separatorIndex + 1).trim();
+  return isStandaloneNegativeAnswer(answer);
+}
+
+function findAnswerSeparator(context: string): number {
+  const separators = new Set(["?", "!", ":", ";", "\n", "？", "！", "：", "；"]);
+  for (let index = 0; index < context.length; index += 1) {
+    const character = context[index]!;
+    if (character === "." || character === "。") return -1;
+    if (separators.has(character)) return index;
+  }
+  return -1;
+}
+
+function isStandaloneNegativeAnswer(answer: string): boolean {
+  const englishMarker = /^(?:no|false|none|absent)(?=$|[,.!?;:])/;
+  const englishNot = /^not(?:$|[,.!?;:]|\s+(?:currently|held|certified)(?=$|[,.!?;:]))/;
+  const chineseMarker = /^(?:否|没有|未持有|不具备|无)(?=$|[，。！？；：,.!?;:])/u;
+  return englishMarker.test(answer) || englishNot.test(answer) || chineseMarker.test(answer);
 }
 
 function normalize(value: string): string {
-  return value.trim().toLowerCase().replace(/\s+/g, " ");
+  return value
+    .trim()
+    .toLowerCase()
+    .replace(/\r\n?/g, "\n")
+    .replace(/[^\S\r\n]+/g, " ")
+    .replace(/ *\n */g, "\n");
 }
 
 function uniqueCandidateValues(candidates: RetrievedCandidate[]): JsonValue[] {

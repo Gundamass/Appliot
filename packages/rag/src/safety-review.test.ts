@@ -76,6 +76,32 @@ describe("review fix: evidence support", () => {
   });
 
   it.each([
+    "PMP certification? No.",
+    "PMP certification! No!",
+    "PMP certification: No.",
+    "PMP certification; No.",
+    "PMP certification\nNo.",
+    "PMP certification? No. AWS certification: Yes.",
+    "PMP certification? No, not currently.",
+    "是否持有 PMP？否。",
+    "是否持有 PMP？否。已通过 AWS 认证。",
+    "PMP 证书：没有"
+  ])("rejects an immediate clause answer that denies the candidate: %s", (text) => {
+    expect(evidenceSupportsValue("PMP", [pdfEvidence(text)])).toBe(false);
+  });
+
+  it.each([
+    "PMP certification? Yes.",
+    "PMP certification：是。",
+    "持有 PMP 证书。",
+    "PMP certification completed. No relocation required.",
+    "PMP certified! No restrictions apply.",
+    "PMP certification recorded.\nNo travel preference was provided."
+  ])("preserves affirmative or unrelated later evidence: %s", (text) => {
+    expect(evidenceSupportsValue("PMP", [pdfEvidence(text)])).toBe(true);
+  });
+
+  it.each([
     [true, "The document says true."],
     [42, "Employee 42 delivered projects."],
     [null, "The optional field is null."],
@@ -91,6 +117,18 @@ describe("review fix: evidence support", () => {
       value: "PMP",
       evidence: [pdfEvidence("Candidate does not hold PMP certification.")]
     });
+
+    const decision = await createRagService({ repository: repositoryWithExact(candidate) }).resolveField(pmpRequest);
+
+    expect(decision.status).toBe("blocked");
+    expect(decision.value).toBeUndefined();
+  });
+
+  it.each([
+    "PMP certification? No.",
+    "是否持有 PMP？否。"
+  ])("never auto-verifies an exact confirmed question-answer denial: %s", async (text) => {
+    const candidate = fact({ value: "PMP", evidence: [pdfEvidence(text)] });
 
     const decision = await createRagService({ repository: repositoryWithExact(candidate) }).resolveField(pmpRequest);
 
