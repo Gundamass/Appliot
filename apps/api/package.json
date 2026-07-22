@@ -13,6 +13,7 @@
     "@resume/contracts": "workspace:*",
     "@resume/model-provider": "workspace:*",
     "@resume/profile-domain": "workspace:*",
+    "@resume/rag": "workspace:*",
     "better-sqlite3": "11.10.0",
     "drizzle-orm": "0.44.2",
     "fastify": "5.5.0",

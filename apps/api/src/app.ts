@@ -7,10 +7,13 @@ import { sendError } from "./http-response.js";
 import { MAX_PDF_BYTES } from "./profile/import-service.js";
 import { type ProfileRepository } from "./profile/profile-repository.js";
 import { registerProfileRoutes } from "./profile/profile-routes.js";
+import { createSelfEvaluationReviewRepository, type SelfEvaluationReviewRepository } from "./reviews/review-repository.js";
+import { registerReviewRoutes } from "./reviews/review-routes.js";
 
 export interface AppDependencies {
   database: SqliteDatabase;
   profileRepository: ProfileRepository;
+  reviewRepository?: SelfEvaluationReviewRepository;
   extractPdf(bytes: Uint8Array): Promise<ExtractedDocument>;
   extractFacts(document: ExtractedDocument): Promise<ProfileFact[]>;
   close?(): void | Promise<void>;
@@ -30,5 +33,9 @@ export async function createApp(dependencies: AppDependencies) {
     return sendError(reply, statusCode, statusCode === 400 ? "Invalid request" : "Internal server error");
   });
   registerProfileRoutes(app, dependencies);
+  registerReviewRoutes(app, {
+    profileRepository: dependencies.profileRepository,
+    reviewRepository: dependencies.reviewRepository ?? createSelfEvaluationReviewRepository(dependencies.database)
+  });
   return app;
 }

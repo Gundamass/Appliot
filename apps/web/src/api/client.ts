@@ -2,6 +2,8 @@ import {
   DocumentResponseSchema,
   ErrorResponseSchema,
   ProfileFactSchema,
+  SelfEvaluationDraftSchema,
+  type SelfEvaluationDraft,
   type ProfileFact
 } from "@resume/contracts";
 import { z } from "zod";
@@ -46,6 +48,24 @@ export function createProfileApi(baseUrl = ""): ProfileApi {
       });
       return ProfileFactSchema.parse(await readResponse(response));
     }
+  };
+}
+
+export interface SelfEvaluationReviewApi {
+  create(draft: SelfEvaluationDraft): Promise<SelfEvaluationDraft>;
+  get(taskId: string): Promise<SelfEvaluationDraft>;
+  approve(taskId: string, editedDraft?: string): Promise<SelfEvaluationDraft>;
+  promote(taskId: string, profileFactId: string): Promise<SelfEvaluationDraft>;
+}
+
+export function createSelfEvaluationReviewApi(baseUrl = ""): SelfEvaluationReviewApi {
+  const path = (taskId: string) => `${baseUrl}/api/reviews/self-evaluations/${encodeURIComponent(taskId)}`;
+  const send = async (url: string, init: RequestInit): Promise<SelfEvaluationDraft> => SelfEvaluationDraftSchema.parse(await readResponse(await fetch(url, init)));
+  return {
+    create(draft) { return send(path(draft.taskId), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draft }) }); },
+    get(taskId) { return send(path(taskId), { method: "GET" }); },
+    approve(taskId, editedDraft) { return send(`${path(taskId)}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(editedDraft === undefined ? {} : { editedDraft }) }); },
+    promote(taskId, profileFactId) { return send(`${path(taskId)}/promote`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profileFactId }) }); }
   };
 }
 

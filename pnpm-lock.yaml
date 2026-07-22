@@ -49,6 +49,9 @@ importers:
       '@resume/profile-domain':
         specifier: workspace:*
         version: link:../../packages/profile-domain
+      '@resume/rag':
+        specifier: workspace:*
+        version: link:../../packages/rag
       better-sqlite3:
         specifier: 11.10.0
         version: 11.10.0(patch_hash=c249b157a8d8cd37ab13342546365de581e55c48c5e2192d2a557974c40f2b27)
@@ -147,6 +150,9 @@ importers:
       '@resume/model-provider':
         specifier: workspace:*
         version: link:../model-provider
+      zod:
+        specifier: 3.25.67
+        version: 3.25.67
 
 packages:
 

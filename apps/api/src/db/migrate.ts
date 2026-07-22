@@ -72,6 +72,14 @@ export function migrateDatabase(database: SqliteDatabase): void {
     );
     CREATE INDEX IF NOT EXISTS application_answers_task_field_idx ON application_answers(task_id, field_path);
 
+    CREATE TABLE IF NOT EXISTS self_evaluation_reviews (
+      task_id TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      status TEXT NOT NULL CHECK (status IN ('needs_review', 'approved', 'blocked', 'promoted')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
     CREATE TABLE IF NOT EXISTS embeddings (
       id TEXT PRIMARY KEY,
       document_chunk_id TEXT NOT NULL REFERENCES document_chunks(id),

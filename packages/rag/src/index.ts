@@ -26,6 +26,7 @@ export { planField } from "./planner.js";
 export { retrieveCandidates } from "./retriever.js";
 export { verifyField, evidenceSupportsValue, validateFieldValue } from "./verifier.js";
 export { buildQuestion, type QuestionReason } from "./questions.js";
+export { tailorSelfEvaluation, validateEditedSelfEvaluation, type TailorSelfEvaluationInput } from "./self-evaluation.js";
 export type {
   FieldAnswer,
   FieldDecision,

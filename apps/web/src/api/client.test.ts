@@ -1,6 +1,6 @@
-import { ProfileFactSchema } from "@resume/contracts";
+import { ProfileFactSchema, SelfEvaluationDraftSchema } from "@resume/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createProfileApi } from "./client.js";
+import { createProfileApi, createSelfEvaluationReviewApi } from "./client.js";
 
 const fact = ProfileFactSchema.parse({
   id: "fact-1",
@@ -78,5 +78,38 @@ describe("ProfileApi HTTP contract", () => {
 
     await expect(createProfileApi().upload(new File(["%PDF"], "resume.pdf", { type: "application/pdf" })))
       .rejects.toThrow("Document already imported");
+  });
+});
+
+describe("SelfEvaluationReviewApi HTTP contract", () => {
+  const review = SelfEvaluationDraftSchema.parse({
+    taskId: "task-1", original: "Original", draft: "Tailored", reasons: ["React emphasis"],
+    evidence: [{ documentId: "user", page: 1, text: "Confirmed React", extraction: "user" }], unsupportedClaims: [], status: "needs_review"
+  });
+
+  it("creates and approves a stored review with strict request bodies", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => new Response(JSON.stringify({ ...review, status: "approved" }), {
+      status: 200, headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createSelfEvaluationReviewApi();
+
+    await api.create(review);
+    await api.approve("task-1", "Edited");
+
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ draft: review });
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({ editedDraft: "Edited" });
+  });
+
+  it("parses review responses and keeps promotion separate", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ...review, status: "approved" }), {
+      status: 200, headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createSelfEvaluationReviewApi().promote("task/1", "profile-1");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/reviews/self-evaluations/task%2F1/promote", expect.objectContaining({ method: "POST" }));
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ profileFactId: "profile-1" });
   });
 });
