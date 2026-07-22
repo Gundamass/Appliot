@@ -84,11 +84,9 @@ export function validateFieldValue(request: FieldRequest, plan: RetrievalPlan, v
 }
 
 export function evidenceSupportsValue(value: JsonValue, evidence: Evidence[]): boolean {
-  if (evidence.length === 0) return false;
-  const required = supportStrings(value);
-  if (required.length === 0) return false;
-  const sourceText = evidence.map((item) => normalize(item.text)).join("\n");
-  return required.every((item) => sourceText.includes(normalize(item)));
+  return evidence.some((item) => item.extraction === "user"
+    ? userEvidenceSupportsValue(value, item.text)
+    : documentEvidenceSupportsValue(value, item.text));
 }
 
 function validateCandidate(
@@ -98,7 +96,9 @@ function validateCandidate(
 ): { candidate: RetrievedCandidate; valid: boolean } {
   const fact = candidate.fact;
   const lifecycleValid = fact.status !== "superseded";
-  const scopeValid = fact.scope === "profile" || fact.taskId === request.taskId;
+  const scopeValid = fact.scope === "profile"
+    ? fact.taskId === undefined
+    : fact.taskId === request.taskId;
   const valueValid = validateFieldValue(request, plan, fact.value) === undefined;
   const supported = evidenceSupportsValue(fact.value, fact.evidence);
   return { candidate, valid: lifecycleValid && scopeValid && valueValid && supported };
@@ -158,16 +158,49 @@ function validateRules(value: JsonValue, validators: string[]): string | undefin
   return undefined;
 }
 
-function supportStrings(value: JsonValue): string[] {
-  if (typeof value === "string") return value.trim().length === 0 ? [] : [value];
-  if (typeof value === "boolean" || typeof value === "number") return [String(value)];
-  if (value === null) return ["null"];
-  if (Array.isArray(value)) return value.flatMap(supportStrings);
-  return Object.values(value).flatMap(supportStrings);
+function userEvidenceSupportsValue(value: JsonValue, text: string): boolean {
+  const encoded = JSON.stringify(value);
+  const focused = text.trim();
+  if (focused === encoded) return true;
+  if (typeof value === "string" && focused === value) return true;
+  return focused === `Corrected value: ${encoded}`;
+}
+
+function documentEvidenceSupportsValue(value: JsonValue, text: string): boolean {
+  if (typeof value !== "string" || value.trim().length === 0) return false;
+  const source = normalize(text);
+  const term = normalize(value);
+  let start = source.indexOf(term);
+  while (start >= 0) {
+    const end = start + term.length;
+    if (hasTokenBoundaries(source, start, end) && !hasNearbyNegation(source, start, end)) return true;
+    start = source.indexOf(term, start + 1);
+  }
+  return false;
+}
+
+function hasTokenBoundaries(source: string, start: number, end: number): boolean {
+  const term = source.slice(start, end);
+  const startsAsciiWord = isAsciiWord(term[0]);
+  const endsAsciiWord = isAsciiWord(term.at(-1));
+  return (!startsAsciiWord || !isAsciiWord(source[start - 1]))
+    && (!endsAsciiWord || !isAsciiWord(source[end]));
+}
+
+function isAsciiWord(character: string | undefined): boolean {
+  return character !== undefined && /[a-z0-9_]/.test(character);
+}
+
+function hasNearbyNegation(source: string, start: number, end: number): boolean {
+  const before = source.slice(Math.max(0, start - 32), start);
+  const after = source.slice(end, Math.min(source.length, end + 32));
+  const precedingNegation = /(?:\b(?:no|not|never|without|lacks?|does\s+not|do\s+not|did\s+not|has\s+not|have\s+not|cannot|can't)\b[^.!?;，。！？；]{0,20}|(?:未持有|未获得|未通过|没有|不具备|并无|无)[^，。！？；]{0,12})$/;
+  const followingContradiction = /^(?:[^.!?;，。！？；]{0,20}\b(?:no|not|false|absent|none)\b|[^，。！？；]{0,12}(?:否|没有|未持有|不具备|无))/;
+  return precedingNegation.test(before) || followingContradiction.test(after);
 }
 
 function normalize(value: string): string {
-  return value.trim().toLocaleLowerCase().replace(/\s+/g, " ");
+  return value.trim().toLowerCase().replace(/\s+/g, " ");
 }
 
 function uniqueCandidateValues(candidates: RetrievedCandidate[]): JsonValue[] {

@@ -56,16 +56,28 @@ export async function retrieveCandidates(
     return { candidates: [], invalidReason: "keyword search returned a malformed response" };
   }
 
-  const candidates: RetrievedCandidate[] = [];
-  const seen = new Set<string>();
+  const parsedResults: ProfileFact[] = [];
+  const seen = new Map<string, string>();
   for (const result of searchResults) {
     const parsed = parseCandidate(result);
     if (!parsed.success) return { candidates: [], invalidReason: parsed.reason };
-    if (!isVisibleToTask(parsed.fact, request.taskId) || parsed.fact.status === "superseded") continue;
-    if (seen.has(parsed.fact.id)) continue;
-    seen.add(parsed.fact.id);
-    candidates.push({ fact: parsed.fact, source: "keyword", score: 0 });
+    const payload = canonicalJson(parsed.fact);
+    const previous = seen.get(parsed.fact.id);
+    if (previous !== undefined && previous !== payload) {
+      return { candidates: [], invalidReason: "keyword search returned conflicting duplicate fact IDs" };
+    }
+    if (previous !== undefined) continue;
+    seen.set(parsed.fact.id, payload);
+    parsedResults.push(parsed.fact);
   }
+
+  if (parsedResults.some((fact) => fact.scope === "profile" && fact.taskId !== undefined)) {
+    return { candidates: [], invalidReason: "keyword search returned a malformed profile scope" };
+  }
+
+  const visible = parsedResults.filter((fact) => isVisibleToTask(fact, request.taskId) && fact.status !== "superseded");
+  const candidates = retainLifecyclePrecedence(visible, request.taskId)
+    .map((fact): RetrievedCandidate => ({ fact, source: "keyword", score: 0 }));
 
   if (!plan.strategy.includes("embedding") || candidates.length === 0 || !dependencies.modelProvider) {
     return { candidates };
@@ -86,12 +98,16 @@ export async function retrieveCandidates(
   if (invalidReason) return { candidates: [], invalidReason };
 
   const queryVector = vectors[0]!;
-  const ranked = candidates
+  const scored = candidates
     .map((candidate, index) => ({
       ...candidate,
       score: cosineSimilarity(queryVector, vectors[index + 1]!),
       originalIndex: index
-    }))
+    }));
+  if (scored.some(({ score }) => !Number.isFinite(score) || score < -1 || score > 1)) {
+    return { candidates: [], invalidReason: "embedding similarity score is invalid" };
+  }
+  const ranked = scored
     .sort((left, right) => right.score - left.score || left.originalIndex - right.originalIndex || left.fact.id.localeCompare(right.fact.id))
     .map(({ originalIndex: _originalIndex, ...candidate }) => candidate);
 
@@ -119,7 +135,33 @@ function parseCandidate(candidate: unknown):
 }
 
 function isVisibleToTask(fact: ProfileFact, taskId: string): boolean {
-  return fact.scope === "profile" || fact.taskId === taskId;
+  return fact.scope === "profile"
+    ? fact.taskId === undefined
+    : fact.taskId === taskId;
+}
+
+function retainLifecyclePrecedence(facts: ProfileFact[], taskId: string): ProfileFact[] {
+  const bestBySemantic = new Map<string, number>();
+  for (const fact of facts) {
+    const priority = lifecyclePriority(fact, taskId);
+    const current = bestBySemantic.get(fact.fieldPath);
+    if (current === undefined || priority < current) bestBySemantic.set(fact.fieldPath, priority);
+  }
+  return facts.filter((fact) => lifecyclePriority(fact, taskId) === bestBySemantic.get(fact.fieldPath));
+}
+
+function lifecyclePriority(fact: ProfileFact, taskId: string): number {
+  if (fact.scope === "application" && fact.taskId === taskId) return 0;
+  if (fact.status === "user_corrected") return 1;
+  if (fact.status === "user_confirmed") return 2;
+  return 3;
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
 function validateEmbeddings(vectors: unknown, expectedCount: number): string | undefined {
@@ -137,15 +179,23 @@ function validateEmbeddings(vectors: unknown, expectedCount: number): string | u
 }
 
 function cosineSimilarity(left: number[], right: number[]): number {
+  const leftScale = maxAbsolute(left);
+  const rightScale = maxAbsolute(right);
   let dot = 0;
   let leftMagnitude = 0;
   let rightMagnitude = 0;
   for (let index = 0; index < left.length; index += 1) {
-    const leftValue = left[index]!;
-    const rightValue = right[index]!;
+    const leftValue = left[index]! / leftScale;
+    const rightValue = right[index]! / rightScale;
     dot += leftValue * rightValue;
     leftMagnitude += leftValue * leftValue;
     rightMagnitude += rightValue * rightValue;
   }
-  return dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude));
+  return Math.max(-1, Math.min(1, dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude))));
+}
+
+function maxAbsolute(vector: number[]): number {
+  let maximum = 0;
+  for (const value of vector) maximum = Math.max(maximum, Math.abs(value));
+  return maximum;
 }
