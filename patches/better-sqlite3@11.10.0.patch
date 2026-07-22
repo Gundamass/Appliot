@@ -7,7 +7,53 @@ index 59fdbb318f0c957569276efe407cd73ad05d5a42..9ceee08f1752720dffed434f6d7911d1
    },
    "scripts": {
 -    "install": "prebuild-install || node-gyp rebuild --release",
-+    "install": "prebuild-install || node \"%INIT_CWD%\\scripts\\native-build-wrapper.cjs\" \"%INIT_CWD%\" \"%CD%\"",
++    "install": "prebuild-install || node scripts/resume-native-build.cjs",
      "build-release": "node-gyp rebuild --release",
      "build-debug": "node-gyp rebuild --debug",
      "rebuild-release": "npm run lzz && npm run build-release",
+diff --git a/scripts/resume-native-build.cjs b/scripts/resume-native-build.cjs
+new file mode 100644
+index 0000000000000000000000000000000000000000..87c3889d543dbec0085217d27465bd2c7873cdbc
+--- /dev/null
++++ b/scripts/resume-native-build.cjs
+@@ -0,0 +1,40 @@
++const { existsSync, readFileSync } = require("node:fs");
++const path = require("node:path");
++
++function isWorkspaceRoot(directory, { paths, exists, readFile }) {
++  const workspaceFile = paths.join(directory, "pnpm-workspace.yaml");
++  const packageFile = paths.join(directory, "package.json");
++  if (!exists(workspaceFile) || !exists(packageFile)) return false;
++
++  try {
++    return JSON.parse(readFile(packageFile, "utf8")).name === "resume-application-assistant";
++  } catch {
++    return false;
++  }
++}
++
++function findWorkspaceRoot(startDirectory, { paths = path, exists = existsSync, readFile = readFileSync } = {}) {
++  let directory = paths.resolve(startDirectory);
++  while (true) {
++    if (isWorkspaceRoot(directory, { paths, exists, readFile })) return directory;
++    const parent = paths.dirname(directory);
++    if (parent === directory) {
++      throw new Error("could not find the resume-application-assistant workspace root");
++    }
++    directory = parent;
++  }
++}
++
++function runBootstrap({ startDirectory = process.cwd(), loadWrapper = require } = {}) {
++  const packageDirectory = path.resolve(startDirectory);
++  const repositoryRoot = findWorkspaceRoot(packageDirectory);
++  const wrapperPath = path.join(repositoryRoot, "scripts", "native-build-wrapper.cjs");
++  const { runNativeBuild } = loadWrapper(wrapperPath);
++  return runNativeBuild({ repositoryRoot, packageDirectory });
++}
++
++module.exports = { findWorkspaceRoot, runBootstrap };
++
++if (require.main === module) {
++  process.exitCode = runBootstrap();
++}
