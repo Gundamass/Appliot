@@ -1,0 +1,14 @@
+{
+  "name": "@resume/profile-domain",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p ../../tsconfig.json",
+    "build": "tsc --noEmit -p ../../tsconfig.json"
+  },
+  "dependencies": {
+    "@napi-rs/canvas": "0.1.70",
+    "pdfjs-dist": "5.3.31"
+  }
+}
