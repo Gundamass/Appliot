@@ -254,3 +254,44 @@ Concern: none.
 - `corepack pnpm typecheck`: passed.
 - `corepack pnpm build`: passed; Vite emitted the Web production assets and esbuild emitted `apps/api/dist/server.js`.
 - `git diff --check`: passed; Git emitted only the repository's existing LF-to-CRLF checkout warnings.
+
+## Launch Follow-up After `c74cf14`
+
+Independent direct execution found that the emitted API artifact still performed an undeclared runtime package lookup. The bundled profile-domain extractor called `createRequire(import.meta.url).resolve("pdfjs-dist/legacy/build/pdf.mjs")` to locate PDF.js `standard_fonts`, but `@resume/api` did not declare `pdfjs-dist`; the earlier launch test also rejected only `ERR_MODULE_NOT_FOUND`, not CommonJS `MODULE_NOT_FOUND` or `Cannot find module`.
+
+Changed files:
+
+- `apps/api/package.json`
+- `apps/api/src/server-launch.test.ts`
+- `pnpm-lock.yaml`
+- `.superpowers/sdd/progress.md`
+- `.superpowers/sdd/final-review-fix-report.md`
+
+RED:
+
+- Direct command from repository root: `node apps/api/dist/server.js`
+- Direct command from `apps/api`: `node dist/server.js`
+- Result for both: exit 1 before the intentional guard with `Error: Cannot find module 'pdfjs-dist/legacy/build/pdf.mjs'`, code `MODULE_NOT_FOUND`, originating from `apps/api/dist/server.js`.
+- Focused command: `corepack pnpm --filter @resume/api exec vitest run src/server-launch.test.ts`
+- Result: 1 failed. The strengthened test builds once, removes `NODE_PATH`, launches both literal direct-command paths, requires the intentional missing-adapter message, and rejects `MODULE_NOT_FOUND`, `ERR_MODULE_NOT_FOUND`, and `Cannot find module`.
+
+GREEN:
+
+- Minimal fix: add `pdfjs-dist@5.3.31` as an `@resume/api` runtime dependency and externalize `pdfjs-dist/*` from the API bundle. This keeps executable PDF.js code and its runtime-resolved `standard_fonts` resources in the same declared/deployable package.
+- Install command: `corepack pnpm install` completed successfully and created `apps/api/node_modules/pdfjs-dist`.
+- Focused command: `corepack pnpm --filter @resume/api exec vitest run src/server-launch.test.ts`
+- Result: 1 test passed; both sanitized direct launches reached `Local PDF and fact extraction dependencies must be configured before starting the API` without a module-resolution failure.
+- Direct command from repository root: `node apps/api/dist/server.js`
+- Direct command from `apps/api`: `node dist/server.js`
+- Result for both: intentional exit 1 at `createProductionDependencies` with the missing extraction-adapter message; no `MODULE_NOT_FOUND` or `Cannot find module` output.
+
+Concern: none beyond the intentional absence of concrete production extraction adapters, which must continue to fail before listening.
+
+### Follow-up Final Verification
+
+- `corepack pnpm test`: passed, 337 tests across 26 test files; API 74, Web 58, contracts 9, model provider 2, profile domain 15, and RAG 179.
+- `corepack pnpm typecheck`: passed.
+- `corepack pnpm build`: passed; the API build externalized `pdfjs-dist/*` and emitted `apps/api/dist/server.js` (210.9 kB).
+- From repository root, `node apps/api/dist/server.js`: intentional exit 1 with `Local PDF and fact extraction dependencies must be configured before starting the API`; no module-resolution failure.
+- From `apps/api`, `node dist/server.js`: intentional exit 1 with the same missing-adapter guard; no module-resolution failure.
+- `git diff --check`: passed; only the repository's LF-to-CRLF checkout warnings were emitted.

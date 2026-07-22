@@ -64,6 +64,9 @@ importers:
       fastify:
         specifier: 5.5.0
         version: 5.5.0
+      pdfjs-dist:
+        specifier: 5.3.31
+        version: 5.3.31
       zod:
         specifier: 3.25.67
         version: 3.25.67

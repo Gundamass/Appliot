@@ -5,7 +5,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p ../../tsconfig.json",
-    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.js --external:@napi-rs/canvas --external:better-sqlite3 --external:drizzle-orm --external:drizzle-orm/* --external:fastify --external:@fastify/*",
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.js --external:@napi-rs/canvas --external:better-sqlite3 --external:drizzle-orm --external:drizzle-orm/* --external:fastify --external:@fastify/* --external:pdfjs-dist/*",
     "start": "node dist/server.js"
   },
   "dependencies": {
@@ -19,6 +19,7 @@
     "better-sqlite3": "11.10.0",
     "drizzle-orm": "0.44.2",
     "fastify": "5.5.0",
+    "pdfjs-dist": "5.3.31",
     "zod": "3.25.67"
   },
   "devDependencies": {
