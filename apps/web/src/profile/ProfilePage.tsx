@@ -11,6 +11,7 @@ type Category = typeof CATEGORY_ORDER[number];
 type UploadState = "idle" | "uploading" | "accepted_refreshing" | "success" | "accepted_refresh_error" | "error";
 type ReadResult = "success" | "error" | "stale";
 type FocusControl = "modify" | "evidence";
+type AcceptedUploadPhase = "none" | "refreshing" | "error" | "success";
 
 const CATEGORY_ORDER = [
   "basic", "education", "work", "projects", "skills", "certificates", "links", "self", "preferences", "other"
@@ -65,6 +66,7 @@ export function ProfilePage({ api }: ProfilePageProps) {
   const operationSequence = useRef(0);
   const uploadOwner = useRef<number | null>(null);
   const acceptedUploadOwner = useRef<number | null>(null);
+  const acceptedUploadPhase = useRef<AcceptedUploadPhase>("none");
   const mutationOwner = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const reviewTitleRef = useRef<HTMLHeadingElement>(null);
@@ -72,6 +74,14 @@ export function ProfilePage({ api }: ProfilePageProps) {
   const evidenceButtonRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const isCurrentContext = useCallback((context: number) => contextGeneration.current === context, []);
+
+  const settleAcceptedUploadSuccess = useCallback((context: number) => {
+    if (!isCurrentContext(context) || acceptedUploadOwner.current === null) return;
+    if (acceptedUploadPhase.current !== "refreshing" && acceptedUploadPhase.current !== "error") return;
+    acceptedUploadPhase.current = "success";
+    setUploadState("success");
+    setUploadMessage("简历已导入，资料已刷新");
+  }, [isCurrentContext]);
 
   const requestFacts = useCallback(async (
     requestApi: ProfileApi,
@@ -89,6 +99,7 @@ export function ProfilePage({ api }: ProfilePageProps) {
       if (!isCurrentContext(context) || readGeneration.current !== request) return "stale";
       setFacts(nextFacts);
       setLoadError(false);
+      settleAcceptedUploadSuccess(context);
       return "success";
     } catch {
       if (!isCurrentContext(context) || readGeneration.current !== request) return "stale";
@@ -97,9 +108,10 @@ export function ProfilePage({ api }: ProfilePageProps) {
     } finally {
       if (foreground && isCurrentContext(context) && readGeneration.current === request) setLoading(false);
     }
-  }, [isCurrentContext]);
+  }, [isCurrentContext, settleAcceptedUploadSuccess]);
 
   const loadFacts = useCallback(async () => {
+    if (acceptedUploadPhase.current === "refreshing") return;
     await requestFacts(api, contextGeneration.current, true);
   }, [api, requestFacts]);
 
@@ -108,6 +120,7 @@ export function ProfilePage({ api }: ProfilePageProps) {
     readGeneration.current += 1;
     uploadOwner.current = null;
     acceptedUploadOwner.current = null;
+    acceptedUploadPhase.current = "none";
     mutationOwner.current = null;
     setFacts([]);
     setLoading(true);
@@ -127,6 +140,7 @@ export function ProfilePage({ api }: ProfilePageProps) {
       readGeneration.current += 1;
       uploadOwner.current = null;
       acceptedUploadOwner.current = null;
+      acceptedUploadPhase.current = "none";
       mutationOwner.current = null;
     };
   }, [api, requestFacts]);
@@ -150,7 +164,7 @@ export function ProfilePage({ api }: ProfilePageProps) {
   };
 
   const confirmFact = async (fact: ProfileFact) => {
-    if (mutationOwner.current !== null || uploadOwner.current !== null) return;
+    if (mutationOwner.current !== null || uploadOwner.current !== null || acceptedUploadPhase.current === "refreshing") return;
     readGeneration.current += 1;
     const context = contextGeneration.current;
     const owner = ++operationSequence.current;
@@ -174,7 +188,7 @@ export function ProfilePage({ api }: ProfilePageProps) {
   };
 
   const correctFact = async (fact: ProfileFact, value: JsonValue): Promise<boolean> => {
-    if (mutationOwner.current !== null || uploadOwner.current !== null) return false;
+    if (mutationOwner.current !== null || uploadOwner.current !== null || acceptedUploadPhase.current === "refreshing") return false;
     readGeneration.current += 1;
     const context = contextGeneration.current;
     const owner = ++operationSequence.current;
@@ -201,6 +215,9 @@ export function ProfilePage({ api }: ProfilePageProps) {
   };
 
   const selectFile = (file: File | undefined) => {
+    if (acceptedUploadPhase.current === "refreshing") return;
+    acceptedUploadOwner.current = null;
+    acceptedUploadPhase.current = "none";
     setUploadState("idle");
     setUploadMessage(undefined);
     if (!file) {
@@ -220,27 +237,26 @@ export function ProfilePage({ api }: ProfilePageProps) {
       setUploadMessage("浏览器未提供 PDF 文件类型，无法上传");
       return;
     }
-    acceptedUploadOwner.current = null;
     setSelectedFile(file);
   };
 
   const refreshAcceptedUpload = async (owner: number, context: number, requestApi: ProfileApi) => {
     if (!isCurrentContext(context) || acceptedUploadOwner.current !== owner) return;
+    if (acceptedUploadPhase.current === "refreshing") return;
+    acceptedUploadPhase.current = "refreshing";
     setUploadState("accepted_refreshing");
     setUploadMessage("简历已导入，正在刷新资料");
     const result = await requestFacts(requestApi, context, false);
-    if (!isCurrentContext(context) || acceptedUploadOwner.current !== owner || result === "stale") return;
-    if (result === "success") {
-      setUploadState("success");
-      setUploadMessage("简历已导入，资料已刷新");
-    } else {
+    if (!isCurrentContext(context) || acceptedUploadOwner.current !== owner) return;
+    if (result !== "success" && acceptedUploadPhase.current === "refreshing") {
+      acceptedUploadPhase.current = "error";
       setUploadState("accepted_refresh_error");
       setUploadMessage("简历已导入，但资料刷新失败");
     }
   };
 
   const uploadFile = async () => {
-    if (!selectedFile || uploadOwner.current !== null || mutationOwner.current !== null) return;
+    if (!selectedFile || uploadOwner.current !== null || mutationOwner.current !== null || acceptedUploadPhase.current === "refreshing") return;
     readGeneration.current += 1;
     setLoading(false);
     setLoadError(false);
@@ -262,6 +278,7 @@ export function ProfilePage({ api }: ProfilePageProps) {
       if (!isCurrentContext(context) || uploadOwner.current !== owner) return;
       setUploadState("error");
       setUploadMessage("上传失败，请检查文件后重试");
+      acceptedUploadPhase.current = "none";
       uploadOwner.current = null;
     }
   };
@@ -285,8 +302,9 @@ export function ProfilePage({ api }: ProfilePageProps) {
   }, [facts, filter]);
 
   const uploading = uploadState === "uploading";
+  const acceptedRefreshing = uploadState === "accepted_refreshing";
   const mutationBusy = busy !== undefined;
-  const controlsLocked = uploading || mutationBusy;
+  const controlsLocked = uploading || acceptedRefreshing || mutationBusy;
 
   return (
     <div className="app-shell">
@@ -451,6 +469,7 @@ export function ProfilePage({ api }: ProfilePageProps) {
                                   type="button"
                                   disabled={controlsLocked}
                                   onClick={() => {
+                                    if (acceptedUploadPhase.current === "refreshing") return;
                                     setEditingId(fact.id);
                                     setFactErrors((errors) => ({ ...errors, [fact.id]: "" }));
                                   }}

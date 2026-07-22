@@ -190,3 +190,71 @@ packages/contracts/src/profile.ts:87:export type DecisionStatus = z.infer<typeof
 ```
 
 `DocumentResponseSchema` and `ErrorResponseSchema` now have one shared owner in `@resume/contracts`; `DecisionStatus` remains separate and is not part of `ProfileFact`.
+
+## Final Re-review Fix
+
+### RED
+
+The accepted-upload ownership regressions failed before the phase-state fix:
+
+```text
+corepack pnpm --filter @resume/web exec vitest run src/profile/ProfilePage.test.tsx --reporter=dot
+
+Test Files  1 failed (1)
+Tests       2 failed | 35 passed (37)
+
+FAIL PDF upload > blocks competing refresh and fact mutations while the accepted upload read is pending
+Error: expect(element).toBeDisabled()
+Received element is not disabled:
+  <button aria-label="刷新资料" class="icon-button" title="刷新资料" type="button" />
+
+FAIL PDF upload > settles an accepted refresh error after a successful global facts refresh
+TestingLibraryElementError: Unable to find an element with the text: 简历已导入，资料已刷新.
+```
+
+The direct upload-owned completion regression passed in the same RED run, isolating the defect to competing-read ownership and stale accepted-error settlement.
+
+### GREEN
+
+After adding the synchronous accepted-upload phase owner and settling outstanding accepted phases from any current successful facts read:
+
+```text
+corepack pnpm --filter @resume/web exec vitest run src/profile/ProfilePage.test.tsx --reporter=dot
+
+Test Files  1 passed (1)
+Tests       37 passed (37)
+Exit code: 0
+```
+
+The accepted-error retry remains a `listFacts` request only; regression coverage asserts `upload` is called exactly once across failure and later retry/refresh.
+
+### Final Verification
+
+```text
+corepack pnpm --filter @resume/web test
+Test Files  2 passed (2)
+Tests       42 passed (42)
+Exit code: 0
+
+corepack pnpm --filter @resume/web typecheck
+Exit code: 0
+
+corepack pnpm --filter @resume/web build
+1792 modules transformed
+vite built in 240ms
+Exit code: 0
+
+corepack pnpm test
+Workspace tests: 112 passed across contracts, model-provider, profile-domain, web, and API
+Exit code: 0
+
+corepack pnpm typecheck
+Exit code: 0
+
+corepack pnpm build
+All 5 participating workspace projects built successfully
+Exit code: 0
+
+git diff --check
+Exit code: 0
+```

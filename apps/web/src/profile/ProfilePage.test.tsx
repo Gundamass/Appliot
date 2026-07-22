@@ -618,6 +618,82 @@ describe("PDF upload", () => {
     expect(api.listFacts).toHaveBeenCalledTimes(3);
   });
 
+  it("blocks competing refresh and fact mutations while the accepted upload read is pending", async () => {
+    const uploadRefresh = deferred<ProfileFact[]>();
+    const existingFact = makeFact();
+    const importedFact = makeFact({ id: "imported", fieldPath: "basics.name", value: "Ada" });
+    const api = fakeProfileApi([existingFact]);
+    vi.mocked(api.listFacts).mockResolvedValueOnce([existingFact]).mockReturnValueOnce(uploadRefresh.promise);
+    const user = userEvent.setup();
+    render(<ProfilePage api={api} />);
+    const row = await screen.findByTestId("fact-fact-email");
+    const refreshButton = screen.getByRole("button", { name: "刷新资料" });
+    const confirmButton = within(row).getByRole("button", { name: "确认" });
+
+    await user.upload(screen.getByLabelText("选择 PDF 简历"), new File(["%PDF"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(screen.getByRole("button", { name: "上传并提取" }));
+    expect(await screen.findByText("简历已导入，正在刷新资料")).toBeVisible();
+
+    expect(refreshButton).toBeDisabled();
+    expect(confirmButton).toBeDisabled();
+    expect(within(row).getByRole("button", { name: "修改" })).toBeDisabled();
+    expect(screen.getByLabelText("选择 PDF 简历")).toBeDisabled();
+
+    act(() => {
+      refreshButton.removeAttribute("disabled");
+      confirmButton.removeAttribute("disabled");
+      refreshButton.click();
+      confirmButton.click();
+    });
+    expect(api.listFacts).toHaveBeenCalledTimes(2);
+    expect(api.confirm).not.toHaveBeenCalled();
+
+    uploadRefresh.resolve([existingFact, importedFact]);
+    expect(await screen.findByText("简历已导入，资料已刷新")).toBeVisible();
+  });
+
+  it("settles an accepted refresh error after a successful global facts refresh", async () => {
+    const importedFact = makeFact({ id: "imported", fieldPath: "basics.name", value: "Ada" });
+    const api = fakeProfileApi();
+    vi.mocked(api.listFacts).mockResolvedValueOnce([]).mockRejectedValueOnce(new Error("offline"))
+      .mockResolvedValueOnce([importedFact]);
+    const user = userEvent.setup();
+    render(<ProfilePage api={api} />);
+    await screen.findByText("还没有可审核的资料");
+
+    await user.upload(screen.getByLabelText("选择 PDF 简历"), new File(["%PDF"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(screen.getByRole("button", { name: "上传并提取" }));
+    expect(await screen.findByRole("alert")).toHaveTextContent("简历已导入，但资料刷新失败");
+
+    await user.click(screen.getByRole("button", { name: "刷新资料" }));
+
+    expect(await screen.findByText("Ada")).toBeVisible();
+    expect(screen.getByText("简历已导入，资料已刷新")).toBeVisible();
+    expect(screen.queryByRole("alert")).not.toBeInTheDocument();
+    expect(api.upload).toHaveBeenCalledOnce();
+    expect(api.listFacts).toHaveBeenCalledTimes(3);
+  });
+
+  it("does not leave an accepted upload refreshing after imported facts commit", async () => {
+    const uploadRefresh = deferred<ProfileFact[]>();
+    const importedFact = makeFact({ id: "imported", fieldPath: "basics.name", value: "Ada" });
+    const api = fakeProfileApi();
+    vi.mocked(api.listFacts).mockResolvedValueOnce([]).mockReturnValueOnce(uploadRefresh.promise);
+    const user = userEvent.setup();
+    render(<ProfilePage api={api} />);
+    await screen.findByText("还没有可审核的资料");
+
+    await user.upload(screen.getByLabelText("选择 PDF 简历"), new File(["%PDF"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(screen.getByRole("button", { name: "上传并提取" }));
+    expect(await screen.findByText("简历已导入，正在刷新资料")).toBeVisible();
+
+    uploadRefresh.resolve([importedFact]);
+
+    expect(await screen.findByText("Ada")).toBeVisible();
+    expect(screen.getByText("简历已导入，资料已刷新")).toBeVisible();
+    expect(screen.queryByText("简历已导入，正在刷新资料")).not.toBeInTheDocument();
+  });
+
   it("rejects a PDF extension when the browser provides no application/pdf MIME", async () => {
     const api = fakeProfileApi();
     const user = userEvent.setup({ applyAccept: false });
