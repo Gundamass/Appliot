@@ -2,20 +2,25 @@ import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import type { ProfileFact } from "@resume/contracts";
 import type { ExtractedDocument } from "@resume/profile-domain/src/pdf/types.js";
+import type { ModelProvider } from "@resume/model-provider";
 import type { SqliteDatabase } from "./db/client.js";
 import { sendError } from "./http-response.js";
 import { MAX_PDF_BYTES } from "./profile/import-service.js";
 import { type ProfileRepository } from "./profile/profile-repository.js";
 import { registerProfileRoutes } from "./profile/profile-routes.js";
+import type { OriginalDocumentStore } from "./profile/original-document-store.js";
 import { createSelfEvaluationReviewRepository, type SelfEvaluationReviewRepository } from "./reviews/review-repository.js";
 import { registerReviewRoutes } from "./reviews/review-routes.js";
+import { registerRagRoutes } from "./rag/rag-routes.js";
 
 export interface AppDependencies {
   database: SqliteDatabase;
   profileRepository: ProfileRepository;
+  originalDocumentStore: OriginalDocumentStore;
   reviewRepository?: SelfEvaluationReviewRepository;
   extractPdf(bytes: Uint8Array): Promise<ExtractedDocument>;
   extractFacts(document: ExtractedDocument): Promise<ProfileFact[]>;
+  selfEvaluationModelProvider?: ModelProvider;
   close?(): void | Promise<void>;
 }
 
@@ -33,9 +38,13 @@ export async function createApp(dependencies: AppDependencies) {
     return sendError(reply, statusCode, statusCode === 400 ? "Invalid request" : "Internal server error");
   });
   registerProfileRoutes(app, dependencies);
+  registerRagRoutes(app, dependencies);
   registerReviewRoutes(app, {
     profileRepository: dependencies.profileRepository,
-    reviewRepository: dependencies.reviewRepository ?? createSelfEvaluationReviewRepository(dependencies.database)
+    reviewRepository: dependencies.reviewRepository ?? createSelfEvaluationReviewRepository(dependencies.database),
+    ...(dependencies.selfEvaluationModelProvider === undefined
+      ? {}
+      : { selfEvaluationModelProvider: dependencies.selfEvaluationModelProvider })
   });
   return app;
 }

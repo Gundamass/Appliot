@@ -1,6 +1,6 @@
-import { ProfileFactSchema, SelfEvaluationReviewSchema } from "@resume/contracts";
+import { ProfileFactSchema, RagFieldInspectionSchema, SelfEvaluationReviewSchema } from "@resume/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createProfileApi, createSelfEvaluationReviewApi } from "./client.js";
+import { createProfileApi, createRagApi, createSelfEvaluationReviewApi } from "./client.js";
 
 const fact = ProfileFactSchema.parse({
   id: "fact-1",
@@ -83,7 +83,7 @@ describe("ProfileApi HTTP contract", () => {
 
 describe("SelfEvaluationReviewApi HTTP contract", () => {
   const review = SelfEvaluationReviewSchema.parse({
-    taskId: "task-1", original: "Original", draft: "Tailored", reasons: ["React emphasis"],
+    taskId: "task-1", jobDescription: "React role", original: "Original", draft: "Tailored", reasons: ["React emphasis"],
     evidence: [{ documentId: "user", page: 1, text: "Confirmed React", extraction: "user" }], unsupportedClaims: [], status: "needs_review",
     base: { factId: "self", revision: 1, original: "Original", evidence: [{ documentId: "user", page: 1, text: "Confirmed React", extraction: "user" }] }
   });
@@ -95,10 +95,10 @@ describe("SelfEvaluationReviewApi HTTP contract", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = createSelfEvaluationReviewApi();
 
-    await api.create("task-1", "React role", { draft: "Tailored", reasons: ["React emphasis"], claims: [{ text: "React", kind: "evidence", evidenceFactIds: ["react"] }] });
+    await api.create("task-1", "React role");
     await api.approve("task-1", "Edited");
 
-    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ jobDescription: "React role", draft: { draft: "Tailored", reasons: ["React emphasis"], claims: [{ text: "React", kind: "evidence", evidenceFactIds: ["react"] }] } });
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ jobDescription: "React role" });
     expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({ editedDraft: "Edited" });
   });
 
@@ -112,5 +112,33 @@ describe("SelfEvaluationReviewApi HTTP contract", () => {
 
     expect(fetchMock).toHaveBeenCalledWith("/api/reviews/self-evaluations/task%2F1/promote", expect.objectContaining({ method: "POST" }));
     expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({});
+  });
+});
+
+describe("RagApi HTTP contract", () => {
+  const request = { taskId: "task-1", fieldId: "city", semantic: "preferences.city", label: "Preferred city", type: "text" as const };
+  const inspection = RagFieldInspectionSchema.parse({
+    request,
+    plan: { semantic: "preferences.city", requestType: "text", requiredSources: ["application", "profile"], needsJobDescription: false, autoFillEligible: true, risk: "none", validators: [], strategy: ["exact", "keyword"], valid: true },
+    decision: { fieldId: "city", status: "needs_question", evidence: [], confidence: 0, question: "Which city?", validators: [] }
+  });
+
+  it("resolves and corrects fields with strict server-owned evidence bodies", async () => {
+    const correction = { ...fact, id: "answer", fieldPath: "preferences.city", value: "Shenzhen", status: "user_confirmed", scope: "application", taskId: "task-1" };
+    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => new Response(JSON.stringify(
+      String((init as RequestInit).body).includes("Shenzhen")
+        ? { correction, inspection: { ...inspection, decision: { ...inspection.decision, status: "verified_auto", value: "Shenzhen", question: undefined } } }
+        : inspection
+    ), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createRagApi();
+
+    await api.resolve(request);
+    await api.answer({ ...request, value: "Shenzhen" });
+
+    expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/rag/fields/resolve");
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual(request);
+    expect(fetchMock.mock.calls[1]?.[0]).toBe("/api/rag/fields/answer");
+    expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({ ...request, value: "Shenzhen" });
   });
 });

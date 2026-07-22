@@ -5,15 +5,16 @@ interface SelfEvaluationReviewProps {
   draft: SelfEvaluationReviewModel;
   onApprove(draft: string): Promise<SelfEvaluationReviewModel>;
   onKeepOriginal(): Promise<SelfEvaluationReviewModel>;
+  onPromote?(): Promise<SelfEvaluationReviewModel>;
 }
 
-export function SelfEvaluationReview({ draft, onApprove, onKeepOriginal }: SelfEvaluationReviewProps) {
+export function SelfEvaluationReview({ draft, onApprove, onKeepOriginal, onPromote }: SelfEvaluationReviewProps) {
   const [review, setReview] = useState(draft);
   const [editing, setEditing] = useState(false);
   const [value, setValue] = useState(draft.draft);
-  const [busy, setBusy] = useState<"approve" | "keep">();
+  const [busy, setBusy] = useState<"approve" | "keep" | "promote">();
   const [error, setError] = useState<string>();
-  const [completion, setCompletion] = useState<"adopted" | "kept">();
+  const [completion, setCompletion] = useState<"adopted" | "kept" | "promoted">();
   const editRef = useRef<HTMLTextAreaElement>(null);
   const adoptRef = useRef<HTMLButtonElement>(null);
   const statusRef = useRef<HTMLParagraphElement>(null);
@@ -41,8 +42,20 @@ export function SelfEvaluationReview({ draft, onApprove, onKeepOriginal }: SelfE
     } finally { setBusy(undefined); }
   };
 
+  const promote = async () => {
+    if (!onPromote || busy || !terminal || completion === "promoted") return;
+    setBusy("promote"); setError(undefined);
+    try {
+      setReview(await onPromote());
+      setCompletion("promoted");
+    } catch {
+      setError("Profile promotion failed");
+    } finally { setBusy(undefined); }
+  };
+
   return (
     <section className="self-evaluation-review" aria-label="自我评价审核">
+      <section className="job-provenance" aria-labelledby="job-provenance-title"><h2 id="job-provenance-title">Job description</h2><p>{review.jobDescription}</p></section>
       <div className="self-evaluation-columns">
         <article><h2>原始自我评价</h2><p>{review.original}</p></article>
         <article><h2>岗位微调稿</h2>{editing ? <textarea ref={editRef} aria-label="编辑岗位微调稿" value={value} disabled={busy !== undefined} onChange={(event) => setValue(event.target.value)} /> : <p>{value}</p>}</article>
@@ -53,7 +66,7 @@ export function SelfEvaluationReview({ draft, onApprove, onKeepOriginal }: SelfE
       </div>
       {blocked && <p className="unsupported-claims" role="alert">不支持的声明：{review.unsupportedClaims.join("、")}</p>}
       {error && <p className="inline-error" role="alert">{error}</p>}
-      {terminal && <p ref={statusRef} className="review-status" role="status" tabIndex={-1}>{completion === "kept" ? "已继续使用原文" : "已采用此版本"}</p>}
+      {terminal && <p ref={statusRef} className="review-status" role="status" tabIndex={-1}>{completion === "promoted" ? "Promoted to profile" : completion === "kept" ? "已继续使用原文" : "已采用此版本"}</p>}
       <div className="self-evaluation-actions">
         {!terminal && <>
           {editing ? <button className="button primary" type="button" disabled={blocked || busy !== undefined || value.trim() === ""} onClick={() => void run("approve")}>{busy === "approve" ? "采用中" : "采用编辑稿"}</button> : <button ref={adoptRef} className="button primary" type="button" disabled={blocked || busy !== undefined} onClick={() => void run("approve")}>{busy === "approve" ? "采用中" : "采用此版本"}</button>}
@@ -61,6 +74,7 @@ export function SelfEvaluationReview({ draft, onApprove, onKeepOriginal }: SelfE
           {editing && <button className="button secondary" type="button" disabled={busy !== undefined} onClick={() => { setEditing(false); setValue(review.draft); adoptRef.current?.focus(); }}>取消编辑</button>}
           <button className="button quiet" type="button" disabled={busy !== undefined} onClick={() => void run("keep")}>{busy === "keep" ? "保存中" : "继续使用原文"}</button>
         </>}
+        {terminal && onPromote && completion !== "promoted" && <button className="button secondary" type="button" disabled={busy !== undefined} onClick={() => void promote()}>{busy === "promote" ? "Promoting" : "Promote to profile"}</button>}
       </div>
     </section>
   );

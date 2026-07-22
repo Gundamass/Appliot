@@ -1,8 +1,9 @@
-import { resolve } from "node:path";
+import { dirname, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
 import { createSqliteDatabase } from "./db/client.js";
 import { migrateDatabase } from "./db/migrate.js";
 import { createProfileRepository } from "./profile/profile-repository.js";
+import { createLocalOriginalDocumentStore } from "./profile/original-document-store.js";
 import { createApp, type AppDependencies } from "./app.js";
 
 type ExtractionDependencies = Pick<AppDependencies, "extractPdf" | "extractFacts">;
@@ -24,6 +25,7 @@ export function createProductionDependencies(
     return {
       database,
       profileRepository: createProfileRepository(database),
+      originalDocumentStore: createLocalOriginalDocumentStore(resolve(dirname(resolve(databaseFilename)), "originals")),
       ...extraction,
       close: () => {
         database.close();

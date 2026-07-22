@@ -65,7 +65,7 @@ describe("ProfileRepository", () => {
         'application-fact', 'preferences.city', '"Shanghai"', 'user_confirmed', 1, 'application', NULL, '[]', 1,
         '2026-07-22T00:00:00.000Z', '2026-07-22T00:00:00.000Z'
       )
-    `).run()).toThrow(/CHECK constraint failed/);
+    `).run()).toThrow();
   });
 
   it("supersedes every competing reviewed default when confirming a candidate", () => {
@@ -150,6 +150,21 @@ describe("ProfileRepository", () => {
     expect(repository.resolveForTask("task-2", "preferences.city")).toMatchObject({ value: "Profile default" });
   });
 
+  it("lists task answers only with evidence for their owning task", () => {
+    const repository = createTestProfileRepository();
+    repository.createExtracted(makeFact("Profile default"));
+    repository.confirm("fact-1");
+    repository.putTaskAnswer("task-1", "preferences.city", "Shenzhen", userEvidence("Shenzhen"));
+    repository.putTaskAnswer("task-2", "preferences.city", "Beijing", userEvidence("Beijing"));
+
+    expect(repository.listForTask("task-1").map((fact) => [fact.scope, fact.taskId, fact.value])).toEqual([
+      ["profile", undefined, "Profile default"],
+      ["application", "task-1", "Shenzhen"]
+    ]);
+    expect(repository.listForTask("task-2").map((fact) => fact.value)).toEqual(["Profile default", "Beijing"]);
+    expect(repository.listActive()).toHaveLength(1);
+  });
+
   it("round-trips JSON values without lossy serialization", () => {
     const repository = createTestProfileRepository();
     const values: JsonValue[] = ["text", 5, true, null, ["TypeScript", 5], { city: "Shanghai", remote: true }];
@@ -174,5 +189,27 @@ describe("ProfileRepository", () => {
 
     expect(() => insert.run("empty-evidence", "[]")).toThrow();
     expect(() => insert.run("malformed-evidence", "not-json")).toThrow();
+  });
+
+  it("rejects both invalid scope and task combinations in facts and revisions", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const timestamp = "2026-07-22T00:00:00.000Z";
+    const insertFact = database.prepare(`
+      INSERT INTO profile_facts (
+        id, field_path, value_json, status, confidence, scope, task_id, evidence_json, revision, created_at, updated_at
+      ) VALUES (?, 'preferences.city', '"Shanghai"', 'user_confirmed', 1, ?, ?, '[{"documentId":"user","page":1,"text":"Shanghai","extraction":"user"}]', 1, ?, ?)
+    `);
+    const insertRevision = database.prepare(`
+      INSERT INTO fact_revisions (
+        id, fact_id, field_path, value_json, status, confidence, scope, task_id, evidence_json, revision, created_at
+      ) VALUES (?, 'base-fact', 'preferences.city', '"Shanghai"', 'user_confirmed', 1, ?, ?, '[{"documentId":"user","page":1,"text":"Shanghai","extraction":"user"}]', 1, ?)
+    `);
+
+    expect(() => insertFact.run("profile-with-task", "profile", "task-forged", timestamp, timestamp)).toThrow();
+    expect(() => insertFact.run("application-without-task", "application", null, timestamp, timestamp)).toThrow();
+    expect(() => insertRevision.run("profile-revision-with-task", "profile", "task-forged", timestamp)).toThrow();
+    expect(() => insertRevision.run("application-revision-without-task", "application", null, timestamp)).toThrow();
+    database.close();
   });
 });

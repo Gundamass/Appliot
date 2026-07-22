@@ -1,8 +1,11 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { ProfileFactSchema, type ProfileFact } from "@resume/contracts";
+import { InvalidPdfDocumentError } from "@resume/profile-domain/src/pdf/extract-pdf.js";
 import type { ExtractedDocument } from "@resume/profile-domain/src/pdf/types.js";
 import { z } from "zod";
 import type { ProfileRepository } from "./profile-repository.js";
+import { createDocumentRepository } from "./document-repository.js";
+import type { OriginalDocumentStore } from "./original-document-store.js";
 import type { SqliteDatabase } from "../db/client.js";
 
 export const MAX_PDF_BYTES = 15 * 1024 * 1024;
@@ -10,6 +13,7 @@ export const MAX_PDF_BYTES = 15 * 1024 * 1024;
 export interface ProfileImportDependencies {
   database: SqliteDatabase;
   profileRepository: ProfileRepository;
+  originalDocumentStore: OriginalDocumentStore;
   extractPdf(bytes: Uint8Array): Promise<ExtractedDocument>;
   extractFacts(document: ExtractedDocument): Promise<ProfileFact[]>;
 }
@@ -58,12 +62,45 @@ export async function importProfileDocument(
   filename: string,
   bytes: Uint8Array
 ): Promise<ImportedDocument> {
+  const snapshot = Uint8Array.from(bytes);
+  const fingerprint = createHash("sha256").update(snapshot).digest("hex");
+  const documents = createDocumentRepository(dependencies.database);
+  let retainedDocument = documents.findByFingerprint(fingerprint);
+
+  if (retainedDocument?.importStatus === "completed") throw new DuplicateDocumentError();
+
+  if (!retainedDocument) {
+    const retainedOriginal = await dependencies.originalDocumentStore.retain(fingerprint, snapshot);
+    try {
+      retainedDocument = documents.createRetained({
+        id: randomUUID(),
+        fingerprint,
+        filename,
+        sourcePath: retainedOriginal.path,
+        createdAt: new Date().toISOString()
+      });
+    } catch (error) {
+      retainedDocument = documents.findByFingerprint(fingerprint);
+      if (!retainedDocument) {
+        await dependencies.originalDocumentStore.discardCreated(retainedOriginal);
+        throw new ImportPersistenceError();
+      }
+    }
+  }
+
+  if (retainedDocument.importStatus === "completed" || !documents.claimImport(fingerprint)) {
+    throw new DuplicateDocumentError();
+  }
+
   let document: ExtractedDocument;
   try {
-    document = ExtractedDocumentSchema.parse(await dependencies.extractPdf(bytes));
+    document = ExtractedDocumentSchema.parse(await dependencies.extractPdf(snapshot));
+    if (document.fingerprint !== fingerprint) throw new InvalidExtractionOutputError();
   } catch (error) {
+    documents.markRetained(fingerprint);
     if (error instanceof InvalidPdfError || error instanceof ProfileImportUnavailableError) throw error;
-    if (error instanceof z.ZodError) throw new InvalidExtractionOutputError();
+    if (error instanceof InvalidPdfDocumentError) throw new InvalidPdfError();
+    if (error instanceof z.ZodError || error instanceof InvalidExtractionOutputError) throw new InvalidExtractionOutputError();
     throw error;
   }
 
@@ -72,23 +109,17 @@ export async function importProfileDocument(
     facts = z.array(ExtractedFactSchema).parse(await dependencies.extractFacts(document));
     validateFactEvidence(document, facts);
   } catch (error) {
+    documents.markRetained(fingerprint);
     if (error instanceof ProfileImportUnavailableError) throw error;
     if (!(error instanceof z.ZodError) && !(error instanceof InvalidExtractionOutputError)) throw error;
     throw new InvalidExtractionOutputError();
   }
 
-  const imported = ImportedDocumentSchema.parse({
-    documentId: randomUUID(),
-    fingerprint: document.fingerprint
-  });
+  const imported = ImportedDocumentSchema.parse({ documentId: retainedDocument.id, fingerprint });
   const createdAt = new Date().toISOString();
 
   try {
     return dependencies.database.transaction(() => {
-      dependencies.database.prepare(
-        "INSERT INTO documents (id, fingerprint, filename, created_at) VALUES (?, ?, ?, ?)"
-      ).run(imported.documentId, imported.fingerprint, filename, createdAt);
-
       const insertChunk = dependencies.database.prepare(
         "INSERT INTO document_chunks (id, document_id, page, content, created_at) VALUES (?, ?, ?, ?, ?)"
       );
@@ -96,11 +127,12 @@ export async function importProfileDocument(
         insertChunk.run(randomUUID(), imported.documentId, page.page, page.text, createdAt);
       }
       for (const fact of facts) dependencies.profileRepository.createExtracted(fact);
+      documents.markCompleted(fingerprint);
 
       return imported;
     })();
   } catch (error) {
-    if (isDuplicateFingerprintError(error)) throw new DuplicateDocumentError();
+    documents.markRetained(fingerprint);
     throw new ImportPersistenceError();
   }
 }
@@ -119,8 +151,4 @@ function validateFactEvidence(document: ExtractedDocument, facts: ProfileFact[])
       }
     }
   }
-}
-
-function isDuplicateFingerprintError(error: unknown): boolean {
-  return error instanceof Error && /UNIQUE constraint failed: documents\.fingerprint/.test(error.message);
 }

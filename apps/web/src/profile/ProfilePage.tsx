@@ -1,10 +1,11 @@
 import { SelfEvaluationReviewSchema, type FactStatus, type JsonValue, type ProfileFact, type SelfEvaluationReview as SelfEvaluationReviewModel } from "@resume/contracts";
 import { FileText, RefreshCw, ShieldCheck, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ProfileApi, SelfEvaluationReviewApi } from "../api/client.js";
+import type { ProfileApi, RagApi, SelfEvaluationReviewApi } from "../api/client.js";
 import { EvidenceDrawer } from "./EvidenceDrawer.js";
 import { FactEditor } from "./FactEditor.js";
 import { SelfEvaluationReview } from "../reviews/SelfEvaluationReview.js";
+import { RagWorkspace } from "../rag/RagWorkspace.js";
 
 type ReviewStatus = Exclude<FactStatus, "superseded">;
 type Filter = "all" | ReviewStatus;
@@ -48,9 +49,10 @@ const FILTERS: { value: Filter; label: string }[] = [
 interface ProfilePageProps {
   api: ProfileApi;
   reviewApi?: SelfEvaluationReviewApi;
+  ragApi?: RagApi;
 }
 
-export function ProfilePage({ api, reviewApi }: ProfilePageProps) {
+export function ProfilePage({ api, reviewApi, ragApi }: ProfilePageProps) {
   const [facts, setFacts] = useState<ProfileFact[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -72,8 +74,9 @@ export function ProfilePage({ api, reviewApi }: ProfilePageProps) {
   const mutationOwner = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const reviewTitleRef = useRef<HTMLHeadingElement>(null);
-  const [view, setView] = useState<"profile" | "self-evaluation">("profile");
+  const [view, setView] = useState<"profile" | "self-evaluation" | "rag">("profile");
   const [taskId, setTaskId] = useState("task-1");
+  const [jobDescription, setJobDescription] = useState("");
   const [selfEvaluationReview, setSelfEvaluationReview] = useState<SelfEvaluationReviewModel>();
   const [loadedReviewTaskId, setLoadedReviewTaskId] = useState<string>();
   const reviewLoadGeneration = useRef(0);
@@ -129,6 +132,41 @@ export function ProfilePage({ api, reviewApi }: ProfilePageProps) {
       return next;
     } catch (error) {
       if (reviewActionOwner.current === owner && loadedReviewTaskId === review.taskId) setReviewError("审核操作失败，请重试");
+      throw error;
+    } finally {
+      if (reviewActionOwner.current === owner) { reviewActionOwner.current = null; setReviewActionBusy(false); }
+    }
+  };
+
+  const createSelfEvaluationReview = async () => {
+    const requestedTaskId = taskId.trim();
+    const provenance = jobDescription.trim();
+    if (!reviewApi || reviewActionOwner.current !== null || !requestedTaskId || !provenance) return;
+    const owner = ++reviewLoadGeneration.current;
+    reviewActionOwner.current = owner; setReviewActionBusy(true); setReviewError(undefined);
+    try {
+      const next = acceptReview(await reviewApi.create(requestedTaskId, provenance), requestedTaskId);
+      if (reviewActionOwner.current !== owner) return;
+      setSelfEvaluationReview(next); setLoadedReviewTaskId(requestedTaskId);
+    } catch {
+      if (reviewActionOwner.current === owner) setReviewError("Review creation failed");
+    } finally {
+      if (reviewActionOwner.current === owner) { reviewActionOwner.current = null; setReviewActionBusy(false); }
+    }
+  };
+
+  const promoteLoadedReview = async (): Promise<SelfEvaluationReviewModel> => {
+    const review = selfEvaluationReview;
+    if (!reviewApi || !review || review.status !== "approved" || review.taskId !== loadedReviewTaskId || reviewActionOwner.current !== null) throw new Error("review is unavailable");
+    const owner = ++reviewLoadGeneration.current;
+    reviewActionOwner.current = owner; setReviewActionBusy(true); setReviewError(undefined);
+    try {
+      const next = acceptReview(await reviewApi.promote(review.taskId), review.taskId);
+      if (reviewActionOwner.current !== owner) throw new Error("review changed");
+      setSelfEvaluationReview(next);
+      return next;
+    } catch (error) {
+      if (reviewActionOwner.current === owner) setReviewError("Profile promotion failed");
       throw error;
     } finally {
       if (reviewActionOwner.current === owner) { reviewActionOwner.current = null; setReviewActionBusy(false); }
@@ -385,13 +423,17 @@ export function ProfilePage({ api, reviewApi }: ProfilePageProps) {
         <nav className="view-switch" aria-label="工作区视图">
           <button type="button" aria-pressed={view === "profile"} onClick={() => setView("profile")}>资料审核</button>
           <button type="button" aria-pressed={view === "self-evaluation"} onClick={() => setView("self-evaluation")}>自我评价审核</button>
+          <button type="button" aria-pressed={view === "rag"} onClick={() => setView("rag")}>Field evidence</button>
         </nav>
-        {view === "self-evaluation" && reviewApi ? (
+        {view === "rag" && ragApi ? <RagWorkspace api={ragApi} /> : view === "rag" ? (
+          <section className="review-band"><p className="inline-error" role="alert">RAG service unavailable</p></section>
+        ) : view === "self-evaluation" && reviewApi ? (
           <section className="review-band" aria-labelledby="self-evaluation-title">
             <div className="review-heading"><div><h2 id="self-evaluation-title" tabIndex={-1}>自我评价审核</h2><p>任务范围内的版本确认</p></div></div>
             <div className="review-load-controls"><label>任务 ID<input aria-label="任务 ID" value={taskId} disabled={reviewActionBusy} onChange={(event) => changeReviewTaskId(event.target.value)} /></label><button className="button secondary" type="button" disabled={reviewActionBusy || taskId.trim() === "" || loadingReviewTaskId === taskId.trim()} onClick={() => void loadSelfEvaluationReview(taskId.trim())}>{loadingReviewTaskId === taskId.trim() ? "加载中" : "加载审核"}</button><button className="icon-button" type="button" aria-label="刷新审核" title="刷新审核" disabled={reviewActionBusy || !loadedReviewTaskId || loadingReviewTaskId === loadedReviewTaskId} onClick={() => { if (loadedReviewTaskId) void loadSelfEvaluationReview(loadedReviewTaskId); }}><RefreshCw aria-hidden="true" size={18} /></button></div>
+            <div className="review-create-controls"><label>Job description<textarea aria-label="Job description" value={jobDescription} disabled={reviewActionBusy} onChange={(event) => setJobDescription(event.target.value)} /></label><button className="button primary" type="button" disabled={reviewActionBusy || taskId.trim() === "" || jobDescription.trim() === ""} onClick={() => void createSelfEvaluationReview()}>Create review</button></div>
             {reviewError && <p className="inline-error" role="alert">{reviewError}</p>}
-            {selfEvaluationReview && <SelfEvaluationReview draft={selfEvaluationReview} onApprove={(value) => actOnLoadedReview("approve", value)} onKeepOriginal={() => actOnLoadedReview("keep")} />}
+            {selfEvaluationReview && <SelfEvaluationReview draft={selfEvaluationReview} onApprove={(value) => actOnLoadedReview("approve", value)} onKeepOriginal={() => actOnLoadedReview("keep")} {...(selfEvaluationReview.status === "approved" ? { onPromote: promoteLoadedReview } : {})} />}
           </section>
         ) : view === "self-evaluation" ? (
           <section className="review-band"><p className="inline-error" role="alert">审核服务不可用</p></section>

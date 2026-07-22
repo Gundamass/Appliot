@@ -6,7 +6,8 @@ import {
   type ProfileFact,
   type SelfEvaluationReview
 } from "@resume/contracts";
-import { buildSelfEvaluationDraft, validateEditedSelfEvaluation } from "@resume/rag";
+import type { ModelProvider } from "@resume/model-provider";
+import { tailorSelfEvaluation, validateEditedSelfEvaluation } from "@resume/rag";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
 import { sendError } from "../http-response.js";
@@ -15,7 +16,11 @@ import type { SelfEvaluationReviewRepository } from "./review-repository.js";
 
 const ParamsSchema = z.object({ taskId: z.string().min(1).max(128) }).strict();
 const SelfEvaluationFieldPath = "selfEvaluation";
-export interface ReviewRouteDependencies { reviewRepository: SelfEvaluationReviewRepository; profileRepository: ProfileRepository; }
+export interface ReviewRouteDependencies {
+  reviewRepository: SelfEvaluationReviewRepository;
+  profileRepository: ProfileRepository;
+  selfEvaluationModelProvider?: ModelProvider;
+}
 
 export function registerReviewRoutes(app: FastifyInstance, dependencies: ReviewRouteDependencies): void {
   app.get("/api/reviews/self-evaluations/:taskId", async (request, reply) => {
@@ -30,10 +35,20 @@ export function registerReviewRoutes(app: FastifyInstance, dependencies: ReviewR
     if (!params.success || !body.success) return sendError(reply, 400, "Invalid request");
     const base = selectBase(dependencies.profileRepository.listActive());
     if (!base) return sendError(reply, 409, "No reviewed self-evaluation is available");
-    const facts = eligibleFacts(dependencies.profileRepository.listActive(), params.data.taskId);
-    const draft = buildSelfEvaluationDraft(params.data.taskId, base.value as string, body.data.draft, facts);
+    if (!dependencies.selfEvaluationModelProvider) return sendError(reply, 503, "Self-evaluation tailoring is temporarily unavailable");
+    const facts = eligibleFacts(dependencies.profileRepository.listForTask(params.data.taskId), params.data.taskId);
+    const draft = await tailorSelfEvaluation({
+      taskId: params.data.taskId,
+      original: base.value as string,
+      jobDescription: body.data.jobDescription,
+      facts
+    }, dependencies.selfEvaluationModelProvider);
     if (draft.status !== "needs_review") return sendError(reply, 400, "Draft contains unsupported claims");
-    const review = SelfEvaluationReviewSchema.parse({ ...draft, base: { factId: base.id, revision: base.revision, original: base.value, evidence: base.evidence } });
+    const review = SelfEvaluationReviewSchema.parse({
+      ...draft,
+      jobDescription: body.data.jobDescription,
+      base: { factId: base.id, revision: base.revision, original: base.value, evidence: base.evidence }
+    });
     try { return reply.code(201).send(SelfEvaluationReviewSchema.parse(dependencies.reviewRepository.save(review))); }
     catch { return sendError(reply, 409, "Review cannot be created"); }
   });

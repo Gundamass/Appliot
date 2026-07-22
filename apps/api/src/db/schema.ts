@@ -8,8 +8,12 @@ export const documents = sqliteTable("documents", {
   id: text("id").primaryKey(),
   fingerprint: text("fingerprint").notNull().unique(),
   filename: text("filename").notNull(),
+  sourcePath: text("source_path").notNull(),
+  importStatus: text("import_status", { enum: ["retained", "importing", "completed"] }).notNull(),
   createdAt: text("created_at").notNull()
-});
+}, (table) => [
+  check("documents_import_status_valid", sql`${table.importStatus} IN ('retained', 'importing', 'completed')`)
+]);
 
 export const documentChunks = sqliteTable("document_chunks", {
   id: text("id").primaryKey(),
@@ -40,7 +44,7 @@ export const profileFacts = sqliteTable("profile_facts", {
   check("profile_facts_confidence_valid", sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`),
   check("profile_facts_scope_valid", sql`${table.scope} IN ${factScopes}`),
   check("profile_facts_revision_positive", sql`${table.revision} > 0`),
-  check("profile_facts_application_task_required", sql`${table.scope} != 'application' OR ${table.taskId} IS NOT NULL`),
+  check("profile_facts_scope_task_consistent", sql`(${table.scope} = 'profile' AND ${table.taskId} IS NULL) OR (${table.scope} = 'application' AND ${table.taskId} IS NOT NULL)`),
   check("profile_facts_value_json_valid", sql`json_valid(${table.valueJson})`),
   check("profile_facts_evidence_json_valid", sql`json_valid(${table.evidenceJson}) AND json_type(${table.evidenceJson}) = 'array' AND json_array_length(${table.evidenceJson}) > 0`)
 ]);
@@ -64,7 +68,7 @@ export const factRevisions = sqliteTable("fact_revisions", {
   check("fact_revisions_confidence_valid", sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`),
   check("fact_revisions_scope_valid", sql`${table.scope} IN ${factScopes}`),
   check("fact_revisions_revision_positive", sql`${table.revision} > 0`),
-  check("fact_revisions_application_task_required", sql`${table.scope} != 'application' OR ${table.taskId} IS NOT NULL`),
+  check("fact_revisions_scope_task_consistent", sql`(${table.scope} = 'profile' AND ${table.taskId} IS NULL) OR (${table.scope} = 'application' AND ${table.taskId} IS NOT NULL)`),
   check("fact_revisions_value_json_valid", sql`json_valid(${table.valueJson})`),
   check("fact_revisions_evidence_json_valid", sql`json_valid(${table.evidenceJson}) AND json_type(${table.evidenceJson}) = 'array' AND json_array_length(${table.evidenceJson}) > 0`)
 ]);

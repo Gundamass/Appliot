@@ -8,6 +8,8 @@ export function migrateDatabase(database: SqliteDatabase): void {
       id TEXT PRIMARY KEY,
       fingerprint TEXT NOT NULL UNIQUE,
       filename TEXT NOT NULL,
+      source_path TEXT NOT NULL,
+      import_status TEXT NOT NULL CHECK (import_status IN ('retained', 'importing', 'completed')),
       created_at TEXT NOT NULL
     );
 
@@ -32,7 +34,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
       revision INTEGER NOT NULL CHECK (revision > 0),
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL,
-      CHECK (scope != 'application' OR task_id IS NOT NULL),
+      CHECK ((scope = 'profile' AND task_id IS NULL) OR (scope = 'application' AND task_id IS NOT NULL)),
       CHECK (json_valid(value_json)),
       CHECK (json_valid(evidence_json) AND json_type(evidence_json) = 'array' AND json_array_length(evidence_json) > 0)
     );
@@ -50,7 +52,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
       evidence_json TEXT NOT NULL,
       revision INTEGER NOT NULL CHECK (revision > 0),
       created_at TEXT NOT NULL,
-      CHECK (scope != 'application' OR task_id IS NOT NULL),
+      CHECK ((scope = 'profile' AND task_id IS NULL) OR (scope = 'application' AND task_id IS NOT NULL)),
       CHECK (json_valid(value_json)),
       CHECK (json_valid(evidence_json) AND json_type(evidence_json) = 'array' AND json_array_length(evidence_json) > 0),
       UNIQUE (fact_id, revision)
@@ -88,5 +90,33 @@ export function migrateDatabase(database: SqliteDatabase): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS embeddings_document_chunk_id_idx ON embeddings(document_chunk_id);
+  `);
+
+  const documentColumns = database.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;
+  if (!documentColumns.some((column) => column.name === "source_path")) {
+    database.exec("ALTER TABLE documents ADD COLUMN source_path TEXT NOT NULL DEFAULT ''");
+  }
+  if (!documentColumns.some((column) => column.name === "import_status")) {
+    database.exec("ALTER TABLE documents ADD COLUMN import_status TEXT NOT NULL DEFAULT 'completed' CHECK (import_status IN ('retained', 'importing', 'completed'))");
+  }
+  database.prepare("UPDATE documents SET import_status = 'retained' WHERE import_status = 'importing'").run();
+
+  database.exec(`
+    CREATE TRIGGER IF NOT EXISTS profile_facts_scope_task_insert
+    BEFORE INSERT ON profile_facts
+    WHEN NOT ((NEW.scope = 'profile' AND NEW.task_id IS NULL) OR (NEW.scope = 'application' AND NEW.task_id IS NOT NULL))
+    BEGIN SELECT RAISE(ABORT, 'profile fact scope and task mismatch'); END;
+    CREATE TRIGGER IF NOT EXISTS profile_facts_scope_task_update
+    BEFORE UPDATE OF scope, task_id ON profile_facts
+    WHEN NOT ((NEW.scope = 'profile' AND NEW.task_id IS NULL) OR (NEW.scope = 'application' AND NEW.task_id IS NOT NULL))
+    BEGIN SELECT RAISE(ABORT, 'profile fact scope and task mismatch'); END;
+    CREATE TRIGGER IF NOT EXISTS fact_revisions_scope_task_insert
+    BEFORE INSERT ON fact_revisions
+    WHEN NOT ((NEW.scope = 'profile' AND NEW.task_id IS NULL) OR (NEW.scope = 'application' AND NEW.task_id IS NOT NULL))
+    BEGIN SELECT RAISE(ABORT, 'fact revision scope and task mismatch'); END;
+    CREATE TRIGGER IF NOT EXISTS fact_revisions_scope_task_update
+    BEFORE UPDATE OF scope, task_id ON fact_revisions
+    WHEN NOT ((NEW.scope = 'profile' AND NEW.task_id IS NULL) OR (NEW.scope = 'application' AND NEW.task_id IS NOT NULL))
+    BEGIN SELECT RAISE(ABORT, 'fact revision scope and task mismatch'); END;
   `);
 }

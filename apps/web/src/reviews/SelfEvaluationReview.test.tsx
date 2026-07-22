@@ -5,6 +5,7 @@ import type { SelfEvaluationReview as SelfEvaluationReviewModel } from "@resume/
 import { SelfEvaluationReview } from "./SelfEvaluationReview.js";
 
 const reviewableDraft: SelfEvaluationReviewModel = {
+  jobDescription: "React role",
   taskId: "task-1", original: "原始自我评价", draft: "岗位微调稿", reasons: ["强调 React 交付经验"],
   evidence: [{ documentId: "resume", page: 1, text: "React 项目", extraction: "pdf_text" }], unsupportedClaims: [], status: "needs_review",
   base: { factId: "self", revision: 1, original: "原始自我评价", evidence: [{ documentId: "resume", page: 1, text: "原始自我评价", extraction: "pdf_text" }] }

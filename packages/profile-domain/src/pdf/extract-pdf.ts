@@ -30,6 +30,8 @@ export function hasUsablePdfText(text: string): boolean {
   return text.replace(/[\s\p{Cc}\p{Cf}\p{M}\p{Z}]/gu, "").length > 0;
 }
 
+export class InvalidPdfDocumentError extends Error {}
+
 export async function extractPdf(bytes: Uint8Array, ocr: OcrEngine): Promise<ExtractedDocument> {
   const snapshot = Uint8Array.from(bytes);
   const fingerprint = createHash("sha256").update(snapshot).digest("hex");
@@ -39,7 +41,12 @@ export async function extractPdf(bytes: Uint8Array, ocr: OcrEngine): Promise<Ext
   });
 
   try {
-    const document = await loadingTask.promise;
+    let document: Awaited<typeof loadingTask.promise>;
+    try {
+      document = await loadingTask.promise;
+    } catch (error) {
+      throw new InvalidPdfDocumentError("PDF parser rejected the document", { cause: error });
+    }
     const pages: ExtractedPage[] = [];
 
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {

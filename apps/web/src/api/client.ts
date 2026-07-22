@@ -2,9 +2,14 @@ import {
   DocumentResponseSchema,
   ErrorResponseSchema,
   ProfileFactSchema,
+  RagFieldCorrectionResponseSchema,
+  RagFieldInspectionSchema,
   SelfEvaluationDraftSchema,
   SelfEvaluationReviewSchema,
-  type SelfEvaluationGeneratedDraft,
+  type RagFieldAnswerBody,
+  type RagFieldCorrectionResponse,
+  type RagFieldInspection,
+  type RagFieldRequest,
   type SelfEvaluationReview,
   type ProfileFact
 } from "@resume/contracts";
@@ -54,7 +59,7 @@ export function createProfileApi(baseUrl = ""): ProfileApi {
 }
 
 export interface SelfEvaluationReviewApi {
-  create(taskId: string, jobDescription: string, draft: SelfEvaluationGeneratedDraft): Promise<SelfEvaluationReview>;
+  create(taskId: string, jobDescription: string): Promise<SelfEvaluationReview>;
   get(taskId: string): Promise<SelfEvaluationReview>;
   approve(taskId: string, editedDraft?: string, keepOriginal?: boolean): Promise<SelfEvaluationReview>;
   promote(taskId: string): Promise<SelfEvaluationReview>;
@@ -64,10 +69,31 @@ export function createSelfEvaluationReviewApi(baseUrl = ""): SelfEvaluationRevie
   const path = (taskId: string) => `${baseUrl}/api/reviews/self-evaluations/${encodeURIComponent(taskId)}`;
   const send = async (url: string, init: RequestInit): Promise<SelfEvaluationReview> => SelfEvaluationReviewSchema.parse(await readResponse(await fetch(url, init)));
   return {
-    create(taskId, jobDescription, draft) { return send(path(taskId), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jobDescription, draft }) }); },
+    create(taskId, jobDescription) { return send(path(taskId), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jobDescription }) }); },
     get(taskId) { return send(path(taskId), { method: "GET" }); },
     approve(taskId, editedDraft, keepOriginal) { return send(`${path(taskId)}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(keepOriginal ? { keepOriginal: true } : editedDraft === undefined ? {} : { editedDraft }) }); },
     promote(taskId) { return send(`${path(taskId)}/promote`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }); }
+  };
+}
+
+export interface RagApi {
+  resolve(request: RagFieldRequest): Promise<RagFieldInspection>;
+  answer(answer: RagFieldAnswerBody): Promise<RagFieldCorrectionResponse>;
+}
+
+export function createRagApi(baseUrl = ""): RagApi {
+  const send = async (path: string, payload: unknown): Promise<unknown> => readResponse(await fetch(`${baseUrl}${path}`, {
+    method: "POST",
+    headers: { "Content-Type": "application/json" },
+    body: JSON.stringify(payload)
+  }));
+  return {
+    async resolve(request) {
+      return RagFieldInspectionSchema.parse(await send("/api/rag/fields/resolve", request));
+    },
+    async answer(answer) {
+      return RagFieldCorrectionResponseSchema.parse(await send("/api/rag/fields/answer", answer));
+    }
   };
 }
 

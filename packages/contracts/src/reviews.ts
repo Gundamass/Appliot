@@ -32,12 +32,12 @@ export const SelfEvaluationBaseSchema = z.object({
 }).strict();
 
 export const SelfEvaluationReviewSchema = SelfEvaluationDraftSchema.extend({
+  jobDescription: z.string().min(1).max(30_000),
   base: SelfEvaluationBaseSchema
 }).strict();
 
 export const CreateSelfEvaluationReviewBodySchema = z.object({
-  jobDescription: z.string().min(1).max(30_000),
-  draft: SelfEvaluationGeneratedDraftSchema
+  jobDescription: z.string().min(1).max(30_000)
 }).strict();
 
 export const ApproveSelfEvaluationReviewBodySchema = z.object({

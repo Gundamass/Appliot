@@ -34,6 +34,22 @@ describe("ProfileFactSchema", () => {
     expect(result.success).toBe(false);
   });
 
+  it("rejects a profile-scoped fact with a taskId", () => {
+    const result = ProfileFactSchema.safeParse({
+      id: "fact-injected",
+      fieldPath: "basics.email",
+      value: "injected@example.com",
+      status: "user_confirmed",
+      confidence: 1,
+      scope: "profile",
+      taskId: "task-forged",
+      evidence: [{ documentId: "user", page: 1, text: "injected@example.com", extraction: "user" }],
+      revision: 1
+    });
+
+    expect(result.success).toBe(false);
+  });
+
   it("accepts JSON scalar, array, and object values", () => {
     for (const value of ["text", 1, true, null, ["TypeScript", 5], { city: "Shanghai", remote: true }]) {
       expect(ProfileFactSchema.safeParse({

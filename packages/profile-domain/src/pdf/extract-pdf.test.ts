@@ -3,7 +3,7 @@ import { createHash } from "node:crypto";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { describe, expect, it, vi } from "vitest";
 import { createPdf, createScannedPdf } from "../../../../tests/fixtures/create-pdf.js";
-import { extractPdf, hasUsablePdfText } from "./extract-pdf.js";
+import { extractPdf, hasUsablePdfText, InvalidPdfDocumentError } from "./extract-pdf.js";
 
 describe("extractPdf", () => {
   it("preserves page numbers and uses OCR only for image-only pages", async () => {
@@ -102,7 +102,7 @@ describe("extractPdf", () => {
   });
 
   it("propagates malformed PDF errors", async () => {
-    await expect(extractPdf(new Uint8Array([1, 2, 3]), unusedOcr)).rejects.toThrow();
+    await expect(extractPdf(Buffer.from("%PDF-malformed"), unusedOcr)).rejects.toBeInstanceOf(InvalidPdfDocumentError);
   });
 });
 

@@ -174,6 +174,24 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
 .self-evaluation-details li + li { margin-top: 5px; }
 .unsupported-claims { background: #fff0ee; border-left: 3px solid #b33a32; color: #8e251f; font-size: 13px; font-weight: 700; margin: 16px 0 0; padding: 9px 11px; }
 .self-evaluation-actions { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; margin-top: 16px; }
+.job-provenance { border-bottom: 1px solid #dce1e5; margin-bottom: 16px; padding-bottom: 14px; }
+.job-provenance h2, .rag-result h3 { font-size: 13px; margin: 0 0 7px; }
+.job-provenance p { color: #4e5962; margin: 0; white-space: pre-wrap; }
+.review-create-controls { align-items: end; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto; margin-top: 12px; }
+.review-create-controls label, .rag-form-grid label, .rag-correction label { color: #4e5962; display: grid; font-size: 12px; gap: 5px; }
+.review-create-controls textarea { min-height: 88px; resize: vertical; }
+.review-create-controls textarea, .rag-form-grid input, .rag-correction input { background: #fff; border: 1px solid #cfd6db; border-radius: 6px; font: inherit; padding: 8px 10px; width: 100%; }
+.rag-workspace { padding: 22px 0; }
+.rag-form-grid { display: grid; gap: 10px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 16px 0 12px; }
+.rag-result { border-top: 1px solid #cfd6db; margin-top: 18px; padding-top: 16px; }
+.rag-result dl { display: grid; gap: 1px; grid-template-columns: repeat(4, minmax(0, 1fr)); margin: 0 0 14px; }
+.rag-result dl div { background: #f4f6f7; min-width: 0; padding: 9px; }
+.rag-result dt { color: #68737c; font-size: 11px; }
+.rag-result dd { font-size: 13px; margin: 3px 0 0; overflow-wrap: anywhere; }
+.rag-question { border-left: 3px solid #276a52; padding-left: 10px; }
+.rag-correction { align-items: end; display: grid; gap: 10px; grid-template-columns: minmax(0, 1fr) auto auto; margin-top: 16px; }
+.rag-correction .check-control { align-items: center; display: flex; min-height: 36px; }
+.rag-correction .check-control input { width: auto; }
 
 .fact-editor { margin-top: 10px; max-width: 760px; }
 .editor-field { display: grid; gap: 5px; }
@@ -229,6 +247,7 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
   .fact-actions { border-top: 1px solid #edf0f2; justify-content: flex-end; padding-top: 8px; }
   .fact-actions .button { flex: 1 1 auto; }
   .self-evaluation-columns, .self-evaluation-details { grid-template-columns: 1fr; }
+  .review-create-controls, .rag-form-grid, .rag-result dl, .rag-correction { grid-template-columns: 1fr; }
   .evidence-drawer { border-left: 0; width: 100%; }
 }
 

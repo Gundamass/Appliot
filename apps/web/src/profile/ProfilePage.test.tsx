@@ -60,6 +60,7 @@ function fakeProfileApi(initialFacts: ProfileFact[] = []) {
 
 function fakeReviewApi(): SelfEvaluationReviewApi {
   const review = {
+    jobDescription: "React role",
     taskId: "task-1", original: "原始自我评价", draft: "岗位微调稿", reasons: ["强调 React"], evidence: [], unsupportedClaims: [], status: "needs_review" as const,
     base: { factId: "self", revision: 1, original: "原始自我评价", evidence: [{ documentId: "resume", page: 1, text: "原始自我评价", extraction: "pdf_text" as const }] }
   };
@@ -68,6 +69,7 @@ function fakeReviewApi(): SelfEvaluationReviewApi {
 
 function reviewFor(taskId: string) {
   return {
+    jobDescription: `${taskId} role`,
     taskId, original: `${taskId} 原始自我评价`, draft: `${taskId} 岗位微调稿`, reasons: ["强调 React"], evidence: [], unsupportedClaims: [], status: "needs_review" as const,
     base: { factId: "self", revision: 1, original: `${taskId} 原始自我评价`, evidence: [{ documentId: "resume", page: 1, text: "原始自我评价", extraction: "pdf_text" as const }] }
   };

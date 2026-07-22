@@ -78,6 +78,9 @@ export const ProfileFactSchema = z.object({
   if (fact.scope === "application" && !fact.taskId) {
     context.addIssue({ code: "custom", message: "application facts require taskId" });
   }
+  if (fact.scope === "profile" && fact.taskId) {
+    context.addIssue({ code: "custom", message: "profile facts cannot have taskId" });
+  }
 });
 
 export type ProfileFact = z.infer<typeof ProfileFactSchema>;

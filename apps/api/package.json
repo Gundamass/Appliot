@@ -5,11 +5,13 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p ../../tsconfig.json",
-    "build": "tsc --noEmit -p ../../tsconfig.json"
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.js --external:@napi-rs/canvas --external:better-sqlite3 --external:drizzle-orm --external:drizzle-orm/* --external:fastify --external:@fastify/*",
+    "start": "node dist/server.js"
   },
   "dependencies": {
     "@fastify/busboy": "3.2.0",
     "@fastify/multipart": "9.2.1",
+    "@napi-rs/canvas": "0.1.70",
     "@resume/contracts": "workspace:*",
     "@resume/model-provider": "workspace:*",
     "@resume/profile-domain": "workspace:*",
@@ -20,6 +22,7 @@
     "zod": "3.25.67"
   },
   "devDependencies": {
-    "@types/better-sqlite3": "7.6.13"
+    "@types/better-sqlite3": "7.6.13",
+    "esbuild": "0.28.1"
   }
 }

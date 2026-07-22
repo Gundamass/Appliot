@@ -40,6 +40,9 @@ importers:
       '@fastify/multipart':
         specifier: 9.2.1
         version: 9.2.1
+      '@napi-rs/canvas':
+        specifier: 0.1.70
+        version: 0.1.70
       '@resume/contracts':
         specifier: workspace:*
         version: link:../../packages/contracts
@@ -68,6 +71,9 @@ importers:
       '@types/better-sqlite3':
         specifier: 7.6.13
         version: 7.6.13
+      esbuild:
+        specifier: 0.28.1
+        version: 0.28.1
 
   apps/web:
     dependencies:

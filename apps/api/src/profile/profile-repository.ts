@@ -31,6 +31,7 @@ export interface ProfileRepository {
   putTaskAnswer(taskId: string, fieldPath: string, value: JsonValue, evidence: Evidence[]): ProfileFact;
   resolveForTask(taskId: string, fieldPath: string): ProfileFact | undefined;
   listActive(): ProfileFact[];
+  listForTask(taskId: string): ProfileFact[];
   getById(factId: string): ProfileFact | undefined;
   history(factId: string): ProfileFact[];
 }
@@ -247,6 +248,20 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
         ORDER BY field_path, revision
       `).all() as FactRow[];
       return rows.map(parseFact);
+    },
+
+    listForTask(taskId) {
+      const profile = database.prepare(`
+        SELECT * FROM profile_facts
+        WHERE scope = 'profile' AND status != 'superseded'
+        ORDER BY field_path, revision, id
+      `).all() as FactRow[];
+      const answers = database.prepare(`
+        SELECT * FROM application_answers
+        WHERE task_id = ?
+        ORDER BY field_path, id
+      `).all(taskId) as ApplicationAnswerRow[];
+      return [...profile.map(parseFact), ...answers.map(parseApplicationAnswer)];
     },
 
     getById(factId) {

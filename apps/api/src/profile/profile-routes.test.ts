@@ -1,4 +1,8 @@
 import Database from "better-sqlite3";
+import { createHash } from "node:crypto";
+import { mkdtemp, readFile, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { DocumentResponseSchema, ErrorResponseSchema } from "@resume/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtractedDocument } from "@resume/profile-domain/src/pdf/types.js";
@@ -6,6 +10,8 @@ import { migrateDatabase } from "../db/migrate.js";
 import { createApp, type AppDependencies } from "../app.js";
 import { InvalidPdfError, ProfileImportUnavailableError } from "./import-service.js";
 import { createProfileRepository } from "./profile-repository.js";
+import { createLocalOriginalDocumentStore } from "./original-document-store.js";
+import { extractPdf as parsePdf } from "@resume/profile-domain/src/pdf/extract-pdf.js";
 
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
 
@@ -62,26 +68,30 @@ function pdfBytes(size = 12): Uint8Array {
 }
 
 const testResources: Array<{ app: Awaited<ReturnType<typeof createApp>>; database: InstanceType<typeof Database> }> = [];
+const testStorageRoots: string[] = [];
 
 afterEach(async () => {
   for (const { app, database } of testResources.splice(0).reverse()) {
     await app.close().catch(() => undefined);
     if (database.open) database.close();
   }
+  await Promise.all(testStorageRoots.splice(0).map((root) => rm(root, { recursive: true, force: true })));
 });
 
 async function buildTestContext(overrides: Partial<AppDependencies> = {}) {
   const database = new Database(":memory:");
   migrateDatabase(database);
-  const document: ExtractedDocument = {
-    fingerprint: "a".repeat(64),
-    pages: [{ page: 1, text: "Ada Lovelace ada@example.com", source: "pdf_text" }]
-  };
+  const storageRoot = await mkdtemp(join(tmpdir(), "resume-route-originals-"));
+  testStorageRoots.push(storageRoot);
   const dependencies: AppDependencies = {
     database,
     profileRepository: createProfileRepository(database),
-    extractPdf: async () => document,
-    extractFacts: async () => [{
+    originalDocumentStore: createLocalOriginalDocumentStore(storageRoot),
+    extractPdf: async (bytes) => ({
+      fingerprint: createHash("sha256").update(bytes).digest("hex"),
+      pages: [{ page: 1, text: "Ada Lovelace ada@example.com", source: "pdf_text" }]
+    }),
+    extractFacts: async (document) => [{
       id: "fact-1",
       fieldPath: "basics.email",
       value: "ada@example.com",
@@ -110,10 +120,14 @@ function tableCount(database: InstanceType<typeof Database>, table: "documents" 
 describe("profile routes", () => {
   it("imports facts as extracted and requires explicit confirmation", async () => {
     const app = await buildTestApp();
-    const upload = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) });
+    const bytes = pdfBytes();
+    const upload = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) });
 
     expect(upload.statusCode).toBe(202);
-    expect(DocumentResponseSchema.parse(upload.json())).toEqual({ documentId: expect.any(String), fingerprint: "a".repeat(64) });
+    expect(DocumentResponseSchema.parse(upload.json())).toEqual({
+      documentId: expect.any(String),
+      fingerprint: createHash("sha256").update(bytes).digest("hex")
+    });
 
     const facts = await app.inject({ method: "GET", url: "/api/profile/facts" });
     expect(facts.statusCode).toBe(200);
@@ -125,12 +139,41 @@ describe("profile routes", () => {
   });
 
   it("rejects a duplicate document without duplicating its extracted facts", async () => {
-    const app = await buildTestApp();
+    const extractPdf = vi.fn(async (bytes: Uint8Array) => ({
+      fingerprint: createHash("sha256").update(bytes).digest("hex"),
+      pages: [{ page: 1, text: "Ada Lovelace ada@example.com", source: "pdf_text" as const }]
+    }));
+    const app = await buildTestApp({ extractPdf });
     const request = { method: "POST" as const, url: "/api/documents", ...multipartPdf(pdfBytes()) };
 
     expect((await app.inject(request)).statusCode).toBe(202);
     expect((await app.inject(request)).statusCode).toBe(409);
     expect((await app.inject({ method: "GET", url: "/api/profile/facts" })).json()).toHaveLength(1);
+    expect(extractPdf).toHaveBeenCalledOnce();
+  });
+
+  it("retains exact original PDF bytes and completed metadata after a successful upload", async () => {
+    const bytes = pdfBytes(128);
+    const { app, database } = await buildTestContext();
+
+    expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) })).statusCode).toBe(202);
+    const row = database.prepare("SELECT source_path, import_status FROM documents").get() as { source_path: string; import_status: string };
+
+    expect(row.import_status).toBe("completed");
+    expect(await readFile(row.source_path)).toEqual(Buffer.from(bytes));
+  });
+
+  it("retains exact original PDF bytes when extraction fails", async () => {
+    const bytes = pdfBytes(96);
+    const { app, database } = await buildTestContext({
+      extractPdf: async () => { throw new Error("unexpected extractor defect"); }
+    });
+
+    expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) })).statusCode).toBe(500);
+    const row = database.prepare("SELECT source_path, import_status FROM documents").get() as { source_path: string; import_status: string };
+
+    expect(row.import_status).toBe("retained");
+    expect(await readFile(row.source_path)).toEqual(Buffer.from(bytes));
   });
 
   it("confirms and corrects facts with revision evidence", async () => {
@@ -273,6 +316,20 @@ describe("profile routes", () => {
     expect(response.json()).toEqual({ error: "Invalid PDF upload" });
   });
 
+  it("returns 400 when the real PDF parser rejects a signed malformed document", async () => {
+    const app = await buildTestApp({
+      extractPdf: (bytes) => parsePdf(bytes, { async recognize() { throw new Error("OCR should not run"); } })
+    });
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/documents",
+      ...multipartPdf(Buffer.from("%PDF-malformed"))
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: "Invalid PDF upload" });
+  });
+
   it("returns 503 for explicitly classified extraction unavailability", async () => {
     const app = await buildTestApp({
       extractFacts: async () => { throw new ProfileImportUnavailableError(); }
@@ -322,8 +379,9 @@ describe("profile routes", () => {
     it(`validates a malformed extracted ${malformed.name} before persistence and permits retry`, async () => {
       let valid = false;
       const extractFacts = vi.fn(async () => []);
+      const bytes = pdfBytes();
       const validDocument: ExtractedDocument = {
-        fingerprint: "b".repeat(64),
+        fingerprint: createHash("sha256").update(bytes).digest("hex"),
         pages: [{ page: 1, text: "Ada", source: "pdf_text" }]
       };
       const { app, database } = await buildTestContext({
@@ -332,15 +390,16 @@ describe("profile routes", () => {
       });
       const transaction = vi.spyOn(database, "transaction");
 
-      const rejected = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) });
+      const rejected = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) });
       expect(rejected.statusCode).toBe(500);
       expect(rejected.json()).toEqual({ error: "Internal server error" });
       expect(transaction).not.toHaveBeenCalled();
-      expect(tableCount(database, "documents")).toBe(0);
+      expect(tableCount(database, "documents")).toBe(1);
+      expect((database.prepare("SELECT import_status FROM documents").get() as { import_status: string }).import_status).toBe("retained");
       expect(extractFacts).not.toHaveBeenCalled();
 
       valid = true;
-      expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) })).statusCode).toBe(202);
+      expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) })).statusCode).toBe(202);
       expect(extractFacts).toHaveBeenCalledOnce();
     });
   }
@@ -364,7 +423,8 @@ describe("profile routes", () => {
     const rejected = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) });
     expect(rejected.statusCode).toBe(500);
     expect(transaction).not.toHaveBeenCalled();
-    expect(tableCount(database, "documents")).toBe(0);
+    expect(tableCount(database, "documents")).toBe(1);
+    expect((database.prepare("SELECT import_status FROM documents").get() as { import_status: string }).import_status).toBe("retained");
 
     valid = true;
     expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) })).statusCode).toBe(202);
