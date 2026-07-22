@@ -48,7 +48,7 @@ const submission = {
   draft: {
     draft: "Original self-evaluation with React",
     reasons: ["React emphasis"],
-    claims: [{ text: "React", kind: "evidence", evidenceFactIds: ["react"] }]
+    claims: [{ text: "Original self-evaluation with React", kind: "evidence", evidenceFactIds: ["react"] }]
   }
 };
 
@@ -93,6 +93,24 @@ describe("self-evaluation review routes", () => {
     const response = await app.inject({ method: "POST", url: "/api/reviews/self-evaluations/task-1", payload: submission });
 
     expect(response.statusCode).toBe(409);
+  });
+
+  it("revalidates a created draft against the server-bound original polarity", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const profileRepository = createProfileRepository(database);
+    profileRepository.createExtracted({ id: "self-evaluation", fieldPath: "selfEvaluation", value: "Not PMP certified.", status: "extracted", confidence: 1, scope: "profile", evidence: [{ documentId: "resume", page: 1, text: "Not PMP certified.", extraction: "pdf_text" }], revision: 1 });
+    profileRepository.confirm("self-evaluation");
+    profileRepository.createExtracted({ id: "pmp", fieldPath: "certificates", value: "PMP", status: "extracted", confidence: 1, scope: "profile", evidence: [{ documentId: "user", page: 1, text: "PMP token only", extraction: "user" }], revision: 1 });
+    profileRepository.confirm("pmp");
+    const app = await createApp({ database, profileRepository, extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }), extractFacts: async () => [] });
+    resources.push({ app, database });
+
+    const response = await app.inject({ method: "POST", url: "/api/reviews/self-evaluations/task-1", payload: {
+      jobDescription: "role", draft: { draft: "PMP certified.", reasons: ["Match."], claims: [{ text: "PMP", kind: "evidence", evidenceFactIds: ["pmp"] }] }
+    } });
+
+    expect(response.statusCode).toBe(400);
   });
 
   it("rolls back approval after the review state write fails to persist the task answer", async () => {

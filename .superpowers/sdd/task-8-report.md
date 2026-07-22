@@ -51,3 +51,24 @@ Implemented and verified.
 - Focused web: 49 tests passed.
 - Package web typecheck passed.
 - Root test, typecheck, build, and `git diff --check` are run in the final verification gate before commit.
+
+## Second Security Hardening
+
+### RED
+
+- RAG regressions initially failed for English and Chinese negation reversals, Unicode-only invented terms, added negation, changed clauses without metadata, and conflicting duplicate evidence IDs.
+- The ProfilePage ownership regressions initially allowed an edited task input to retarget an existing review and allowed a mismatched or stale load response to render.
+
+### GREEN
+
+- Tailoring now canonicalizes eligible facts before calling the provider; identical duplicate IDs deduplicate while conflicting full payloads block generation and cannot supply referenced evidence.
+- The validator uses NFKC-normalized Unicode material units and conservative polarity fingerprints. It blocks unclaimed changed clauses, Unicode inventions, numeric changes, and added, removed, or reversed negation where preservation cannot be established.
+- The create route continues to validate through the server-bound original and eligible fact snapshot via `buildSelfEvaluationDraft`; client data cannot establish base provenance or authorize a polarity bypass.
+- ProfilePage keeps the editable task input distinct from the immutable loaded task, discards stale/out-of-order loads, validates returned task IDs, and serializes review actions against the loaded review only.
+
+### Final Verification
+
+- Focused RAG: 170 tests passed.
+- Focused API: 58 tests passed.
+- Focused web: 53 tests passed.
+- Root test, typecheck, build, and `git diff --check` were run in the final completion gate before commit.

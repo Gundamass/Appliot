@@ -32,7 +32,7 @@ describe("self-evaluation tailoring", () => {
     const provider = providerReturning({
       draft: "TypeScript developer with React delivery experience.",
       reasons: ["The role prioritizes React delivery."],
-      claims: [{ text: "React", kind: "emphasis", evidenceFactIds: ["react-fact"] }]
+      claims: [{ text: "TypeScript developer with React delivery experience.", kind: "emphasis", evidenceFactIds: ["react-fact"] }]
     });
 
     const result = await tailorSelfEvaluation({
@@ -42,6 +42,7 @@ describe("self-evaluation tailoring", () => {
       facts: [fact()]
     }, provider);
 
+    expect(result.unsupportedClaims).toEqual([]);
     expect(result.status).toBe("needs_review");
     expect(result.original).toBe(original);
     expect(result.unsupportedClaims).toEqual([]);
@@ -117,7 +118,7 @@ describe("self-evaluation tailoring", () => {
     }));
 
     expect(result.status).toBe("blocked");
-    expect(result.unsupportedClaims.map((item) => item.toLowerCase())).toContain(finding.toLowerCase());
+    expect(result.unsupportedClaims.map((item) => item.toLowerCase()).some((item) => item.includes(finding.toLowerCase()) || item === "polarity could not be preserved")).toBe(true);
   });
 
   it("blocks a currency change as one material numeric claim", async () => {
@@ -139,5 +140,79 @@ describe("self-evaluation tailoring", () => {
     expect(emptyClaims.unsupportedClaims.map((item) => item.toLowerCase())).toContain("go");
     expect(duplicateReferences.status).toBe("blocked");
     expect(duplicateReferences.unsupportedClaims).toContain("React");
+  });
+
+  it("requires a claim declaration for a changed clause even when its tokens already exist", async () => {
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: "Experienced TypeScript developer with React delivery experience.", jobDescription: "role", facts: [fact()] }, providerReturning({
+      draft: "TypeScript developer with React delivery experience.", reasons: ["Match."], claims: []
+    }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.unsupportedClaims).toContain("Changed clause lacks claim metadata");
+  });
+
+  it.each([
+    ["Not PMP certified.", "PMP certified."],
+    ["Not certified for production work.", "Certified for production work."],
+    ["No degree requirement has been met.", "Degree requirement has been met."],
+    ["Cannot travel for this role.", "Can travel for this role."],
+    ["不持有证书。", "持有证书。"],
+    ["无相关经验。", "有相关经验。"]
+  ])("blocks a material polarity reversal from %s to %s", async (source, draft) => {
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: source, jobDescription: "role", facts: [fact()] }, providerReturning({
+      draft, reasons: ["Match the role."], claims: []
+    }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.unsupportedClaims).toContain("Polarity could not be preserved");
+  });
+
+  it("blocks adding a material negation that was absent from the original", async () => {
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: "PMP certified.", jobDescription: "role", facts: [fact()] }, providerReturning({
+      draft: "Not PMP certified.", reasons: ["Match the role."], claims: []
+    }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.unsupportedClaims).toContain("Polarity could not be preserved");
+  });
+
+  it("allows reordering that preserves a material negation", async () => {
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: "Cannot travel, but delivery experience.", jobDescription: "role", facts: [fact()] }, providerReturning({
+      draft: "Delivery experience, but cannot travel.", reasons: ["Reordered for clarity."], claims: [{ text: "Delivery experience, but cannot travel.", kind: "emphasis", evidenceFactIds: ["react-fact"] }]
+    }));
+
+    expect(result.unsupportedClaims).toEqual([]);
+    expect(result.status).toBe("needs_review");
+  });
+
+  it.each(["Rust开发者", "Разработчик Rust", "러스트 개발자", "ラスト開発者", "مطور Rust"])("blocks an uncovered Unicode invention: %s", async (draft) => {
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: "TypeScript developer", jobDescription: "role", facts: [fact()] }, providerReturning({
+      draft, reasons: ["Match the role."], claims: []
+    }));
+
+    expect(result.status).toBe("blocked");
+  });
+
+  it("blocks conflicting duplicate eligible fact IDs before calling the provider", async () => {
+    const provider = providerReturning({ draft: "React developer", reasons: ["Match."], claims: [] });
+    const first = fact({ id: "duplicate", value: "React" });
+    const conflicting = fact({ id: "duplicate", value: "Rust" });
+
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original, jobDescription: "role", facts: [first, conflicting] }, provider);
+
+    expect(result.status).toBe("blocked");
+    expect(result.unsupportedClaims).toContain("Conflicting eligible evidence fact IDs");
+    expect(provider.generateStructured).not.toHaveBeenCalled();
+  });
+
+  it("deduplicates identical eligible facts independent of order", async () => {
+    const output = { draft: "TypeScript developer with React delivery experience.", reasons: ["React emphasis."], claims: [{ text: "React", kind: "evidence" as const, evidenceFactIds: ["duplicate"] }] };
+    const duplicate = fact({ id: "duplicate" });
+
+    const forward = await tailorSelfEvaluation({ taskId: "task-1", original, jobDescription: "role", facts: [duplicate, { ...duplicate }] }, providerReturning(output));
+    const reverse = await tailorSelfEvaluation({ taskId: "task-1", original, jobDescription: "role", facts: [{ ...duplicate }, duplicate] }, providerReturning(output));
+
+    expect(forward).toMatchObject({ status: "needs_review", evidence: duplicate.evidence });
+    expect(reverse).toEqual(forward);
   });
 });

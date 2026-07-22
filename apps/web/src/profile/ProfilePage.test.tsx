@@ -66,6 +66,13 @@ function fakeReviewApi(): SelfEvaluationReviewApi {
   return { create: vi.fn(), get: vi.fn(async () => review), approve: vi.fn(async () => ({ ...review, status: "approved" as const })), promote: vi.fn(async () => ({ ...review, status: "approved" as const })) };
 }
 
+function reviewFor(taskId: string) {
+  return {
+    taskId, original: `${taskId} 原始自我评价`, draft: `${taskId} 岗位微调稿`, reasons: ["强调 React"], evidence: [], unsupportedClaims: [], status: "needs_review" as const,
+    base: { factId: "self", revision: 1, original: `${taskId} 原始自我评价`, evidence: [{ documentId: "resume", page: 1, text: "原始自我评价", extraction: "pdf_text" as const }] }
+  };
+}
+
 describe("self-evaluation review view", () => {
   it("loads a selected task review and applies explicit keep-original approval", async () => {
     const user = userEvent.setup();
@@ -82,6 +89,72 @@ describe("self-evaluation review view", () => {
     expect(screen.getByRole("status")).toHaveTextContent("已继续使用原文");
     expect(screen.getByRole("status")).toHaveFocus();
     expect(screen.queryByRole("button", { name: "继续使用原文" })).not.toBeInTheDocument();
+  });
+
+  it("clears the loaded review when the editable task input changes", async () => {
+    const user = userEvent.setup();
+    const reviewApi = fakeReviewApi();
+    render(<ProfilePage api={fakeProfileApi()} reviewApi={reviewApi} />);
+
+    await user.click(screen.getByRole("button", { name: "自我评价审核" }));
+    await user.clear(screen.getByLabelText("任务 ID"));
+    await user.type(screen.getByLabelText("任务 ID"), "task-1");
+    await user.click(screen.getByRole("button", { name: "加载审核" }));
+    await screen.findByRole("heading", { name: "岗位微调稿" });
+    await user.clear(screen.getByLabelText("任务 ID"));
+    await user.type(screen.getByLabelText("任务 ID"), "task-2");
+    expect(screen.queryByRole("button", { name: "继续使用原文" })).not.toBeInTheDocument();
+    expect(reviewApi.approve).not.toHaveBeenCalled();
+  });
+
+  it("renders only the newest task when A and B loads resolve out of order", async () => {
+    const user = userEvent.setup();
+    const taskA = deferred<ReturnType<typeof reviewFor>>();
+    const taskB = deferred<ReturnType<typeof reviewFor>>();
+    const reviewApi: SelfEvaluationReviewApi = { create: vi.fn(), get: vi.fn((taskId) => taskId === "A" ? taskA.promise : taskB.promise), approve: vi.fn(), promote: vi.fn() };
+    render(<ProfilePage api={fakeProfileApi()} reviewApi={reviewApi} />);
+
+    await user.click(screen.getByRole("button", { name: "自我评价审核" }));
+    await user.clear(screen.getByLabelText("任务 ID"));
+    await user.type(screen.getByLabelText("任务 ID"), "A");
+    await user.click(screen.getByRole("button", { name: "加载审核" }));
+    const taskInput = screen.getByLabelText("任务 ID");
+    await user.clear(taskInput);
+    await user.type(screen.getByLabelText("任务 ID"), "B");
+    await user.click(screen.getByRole("button", { name: "加载审核" }));
+    await act(async () => taskB.resolve(reviewFor("B")));
+    expect(await screen.findByText("B 岗位微调稿")).toBeVisible();
+    await act(async () => taskA.resolve(reviewFor("A")));
+
+    expect(screen.getByText("B 岗位微调稿")).toBeVisible();
+    expect(screen.queryByText("A 岗位微调稿")).not.toBeInTheDocument();
+  });
+
+  it("rejects a review response for the wrong task without rendering it", async () => {
+    const user = userEvent.setup();
+    const reviewApi: SelfEvaluationReviewApi = { create: vi.fn(), get: vi.fn(async () => reviewFor("other")), approve: vi.fn(), promote: vi.fn() };
+    render(<ProfilePage api={fakeProfileApi()} reviewApi={reviewApi} />);
+
+    await user.click(screen.getByRole("button", { name: "自我评价审核" }));
+    await user.click(screen.getByRole("button", { name: "加载审核" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("审核加载失败");
+    expect(screen.queryByText("other 岗位微调稿")).not.toBeInTheDocument();
+  });
+
+  it("ignores late review loads after the API consumer is replaced or unmounted", async () => {
+    const user = userEvent.setup();
+    const pending = deferred<ReturnType<typeof reviewFor>>();
+    const firstApi: SelfEvaluationReviewApi = { create: vi.fn(), get: vi.fn(() => pending.promise), approve: vi.fn(), promote: vi.fn() };
+    const { rerender, unmount } = render(<ProfilePage api={fakeProfileApi()} reviewApi={firstApi} />);
+
+    await user.click(screen.getByRole("button", { name: "自我评价审核" }));
+    await user.click(screen.getByRole("button", { name: "加载审核" }));
+    rerender(<ProfilePage api={fakeProfileApi()} reviewApi={fakeReviewApi()} />);
+    unmount();
+    await act(async () => pending.resolve(reviewFor("task-1")));
+
+    expect(firstApi.get).toHaveBeenCalledOnce();
   });
 });
 
