@@ -139,6 +139,15 @@ importers:
         specifier: 3.25.67
         version: 3.25.67
 
+  packages/rag:
+    dependencies:
+      '@resume/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@resume/model-provider':
+        specifier: workspace:*
+        version: link:../model-provider
+
 packages:
 
   '@adobe/css-tools@4.5.0':
