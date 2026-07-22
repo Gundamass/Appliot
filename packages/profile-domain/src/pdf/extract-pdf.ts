@@ -27,7 +27,7 @@ function textFromPage(items: readonly unknown[]): string {
 }
 
 export function hasUsablePdfText(text: string): boolean {
-  return text.replace(/[\s\p{Cc}\p{Cf}\p{Z}]/gu, "").length > 0;
+  return text.replace(/[\s\p{Cc}\p{Cf}\p{M}\p{Z}]/gu, "").length > 0;
 }
 
 export async function extractPdf(bytes: Uint8Array, ocr: OcrEngine): Promise<ExtractedDocument> {

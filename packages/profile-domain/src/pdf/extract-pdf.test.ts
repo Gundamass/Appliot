@@ -34,7 +34,12 @@ describe("extractPdf", () => {
     const context = canvas.getContext("2d");
     context.drawImage(rendered, 0, 0);
     const pixels = context.getImageData(0, 0, rendered.width, rendered.height).data;
-    expect([...pixels].some((channel, index) => index % 4 !== 3 && channel < 240)).toBe(true);
+    expect(countPixels(pixels, (red, green, blue, alpha) => (
+      alpha === 255 && red < 40 && green < 40 && blue < 40
+    ))).toBeGreaterThan(1_000);
+    expect(countPixels(pixels, (red, green, blue, alpha) => (
+      alpha === 255 && red > 100 && green < 80 && blue < 80
+    ))).toBeGreaterThan(100);
   });
 
   it("returns a stable SHA-256 fingerprint for duplicate PDF bytes", async () => {
@@ -65,8 +70,8 @@ describe("extractPdf", () => {
   });
 
   it("falls back to OCR when extracted PDF text has no visible evidence", () => {
-    expect(hasUsablePdfText("\u0000\u200B\u200C\u200D\u2060\uFEFF")).toBe(false);
-    expect(hasUsablePdfText("A\u200BB")).toBe(true);
+    expect(hasUsablePdfText("\u0000\u200B\u200C\u200D\u2060\uFE0F\uFEFF")).toBe(false);
+    expect(hasUsablePdfText("A\u0301")).toBe(true);
   });
 
   it("preserves PDF text line boundaries", async () => {
@@ -112,4 +117,15 @@ async function appendPdfPages(...documents: Uint8Array[]): Promise<Uint8Array> {
     pages.forEach((page) => result.addPage(page));
   }
   return result.save();
+}
+
+function countPixels(
+  pixels: Uint8ClampedArray,
+  matches: (red: number, green: number, blue: number, alpha: number) => boolean
+): number {
+  let count = 0;
+  for (let index = 0; index < pixels.length; index += 4) {
+    if (matches(pixels[index]!, pixels[index + 1]!, pixels[index + 2]!, pixels[index + 3]!)) count += 1;
+  }
+  return count;
 }

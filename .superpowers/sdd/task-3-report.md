@@ -207,3 +207,51 @@ git diff --check: exit 0
 - The generated OCR fixture embeds a deterministic scanned-style raster page with visible dark and red marks. The test decodes the OCR PNG, asserts its rendered 612x792 dimensions, and asserts non-white content pixels.
 - `textFromPage` preserves PDF.js `hasEOL` line boundaries while retaining deterministic item order.
 - OCR error and malformed-PDF propagation are covered. The malformed-PDF case causes PDF.js's expected `Warning: Indexing all PDF objects` recovery diagnostic but rejects as asserted.
+
+## Re-Review Fixes
+
+### RED
+
+Command:
+
+```powershell
+corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
+```
+
+Output:
+
+```text
+Test Files  1 failed (1)
+Tests       1 failed | 6 passed (7)
+Exit code: 1
+```
+
+The failure was expected: `hasUsablePdfText("\\u0000\\u200B\\u200C\\u200D\\u2060\\uFE0F\\uFEFF")` returned `true` because standalone variation selector U+FE0F is Unicode category `Mn` and was not removed. The same test specified that `A\\u0301` must remain usable, proving no arbitrary text-length threshold.
+
+The OCR rendering test was also upgraded before the RED run. It decodes the OCR PNG and requires more than 1,000 fully opaque dark pixels plus more than 100 fully opaque red-mark pixels. Those assertions passed with the existing deterministic scanned fixture and reject transparent/blank output that the earlier alpha-blind RGB check could accept.
+
+### GREEN
+
+Commands:
+
+```powershell
+corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
+corepack pnpm --filter @resume/profile-domain typecheck
+corepack pnpm --filter @resume/profile-domain build
+git diff --check
+```
+
+Output:
+
+```text
+extract-pdf.test.ts: 1 test file passed, 7 tests passed, exit 0
+profile-domain typecheck: exit 0
+profile-domain build: exit 0
+git diff --check: exit 0
+```
+
+### Changes and Minor Disposition
+
+- `hasUsablePdfText` now also removes Unicode marks (`\p{M}`) for visibility evaluation, so mark-only strings fall back to OCR while base characters with combining marks remain usable.
+- The deterministic scanned-fixture assertion is alpha-aware and tied to its actual dark/resume-line and red/footer mark colors.
+- Encrypted/password-PDF propagation remains deferred Minor: existing `pdf-lib@1.17.1` can detect/read encrypted input but does not create a password-encrypted PDF, and adding encryption tooling or a binary fixture would expand scope/dependencies. The extractor already propagates PDF.js loading errors; a deterministic encrypted fixture belongs in a later dedicated ingestion-fixture task.
