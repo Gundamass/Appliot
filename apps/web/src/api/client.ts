@@ -3,7 +3,9 @@ import {
   ErrorResponseSchema,
   ProfileFactSchema,
   SelfEvaluationDraftSchema,
-  type SelfEvaluationDraft,
+  SelfEvaluationReviewSchema,
+  type SelfEvaluationGeneratedDraft,
+  type SelfEvaluationReview,
   type ProfileFact
 } from "@resume/contracts";
 import { z } from "zod";
@@ -52,20 +54,20 @@ export function createProfileApi(baseUrl = ""): ProfileApi {
 }
 
 export interface SelfEvaluationReviewApi {
-  create(draft: SelfEvaluationDraft): Promise<SelfEvaluationDraft>;
-  get(taskId: string): Promise<SelfEvaluationDraft>;
-  approve(taskId: string, editedDraft?: string): Promise<SelfEvaluationDraft>;
-  promote(taskId: string, profileFactId: string): Promise<SelfEvaluationDraft>;
+  create(taskId: string, jobDescription: string, draft: SelfEvaluationGeneratedDraft): Promise<SelfEvaluationReview>;
+  get(taskId: string): Promise<SelfEvaluationReview>;
+  approve(taskId: string, editedDraft?: string, keepOriginal?: boolean): Promise<SelfEvaluationReview>;
+  promote(taskId: string): Promise<SelfEvaluationReview>;
 }
 
 export function createSelfEvaluationReviewApi(baseUrl = ""): SelfEvaluationReviewApi {
   const path = (taskId: string) => `${baseUrl}/api/reviews/self-evaluations/${encodeURIComponent(taskId)}`;
-  const send = async (url: string, init: RequestInit): Promise<SelfEvaluationDraft> => SelfEvaluationDraftSchema.parse(await readResponse(await fetch(url, init)));
+  const send = async (url: string, init: RequestInit): Promise<SelfEvaluationReview> => SelfEvaluationReviewSchema.parse(await readResponse(await fetch(url, init)));
   return {
-    create(draft) { return send(path(draft.taskId), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ draft }) }); },
+    create(taskId, jobDescription, draft) { return send(path(taskId), { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ jobDescription, draft }) }); },
     get(taskId) { return send(path(taskId), { method: "GET" }); },
-    approve(taskId, editedDraft) { return send(`${path(taskId)}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(editedDraft === undefined ? {} : { editedDraft }) }); },
-    promote(taskId, profileFactId) { return send(`${path(taskId)}/promote`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({ profileFactId }) }); }
+    approve(taskId, editedDraft, keepOriginal) { return send(`${path(taskId)}/approve`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify(keepOriginal ? { keepOriginal: true } : editedDraft === undefined ? {} : { editedDraft }) }); },
+    promote(taskId) { return send(`${path(taskId)}/promote`, { method: "POST", headers: { "Content-Type": "application/json" }, body: JSON.stringify({}) }); }
   };
 }
 

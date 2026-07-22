@@ -1,6 +1,6 @@
 import { StrictMode } from "react";
 import { createRoot } from "react-dom/client";
-import { createProfileApi } from "./api/client.js";
+import { createProfileApi, createSelfEvaluationReviewApi } from "./api/client.js";
 import { ProfilePage } from "./profile/ProfilePage.js";
 import "./styles.css";
 
@@ -9,6 +9,6 @@ if (!root) throw new Error("Missing #root element");
 
 createRoot(root).render(
   <StrictMode>
-    <ProfilePage api={createProfileApi()} />
+    <ProfilePage api={createProfileApi()} reviewApi={createSelfEvaluationReviewApi()} />
   </StrictMode>
 );

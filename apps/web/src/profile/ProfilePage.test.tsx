@@ -2,7 +2,7 @@ import type { JsonValue, ProfileFact } from "@resume/contracts";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import type { ProfileApi } from "../api/client.js";
+import type { ProfileApi, SelfEvaluationReviewApi } from "../api/client.js";
 import { ProfilePage } from "./ProfilePage.js";
 
 function makeFact(overrides: Partial<ProfileFact> = {}): ProfileFact {
@@ -57,6 +57,33 @@ function fakeProfileApi(initialFacts: ProfileFact[] = []) {
   };
   return api;
 }
+
+function fakeReviewApi(): SelfEvaluationReviewApi {
+  const review = {
+    taskId: "task-1", original: "原始自我评价", draft: "岗位微调稿", reasons: ["强调 React"], evidence: [], unsupportedClaims: [], status: "needs_review" as const,
+    base: { factId: "self", revision: 1, original: "原始自我评价", evidence: [{ documentId: "resume", page: 1, text: "原始自我评价", extraction: "pdf_text" as const }] }
+  };
+  return { create: vi.fn(), get: vi.fn(async () => review), approve: vi.fn(async () => ({ ...review, status: "approved" as const })), promote: vi.fn(async () => ({ ...review, status: "approved" as const })) };
+}
+
+describe("self-evaluation review view", () => {
+  it("loads a selected task review and applies explicit keep-original approval", async () => {
+    const user = userEvent.setup();
+    const reviewApi = fakeReviewApi();
+    render(<ProfilePage api={fakeProfileApi()} reviewApi={reviewApi} />);
+
+    await user.click(screen.getByRole("button", { name: "自我评价审核" }));
+    await user.clear(screen.getByLabelText("任务 ID"));
+    await user.type(screen.getByLabelText("任务 ID"), "task-1");
+    await user.click(screen.getByRole("button", { name: "加载审核" }));
+    expect(await screen.findByRole("heading", { name: "岗位微调稿" })).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "继续使用原文" }));
+    expect(reviewApi.approve).toHaveBeenCalledWith("task-1", undefined, true);
+    expect(screen.getByRole("status")).toHaveTextContent("已继续使用原文");
+    expect(screen.getByRole("status")).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "继续使用原文" })).not.toBeInTheDocument();
+  });
+});
 
 describe("ProfilePage loading states", () => {
   it("shows initial loading without an empty-state flash", async () => {

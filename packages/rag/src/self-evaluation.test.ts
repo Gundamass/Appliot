@@ -102,4 +102,42 @@ describe("self-evaluation tailoring", () => {
     expect(result.status).toBe("blocked");
     expect(result.unsupportedClaims).toContain("Rust");
   });
+
+  it.each([
+    ["C++ engineer", "C++"],
+    ["R developer", "R"],
+    ["拥有5年经验", "5年"],
+    ["愿意出差", "愿意"],
+    ["willing to travel", "willing"]
+  ])("blocks an uncovered short, numeric, or commitment change: %s", async (draft, finding) => {
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: "不愿意出差 and not willing to travel. Budget was $10,000 with 3 years experience.", jobDescription: "role", facts: [fact()] }, providerReturning({
+      draft,
+      reasons: ["Match the role."],
+      claims: []
+    }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.unsupportedClaims.map((item) => item.toLowerCase())).toContain(finding.toLowerCase());
+  });
+
+  it("blocks a currency change as one material numeric claim", async () => {
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: "Budget was USD 10,000.", jobDescription: "role", facts: [fact()] }, providerReturning({ draft: "Budget was USD 100,000.", reasons: ["Match."], claims: [] }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.unsupportedClaims).toContain("usd 100,000");
+  });
+
+  it("blocks a material difference when claims are empty and rejects duplicate claim references", async () => {
+    const emptyClaims = await tailorSelfEvaluation({ taskId: "task-1", original, jobDescription: "Go role", facts: [fact()] }, providerReturning({
+      draft: "Go developer", reasons: ["Match the role."], claims: []
+    }));
+    const duplicateReferences = await tailorSelfEvaluation({ taskId: "task-1", original, jobDescription: "React role", facts: [fact()] }, providerReturning({
+      draft: "React developer", reasons: ["Match the role."], claims: [{ text: "React", kind: "evidence", evidenceFactIds: ["react-fact", "react-fact"] }]
+    }));
+
+    expect(emptyClaims.status).toBe("blocked");
+    expect(emptyClaims.unsupportedClaims.map((item) => item.toLowerCase())).toContain("go");
+    expect(duplicateReferences.status).toBe("blocked");
+    expect(duplicateReferences.unsupportedClaims).toContain("React");
+  });
 });

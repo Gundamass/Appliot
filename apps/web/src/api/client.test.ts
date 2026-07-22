@@ -1,4 +1,4 @@
-import { ProfileFactSchema, SelfEvaluationDraftSchema } from "@resume/contracts";
+import { ProfileFactSchema, SelfEvaluationReviewSchema } from "@resume/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createProfileApi, createSelfEvaluationReviewApi } from "./client.js";
 
@@ -82,9 +82,10 @@ describe("ProfileApi HTTP contract", () => {
 });
 
 describe("SelfEvaluationReviewApi HTTP contract", () => {
-  const review = SelfEvaluationDraftSchema.parse({
+  const review = SelfEvaluationReviewSchema.parse({
     taskId: "task-1", original: "Original", draft: "Tailored", reasons: ["React emphasis"],
-    evidence: [{ documentId: "user", page: 1, text: "Confirmed React", extraction: "user" }], unsupportedClaims: [], status: "needs_review"
+    evidence: [{ documentId: "user", page: 1, text: "Confirmed React", extraction: "user" }], unsupportedClaims: [], status: "needs_review",
+    base: { factId: "self", revision: 1, original: "Original", evidence: [{ documentId: "user", page: 1, text: "Confirmed React", extraction: "user" }] }
   });
 
   it("creates and approves a stored review with strict request bodies", async () => {
@@ -94,10 +95,10 @@ describe("SelfEvaluationReviewApi HTTP contract", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = createSelfEvaluationReviewApi();
 
-    await api.create(review);
+    await api.create("task-1", "React role", { draft: "Tailored", reasons: ["React emphasis"], claims: [{ text: "React", kind: "evidence", evidenceFactIds: ["react"] }] });
     await api.approve("task-1", "Edited");
 
-    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ draft: review });
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ jobDescription: "React role", draft: { draft: "Tailored", reasons: ["React emphasis"], claims: [{ text: "React", kind: "evidence", evidenceFactIds: ["react"] }] } });
     expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({ editedDraft: "Edited" });
   });
 
@@ -107,9 +108,9 @@ describe("SelfEvaluationReviewApi HTTP contract", () => {
     }));
     vi.stubGlobal("fetch", fetchMock);
 
-    await createSelfEvaluationReviewApi().promote("task/1", "profile-1");
+    await createSelfEvaluationReviewApi().promote("task/1");
 
     expect(fetchMock).toHaveBeenCalledWith("/api/reviews/self-evaluations/task%2F1/promote", expect.objectContaining({ method: "POST" }));
-    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ profileFactId: "profile-1" });
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({});
   });
 });

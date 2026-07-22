@@ -34,6 +34,12 @@ button:focus-visible, input:focus-visible, textarea:focus-visible, .file-picker:
 .local-state { color: #3f4a45; font-size: 13px; gap: 6px; }
 .local-state svg { color: #238558; }
 main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
+.view-switch { border-bottom: 1px solid #d9dee3; display: flex; gap: 5px; padding-top: 14px; }
+.view-switch button { background: transparent; border: 0; border-bottom: 2px solid transparent; color: #59636d; font-size: 13px; font-weight: 600; min-height: 36px; padding: 0 10px; }
+.view-switch button[aria-pressed="true"] { border-bottom-color: #176b45; color: #176b45; }
+.review-load-controls { align-items: end; display: flex; gap: 8px; margin-top: 16px; }
+.review-load-controls label { color: #59636d; display: grid; font-size: 12px; gap: 4px; }
+.review-load-controls input { background: #ffffff; border: 1px solid #89949e; border-radius: 5px; height: 34px; padding: 0 9px; width: 220px; }
 
 .upload-band, .review-band { padding: 22px 0; }
 .upload-band { border-bottom: 1px solid #d9dee3; }
@@ -209,6 +215,9 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
   .brand-block h1 { font-size: 16px; }
   main { padding: 0 16px 36px; }
   .upload-band, .review-band { padding: 18px 0; }
+  .review-load-controls { align-items: stretch; flex-wrap: wrap; }
+  .review-load-controls label { flex: 1 1 180px; }
+  .review-load-controls input { width: 100%; }
   .upload-controls { grid-template-columns: 1fr auto; }
   .file-picker { justify-content: center; }
   .filename { grid-column: 1 / -1; grid-row: 2; }

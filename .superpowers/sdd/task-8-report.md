@@ -28,3 +28,26 @@ Implemented and verified.
 
 - Deterministic token coverage is intentionally conservative, not semantic entailment. A claim without clear lexical coverage is blocked for review rather than inferred as safe.
 - The review component and parsed review client are implemented as the task-facing integration surface; no browser automation or submission flow was added.
+
+## Review Fixes
+
+### RED
+
+- Added failing tests for server-owned profile base provenance, forged originals, missing eligible base facts, extracted/superseded/cross-task base exclusion, empty and duplicate claims, short technical tokens, numeric/currency and polarity changes, approval rollback/retry, promotion rollback/retry, base-revision conflict, concurrent transitions, and the production ProfilePage review consumer.
+- The web RED run exposed the missing terminal result: returned approvals did not update `SelfEvaluationReview`, and focus could target a removed adopt button.
+
+### GREEN
+
+- Reviews now bind the active reviewed profile `selfEvaluation` fact ID, revision, original and evidence snapshot on the server; the client cannot provide a base identity or evidence.
+- Tailoring reparses strict generated output, validates declared claim references against eligible server facts, and blocks uncovered technical tokens, numeric changes, and commitment-polarity changes.
+- Approval and promotion use conditional state transitions inside the profile repository SQLite transaction. Failure injection confirms each operation rolls back and can be retried; concurrent calls yield one success and one conflict.
+- Promotion resolves only the persisted base fact and revision; a changed or superseded base conflicts.
+- ProfilePage now uses the parsed review API and has an explicit task load/refresh view. The review component owns the returned terminal result, removes actions after approval, renders whether the tailored draft or original was chosen, and focuses the stable status element.
+
+### Final Verification
+
+- Focused RAG: 154 tests passed.
+- Focused API: 57 tests passed.
+- Focused web: 49 tests passed.
+- Package web typecheck passed.
+- Root test, typecheck, build, and `git diff --check` are run in the final verification gate before commit.

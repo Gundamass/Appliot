@@ -1,9 +1,10 @@
 import type { FactStatus, JsonValue, ProfileFact } from "@resume/contracts";
 import { FileText, RefreshCw, ShieldCheck, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
-import type { ProfileApi } from "../api/client.js";
+import type { ProfileApi, SelfEvaluationReviewApi } from "../api/client.js";
 import { EvidenceDrawer } from "./EvidenceDrawer.js";
 import { FactEditor } from "./FactEditor.js";
+import { SelfEvaluationReview } from "../reviews/SelfEvaluationReview.js";
 
 type ReviewStatus = Exclude<FactStatus, "superseded">;
 type Filter = "all" | ReviewStatus;
@@ -46,9 +47,10 @@ const FILTERS: { value: Filter; label: string }[] = [
 
 interface ProfilePageProps {
   api: ProfileApi;
+  reviewApi?: SelfEvaluationReviewApi;
 }
 
-export function ProfilePage({ api }: ProfilePageProps) {
+export function ProfilePage({ api, reviewApi }: ProfilePageProps) {
   const [facts, setFacts] = useState<ProfileFact[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -70,10 +72,23 @@ export function ProfilePage({ api }: ProfilePageProps) {
   const mutationOwner = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const reviewTitleRef = useRef<HTMLHeadingElement>(null);
+  const [view, setView] = useState<"profile" | "self-evaluation">("profile");
+  const [taskId, setTaskId] = useState("task-1");
+  const [selfEvaluationReview, setSelfEvaluationReview] = useState<Awaited<ReturnType<SelfEvaluationReviewApi["get"]>>>();
+  const [reviewLoading, setReviewLoading] = useState(false);
+  const [reviewError, setReviewError] = useState<string>();
   const modifyButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const evidenceButtonRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const isCurrentContext = useCallback((context: number) => contextGeneration.current === context, []);
+
+  const loadSelfEvaluationReview = async () => {
+    if (!reviewApi || reviewLoading || taskId.trim() === "") return;
+    setReviewLoading(true); setReviewError(undefined);
+    try { setSelfEvaluationReview(await reviewApi.get(taskId.trim())); }
+    catch { setSelfEvaluationReview(undefined); setReviewError("审核加载失败，请重试"); }
+    finally { setReviewLoading(false); }
+  };
 
   const settleAcceptedUploadSuccess = useCallback((context: number) => {
     if (!isCurrentContext(context) || acceptedUploadOwner.current === null) return;
@@ -317,6 +332,20 @@ export function ProfilePage({ api }: ProfilePageProps) {
       </header>
 
       <main>
+        <nav className="view-switch" aria-label="工作区视图">
+          <button type="button" aria-pressed={view === "profile"} onClick={() => setView("profile")}>资料审核</button>
+          <button type="button" aria-pressed={view === "self-evaluation"} onClick={() => setView("self-evaluation")}>自我评价审核</button>
+        </nav>
+        {view === "self-evaluation" && reviewApi ? (
+          <section className="review-band" aria-labelledby="self-evaluation-title">
+            <div className="review-heading"><div><h2 id="self-evaluation-title" tabIndex={-1}>自我评价审核</h2><p>任务范围内的版本确认</p></div></div>
+            <div className="review-load-controls"><label>任务 ID<input aria-label="任务 ID" value={taskId} disabled={reviewLoading} onChange={(event) => setTaskId(event.target.value)} /></label><button className="button secondary" type="button" disabled={reviewLoading || taskId.trim() === ""} onClick={() => void loadSelfEvaluationReview()}>{reviewLoading ? "加载中" : "加载审核"}</button><button className="icon-button" type="button" aria-label="刷新审核" title="刷新审核" disabled={reviewLoading || taskId.trim() === ""} onClick={() => void loadSelfEvaluationReview()}><RefreshCw aria-hidden="true" size={18} /></button></div>
+            {reviewError && <p className="inline-error" role="alert">{reviewError}</p>}
+            {selfEvaluationReview && <SelfEvaluationReview draft={selfEvaluationReview} onApprove={async (value) => { const next = await reviewApi.approve(taskId, value); setSelfEvaluationReview(next); return next; }} onKeepOriginal={async () => { const next = await reviewApi.approve(taskId, undefined, true); setSelfEvaluationReview(next); return next; }} />}
+          </section>
+        ) : view === "self-evaluation" ? (
+          <section className="review-band"><p className="inline-error" role="alert">审核服务不可用</p></section>
+        ) : <>
         <section className="upload-band" aria-labelledby="upload-title">
           <div className="section-heading">
             <div>
@@ -486,6 +515,7 @@ export function ProfilePage({ api }: ProfilePageProps) {
             </div>
           )}
         </section>
+        </>}
       </main>
 
       {evidence && <EvidenceDrawer fact={evidence.fact} returnFocusTo={evidence.trigger} onClose={() => setEvidence(undefined)} />}

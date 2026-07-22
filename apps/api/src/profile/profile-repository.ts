@@ -24,12 +24,14 @@ interface ApplicationAnswerRow {
 }
 
 export interface ProfileRepository {
+  transaction<T>(operation: () => T): T;
   createExtracted(fact: ProfileFact): ProfileFact;
   confirm(factId: string): ProfileFact;
   correct(factId: string, value: JsonValue, evidence: Evidence[]): ProfileFact;
   putTaskAnswer(taskId: string, fieldPath: string, value: JsonValue, evidence: Evidence[]): ProfileFact;
   resolveForTask(taskId: string, fieldPath: string): ProfileFact | undefined;
   listActive(): ProfileFact[];
+  getById(factId: string): ProfileFact | undefined;
   history(factId: string): ProfileFact[];
 }
 
@@ -141,6 +143,9 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
   };
 
   return {
+    transaction(operation) {
+      return database.transaction(operation)();
+    },
     createExtracted(fact) {
       const parsed = ProfileFactSchema.parse(fact);
       if (parsed.status !== "extracted") throw new Error("createExtracted requires an extracted fact");
@@ -242,6 +247,11 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
         ORDER BY field_path, revision
       `).all() as FactRow[];
       return rows.map(parseFact);
+    },
+
+    getById(factId) {
+      const row = findFact.get(factId) as FactRow | undefined;
+      return row ? parseFact(row) : undefined;
     },
 
     history(factId) {
