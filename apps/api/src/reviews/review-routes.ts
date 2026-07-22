@@ -46,7 +46,7 @@ export function registerReviewRoutes(app: FastifyInstance, dependencies: ReviewR
         const review = requireReview(dependencies.reviewRepository, params.data.taskId, "needs_review");
         if (!baseStillCurrent(review, dependencies.profileRepository)) throw new Error("base changed");
         const value = body.data.keepOriginal === true ? review.base.original : (body.data.editedDraft ?? review.draft);
-        const evidence = eligibleFacts(dependencies.profileRepository.listActive(), params.data.taskId).flatMap((fact) => fact.evidence);
+        const evidence = review.evidence;
         if (validateEditedSelfEvaluation(review.base.original, value, evidence).length > 0) throw new Error("unsupported edit");
         if (value !== review.draft) dependencies.reviewRepository.save(SelfEvaluationReviewSchema.parse({ ...review, draft: value }));
         const transitioned = dependencies.reviewRepository.approve(params.data.taskId);

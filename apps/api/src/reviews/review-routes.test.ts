@@ -113,6 +113,27 @@ describe("self-evaluation review routes", () => {
     expect(response.statusCode).toBe(400);
   });
 
+  it("rejects an edited relationship swap without changing the task answer or review state", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const profileRepository = createProfileRepository(database);
+    profileRepository.createExtracted({ id: "self-evaluation", fieldPath: "selfEvaluation", value: "3 years React. 5 years Java.", status: "extracted", confidence: 1, scope: "profile", evidence: [{ documentId: "resume", page: 1, text: "3 years React. 5 years Java.", extraction: "pdf_text" }], revision: 1 });
+    profileRepository.confirm("self-evaluation");
+    const app = await createApp({ database, profileRepository, extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }), extractFacts: async () => [] });
+    resources.push({ app, database });
+    const create = await app.inject({ method: "POST", url: "/api/reviews/self-evaluations/task-1", payload: {
+      jobDescription: "role", draft: { draft: "3 years React. 5 years Java.", reasons: ["Review."], claims: [] }
+    } });
+
+    const approval = await app.inject({ method: "POST", url: "/api/reviews/self-evaluations/task-1/approve", payload: { editedDraft: "5 years React. 3 years Java." } });
+    const stored = await app.inject({ method: "GET", url: "/api/reviews/self-evaluations/task-1" });
+
+    expect(create.statusCode).toBe(201);
+    expect(approval.statusCode).toBe(409);
+    expect(stored.json()).toMatchObject({ status: "needs_review", draft: "3 years React. 5 years Java." });
+    expect(profileRepository.resolveForTask("task-1", "selfEvaluation")?.value).toBe("3 years React. 5 years Java.");
+  });
+
   it("rolls back approval after the review state write fails to persist the task answer", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProfileFact } from "@resume/contracts";
 import type { ModelProvider } from "@resume/model-provider";
-import { tailorSelfEvaluation } from "./self-evaluation.js";
+import { tailorSelfEvaluation, validateEditedSelfEvaluation } from "./self-evaluation.js";
 
 const original = "Experienced TypeScript developer with React delivery experience.";
 
@@ -206,7 +206,7 @@ describe("self-evaluation tailoring", () => {
   });
 
   it("deduplicates identical eligible facts independent of order", async () => {
-    const output = { draft: "TypeScript developer with React delivery experience.", reasons: ["React emphasis."], claims: [{ text: "React", kind: "evidence" as const, evidenceFactIds: ["duplicate"] }] };
+    const output = { draft: "TypeScript developer with React delivery experience.", reasons: ["React emphasis."], claims: [{ text: "TypeScript developer with React delivery experience.", kind: "evidence" as const, evidenceFactIds: ["duplicate"] }] };
     const duplicate = fact({ id: "duplicate" });
 
     const forward = await tailorSelfEvaluation({ taskId: "task-1", original, jobDescription: "role", facts: [duplicate, { ...duplicate }] }, providerReturning(output));
@@ -214,5 +214,61 @@ describe("self-evaluation tailoring", () => {
 
     expect(forward).toMatchObject({ status: "needs_review", evidence: duplicate.evidence });
     expect(reverse).toEqual(forward);
+  });
+
+  it.each([
+    ["3 years React. 5 years Java.", "5 years React. 3 years Java."],
+    ["5 years React. 3 years Java.", "3 years React. 5 years Java."],
+    ["20% project A. 40% project B.", "40% project A. 20% project B."],
+    ["$10,000 responsibility A. $100,000 responsibility B.", "$100,000 responsibility A. $10,000 responsibility B."],
+    ["PMP certified for React. AWS certified for Java.", "PMP certified for Java. AWS certified for React."]
+  ])("blocks an association swap from %s to %s even with a broad draft claim", async (source, draft) => {
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: source, jobDescription: "role", facts: [fact()] }, providerReturning({
+      draft, reasons: ["Match."], claims: [{ text: draft, kind: "evidence", evidenceFactIds: ["react-fact"] }]
+    }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.unsupportedClaims).toContain("Clause relationship could not be established");
+  });
+
+  it("does not combine split evidence facts to authorize one relationship", async () => {
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: "Experienced developer.", jobDescription: "role", facts: [
+      fact({ id: "years", value: "5 years", evidence: [{ documentId: "user", page: 1, text: "5 years", extraction: "user" }] }),
+      fact({ id: "react", value: "React", evidence: [{ documentId: "user", page: 1, text: "React", extraction: "user" }] })
+    ] }, providerReturning({
+      draft: "5 years React.", reasons: ["Match."], claims: [{ text: "5 years React", kind: "evidence", evidenceFactIds: ["years", "react"] }]
+    }));
+
+    expect(result.status).toBe("blocked");
+    expect(result.unsupportedClaims).toContain("Clause relationship could not be established");
+  });
+
+  it("accepts a relationship when one referenced fact contains the whole relation", async () => {
+    const relation = fact({ id: "react-years", value: "5 years React", evidence: [{ documentId: "user", page: 1, text: "5 years React", extraction: "user" }] });
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: "Experienced developer.", jobDescription: "role", facts: [relation] }, providerReturning({
+      draft: "5 years React.", reasons: ["Match."], claims: [{ text: "5 years React", kind: "evidence", evidenceFactIds: ["react-years"] }]
+    }));
+
+    expect(result.unsupportedClaims).toEqual([]);
+    expect(result.status).toBe("needs_review");
+  });
+
+  it("accepts safe sentence reordering when each relationship is retained", async () => {
+    const source = "3 years React. 5 years Java.";
+    const result = await tailorSelfEvaluation({ taskId: "task-1", original: source, jobDescription: "role", facts: [fact()] }, providerReturning({
+      draft: "5 years Java. 3 years React.", reasons: ["Reordered."], claims: [
+        { text: "5 years Java", kind: "emphasis", evidenceFactIds: ["react-fact"] },
+        { text: "3 years React", kind: "emphasis", evidenceFactIds: ["react-fact"] }
+      ]
+    }));
+
+    expect(result.unsupportedClaims).toEqual([]);
+    expect(result.status).toBe("needs_review");
+  });
+
+  it("rejects an edited association swap without claim metadata", () => {
+    const unsupported = validateEditedSelfEvaluation("3 years React. 5 years Java.", "5 years React. 3 years Java.", [{ documentId: "resume", page: 1, text: "3 years React. 5 years Java.", extraction: "pdf_text" }]);
+
+    expect(unsupported).toContain("Clause relationship could not be established");
   });
 });

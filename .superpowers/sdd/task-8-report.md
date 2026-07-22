@@ -72,3 +72,25 @@ Implemented and verified.
 - Focused API: 58 tests passed.
 - Focused web: 53 tests passed.
 - Root test, typecheck, build, and `git diff --check` were run in the final completion gate before commit.
+
+## Final Association Hardening
+
+### RED
+
+- Added relation-level regressions for swapped React/Java tenure in both directions, project percentages, currency responsibilities, and certification-to-skill associations. All passed incorrectly under the old unordered token coverage.
+- Added a split-evidence regression: separate `5 years` and `React` facts incorrectly authorized `5 years React` when pooled.
+- Added an approve-route regression showing an edited tenure swap needed to fail without changing the stored task answer or review status.
+
+### GREEN
+
+- The shared validator now derives compact, per-clause material relationship fingerprints: numeric/qualification anchors carry their nearby material subjects, and polarity stays bound to its local subject/action.
+- Every changed generated clause requires exactly one clause-scoped claim and is authorized by one original clause or by one referenced fact value/evidence clause; evidence fragments are never unioned to manufacture a relationship.
+- Edited approvals use the review's persisted authorized evidence snapshot with the same structural relation check, so current unrelated facts cannot broaden authorization.
+- Safe sentence reordering remains accepted when each original relationship is intact.
+
+### Final Verification
+
+- Focused RAG: 179 tests passed.
+- Focused API: 59 tests passed.
+- Focused web: 53 tests passed.
+- Root test, typecheck, build, and `git diff --check` were run in the final completion gate before commit.
