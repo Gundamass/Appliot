@@ -84,11 +84,19 @@ describe("review fix: evidence support", () => {
     "PMP certification, No.",
     "PMP certification ,   No.",
     "PMP certification?!,  No.",
+    "PMP certification，No。",
+    "PMP certification—False！",
+    "PMP certification：Not？",
+    "PMP certification—Not currently。",
+    "PMP certification：Not held！",
+    "PMP certification，Not certified？",
     "PMP certification? No. AWS certification: Yes.",
     "PMP certification? No, not currently.",
     "是否持有 PMP？否。",
     "是否持有 PMP，否。",
     "是否持有 PMP ？！ ， 否。",
+    "是否持有 PMP, 否.",
+    "PMP 证书: 没有!",
     "是否持有 PMP？否。已通过 AWS 认证。",
     "PMP 证书：没有"
   ])("rejects an immediate clause answer that denies the candidate: %s", (text) => {
@@ -98,7 +106,9 @@ describe("review fix: evidence support", () => {
   it.each([
     "PMP certification? Yes.",
     "PMP, Yes.",
+    "PMP—Yes。",
     "PMP？是。",
+    "PMP, 是!",
     "PMP certification：是。",
     "持有 PMP 证书。",
     "PMP certification completed. No relocation required.",
@@ -107,6 +117,17 @@ describe("review fix: evidence support", () => {
     "PMP certified! No restrictions apply.",
     "PMP certification recorded.\nNo travel preference was provided."
   ])("preserves affirmative or unrelated later evidence: %s", (text) => {
+    expect(evidenceSupportsValue("PMP", [pdfEvidence(text)])).toBe(true);
+  });
+
+  it.each([
+    "PMP certification，Nobody objected。",
+    "PMP certification—Notable achievement！",
+    "PMP certification：Falsehood rejected。",
+    "PMP certification，No1 response。",
+    "PMP certification—Not2 status！",
+    "PMP certification：False3 label。"
+  ])("does not treat a continued marker as a standalone denial: %s", (text) => {
     expect(evidenceSupportsValue("PMP", [pdfEvidence(text)])).toBe(true);
   });
 
@@ -136,6 +157,8 @@ describe("review fix: evidence support", () => {
   it.each([
     "PMP certification? No.",
     "PMP certification, No.",
+    "PMP certification，No。",
+    "PMP certification—Not currently！",
     "是否持有 PMP？否。",
     "是否持有 PMP，否。"
   ])("never auto-verifies an exact confirmed question-answer denial: %s", async (text) => {

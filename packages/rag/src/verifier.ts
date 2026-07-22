@@ -238,10 +238,16 @@ function isStatementTerminator(character: string): boolean {
 }
 
 function isStandaloneNegativeAnswer(answer: string): boolean {
-  const englishMarker = /^(?:no|false|none|absent)(?=$|[,.!?;:])/;
-  const englishNot = /^not(?:$|[,.!?;:]|\s+(?:currently|held|certified)(?=$|[,.!?;:]))/;
-  const chineseMarker = /^(?:否|没有|未持有|不具备|无)(?=$|[，。！？；：,.!?;:])/u;
-  return englishMarker.test(answer) || englishNot.test(answer) || chineseMarker.test(answer);
+  const markers = ["no", "false", "none", "absent", "not", "not currently", "not held", "not certified"];
+  const chineseMarkers = ["否", "没有", "未持有", "不具备", "无"];
+  return markers.some((marker) => startsWithStandaloneMarker(answer, marker))
+    || chineseMarkers.some((marker) => startsWithStandaloneMarker(answer, marker));
+}
+
+function startsWithStandaloneMarker(answer: string, marker: string): boolean {
+  if (!answer.startsWith(marker)) return false;
+  if (answer.length === marker.length) return true;
+  return /[\p{P}\p{S}]/u.test(codePointAt(answer, marker.length));
 }
 
 function normalize(value: string): string {
