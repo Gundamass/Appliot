@@ -11,17 +11,22 @@ export const EXTRACTION_RULES = [
 ].join(" ");
 
 export async function extractFacts(document: ExtractedDocument, provider: ModelProvider): Promise<ProfileFact[]> {
+  const pages = indexPages(document.pages);
   const output = ExtractionSchema.parse(await provider.generateStructured({
     system: EXTRACTION_RULES,
     user: serializePages(document.pages),
     schema: ExtractionSchema
   }));
 
-  return output.facts.map((candidate) => createFact(document, candidate));
+  return output.facts.map((candidate) => createFact(document, pages, candidate));
 }
 
-function createFact(document: ExtractedDocument, candidate: ExtractionOutputFact): ProfileFact {
-  const page = document.pages.find((item) => item.page === candidate.page);
+function createFact(
+  document: ExtractedDocument,
+  pages: ReadonlyMap<number, ExtractedPage>,
+  candidate: ExtractionOutputFact
+): ProfileFact {
+  const page = pages.get(candidate.page);
   if (!page?.text.includes(candidate.quote)) {
     throw new Error(`evidence quote not found on page ${candidate.page}`);
   }
@@ -44,6 +49,22 @@ function createFact(document: ExtractedDocument, candidate: ExtractionOutputFact
 }
 
 type ExtractionOutputFact = ExtractionOutput["facts"][number];
+
+function indexPages(pages: ExtractedPage[]): ReadonlyMap<number, ExtractedPage> {
+  const pagesByNumber = new Map<number, ExtractedPage>();
+
+  for (const page of pages) {
+    if (!Number.isInteger(page.page) || page.page <= 0) {
+      throw new Error(`invalid document page number: ${page.page}`);
+    }
+    if (pagesByNumber.has(page.page)) {
+      throw new Error(`duplicate document page number: ${page.page}`);
+    }
+    pagesByNumber.set(page.page, page);
+  }
+
+  return pagesByNumber;
+}
 
 function serializePages(pages: ExtractedPage[]): string {
   return JSON.stringify(pages.map(({ page, text, source }) => ({ page, text, source })));

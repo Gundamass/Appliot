@@ -1,4 +1,4 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
 import { FakeModelProvider } from "@resume/model-provider";
 import type { ModelProvider } from "@resume/model-provider";
@@ -53,6 +53,39 @@ describe("extractFacts", () => {
     await expect(extractFacts(documentWithPage("ada@example.com"), provider)).rejects.toBeInstanceOf(ZodError);
   });
 
+  it("rejects an empty evidence quote in provider output", async () => {
+    const provider = providerReturning({
+      facts: [{ fieldPath: "basics.email", value: "ada@example.com", page: 1, quote: "", confidence: 0.9 }]
+    });
+
+    await expect(extractFacts(documentWithPage("ada@example.com"), provider)).rejects.toBeInstanceOf(ZodError);
+  });
+
+  it("rejects duplicate document page numbers before invoking the provider", async () => {
+    const provider = uncalledProvider();
+    const document: ExtractedDocument = {
+      fingerprint: "fingerprint-1",
+      pages: [
+        { page: 1, text: "Ada Lovelace", source: "pdf_text" },
+        { page: 1, text: "ada@example.com", source: "pdf_text" }
+      ]
+    };
+
+    await expect(extractFacts(document, provider)).rejects.toThrow("duplicate document page number: 1");
+    expect(provider.generateStructured).not.toHaveBeenCalled();
+  });
+
+  it("rejects non-positive document page numbers before invoking the provider", async () => {
+    const provider = uncalledProvider();
+    const document: ExtractedDocument = {
+      fingerprint: "fingerprint-1",
+      pages: [{ page: 0, text: "Ada Lovelace", source: "pdf_text" }]
+    };
+
+    await expect(extractFacts(document, provider)).rejects.toThrow("invalid document page number: 0");
+    expect(provider.generateStructured).not.toHaveBeenCalled();
+  });
+
   it("rejects unsupported claims", async () => {
     const provider = new FakeModelProvider({
       facts: [{ fieldPath: "skills[0]", value: "Kubernetes", page: 1, quote: "Kubernetes", confidence: 0.86 }]
@@ -75,6 +108,15 @@ function providerReturning(response: unknown): ModelProvider {
     async generateStructured<T>(): Promise<T> {
       return response as T;
     },
+    async embed(): Promise<number[][]> {
+      return [];
+    }
+  };
+}
+
+function uncalledProvider(): ModelProvider & { generateStructured: ReturnType<typeof vi.fn> } {
+  return {
+    generateStructured: vi.fn(),
     async embed(): Promise<number[][]> {
       return [];
     }
