@@ -7,7 +7,7 @@ index 59fdbb318f0c957569276efe407cd73ad05d5a42..9ceee08f1752720dffed434f6d7911d1
    },
    "scripts": {
 -    "install": "prebuild-install || node-gyp rebuild --release",
-+    "install": "prebuild-install || node \"%INIT_CWD%/node_modules/node-gyp/bin/node-gyp.js\" rebuild --release",
++    "install": "prebuild-install || node \"%INIT_CWD%\\scripts\\native-build-wrapper.cjs\" \"%INIT_CWD%\" \"%CD%\"",
      "build-release": "node-gyp rebuild --release",
      "build-debug": "node-gyp rebuild --debug",
      "rebuild-release": "npm run lzz && npm run build-release",

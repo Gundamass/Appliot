@@ -65,4 +65,21 @@ describe("ProfileFactSchema", () => {
       }).success).toBe(false);
     }
   });
+
+  it("rejects sparse arrays and values with custom toJSON methods", () => {
+    const sparse = ["present", , "later"];
+    const customToJson = { city: "Shanghai", toJSON: () => "not persisted" };
+    for (const value of [sparse, customToJson]) {
+      expect(ProfileFactSchema.safeParse({
+        id: "fact-non-plain-json",
+        fieldPath: "preferences.value",
+        value,
+        status: "extracted",
+        confidence: 0.9,
+        scope: "profile",
+        evidence: [{ documentId: "resume.pdf", page: 1, text: "value", extraction: "pdf_text" }],
+        revision: 1
+      }).success).toBe(false);
+    }
+  });
 });

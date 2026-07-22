@@ -21,8 +21,19 @@ export const JsonValueSchema = z.unknown().superRefine((value, context) => {
       return;
     }
     ancestors.add(candidate);
+    if (typeof (candidate as { toJSON?: unknown }).toJSON === "function") {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "JSON values cannot define toJSON", path });
+      ancestors.delete(candidate);
+      return;
+    }
     if (Array.isArray(candidate)) {
-      candidate.forEach((item, index) => validate(item, [...path, index]));
+      for (let index = 0; index < candidate.length; index += 1) {
+        if (!(index in candidate)) {
+          context.addIssue({ code: z.ZodIssueCode.custom, message: "JSON arrays cannot be sparse", path: [...path, index] });
+        } else {
+          validate(candidate[index], [...path, index]);
+        }
+      }
     } else if (Object.getPrototypeOf(candidate) === Object.prototype || Object.getPrototypeOf(candidate) === null) {
       Object.entries(candidate).forEach(([key, item]) => validate(item, [...path, key]));
     } else {

@@ -33,6 +33,10 @@ export interface ProfileRepository {
   history(factId: string): ProfileFact[];
 }
 
+export interface ProfileRepositoryOptions {
+  afterSnapshot?: () => void;
+}
+
 function now(): string {
   return new Date().toISOString();
 }
@@ -65,7 +69,7 @@ function parseApplicationAnswer(row: ApplicationAnswerRow): ProfileFact {
   });
 }
 
-export function createProfileRepository(database: SqliteDatabase): ProfileRepository {
+export function createProfileRepository(database: SqliteDatabase, options: ProfileRepositoryOptions = {}): ProfileRepository {
   const findFact = database.prepare("SELECT * FROM profile_facts WHERE id = ?");
   const insertFact = database.prepare(`
     INSERT INTO profile_facts (
@@ -185,6 +189,7 @@ export function createProfileRepository(database: SqliteDatabase): ProfileReposi
           revision: nextRevision
         });
         snapshot(current, timestamp);
+        options.afterSnapshot?.();
         updateFact.run(JSON.stringify(value), JSON.stringify(evidence), nextRevision, timestamp, factId);
         supersedeReviewedAlternatives(corrected, timestamp);
         return corrected;

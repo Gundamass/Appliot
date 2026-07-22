@@ -21,10 +21,10 @@ function userEvidence(text: string): Evidence[] {
   return [{ documentId: "user", page: 1, text, extraction: "user" }];
 }
 
-function createTestProfileRepository() {
+function createTestProfileRepository(options?: { afterSnapshot?: () => void }) {
   const database = new Database(":memory:");
   migrateDatabase(database);
-  return createProfileRepository(database);
+  return createProfileRepository(database, options);
 }
 
 describe("ProfileRepository", () => {
@@ -114,12 +114,15 @@ describe("ProfileRepository", () => {
     expect(() => repository.confirm("first")).toThrow("cannot confirm superseded fact: first");
   });
 
-  it("rolls back a correction when its replacement value or evidence is invalid", () => {
-    const repository = createTestProfileRepository();
+  it("rolls back a correction when the database fails after its snapshot", () => {
+    const repository = createTestProfileRepository({
+      afterSnapshot: () => { throw new Error("simulated database failure"); }
+    });
     repository.createExtracted(makeFact("Original"));
     repository.confirm("fact-1");
 
-    expect(() => repository.correct("fact-1", "Invalid", [])).toThrow();
+    expect(() => repository.correct("fact-1", "Replacement", userEvidence("Replacement")))
+      .toThrow("simulated database failure");
     expect(repository.history("fact-1")).toHaveLength(1);
     expect(repository.resolveForTask("task", "preferences.city")).toMatchObject({ value: "Original", revision: 1 });
   });
