@@ -1,5 +1,5 @@
 import { JsonValueSchema, type JsonValue, type ProfileFact } from "@resume/contracts";
-import { useId, useState } from "react";
+import { useEffect, useId, useRef, useState } from "react";
 
 interface FactEditorProps {
   fact: ProfileFact;
@@ -12,9 +12,14 @@ interface FactEditorProps {
 
 export function FactEditor({ fact, fieldLabel, saving, apiError, onCancel, onSave }: FactEditorProps) {
   const inputId = useId();
+  const controlRef = useRef<HTMLInputElement | HTMLTextAreaElement>(null);
   const [draft, setDraft] = useState(() => serializeValue(fact.value));
   const [booleanDraft, setBooleanDraft] = useState(() => fact.value === true);
   const [validationError, setValidationError] = useState<string>();
+
+  useEffect(() => {
+    controlRef.current?.focus();
+  }, []);
 
   const submit = async (event: React.FormEvent<HTMLFormElement>) => {
     event.preventDefault();
@@ -36,6 +41,7 @@ export function FactEditor({ fact, fieldLabel, saving, apiError, onCancel, onSav
       {typeof fact.value === "boolean" ? (
         <label className="checkbox-field" htmlFor={inputId}>
           <input
+            ref={controlRef as React.Ref<HTMLInputElement>}
             id={inputId}
             type="checkbox"
             checked={booleanDraft}
@@ -48,6 +54,7 @@ export function FactEditor({ fact, fieldLabel, saving, apiError, onCancel, onSav
         <label className="editor-field" htmlFor={inputId}>
           <span>{label}</span>
           <textarea
+            ref={controlRef as React.Ref<HTMLTextAreaElement>}
             id={inputId}
             aria-label={label}
             rows={structured ? 6 : 4}
@@ -60,6 +67,7 @@ export function FactEditor({ fact, fieldLabel, saving, apiError, onCancel, onSav
         <label className="editor-field" htmlFor={inputId}>
           <span>{label}</span>
           <input
+            ref={controlRef as React.Ref<HTMLInputElement>}
             id={inputId}
             aria-label={label}
             type={typeof fact.value === "number" ? "number" : "text"}

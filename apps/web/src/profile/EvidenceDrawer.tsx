@@ -65,28 +65,40 @@ export function EvidenceDrawer({ fact, returnFocusTo, onClose }: EvidenceDrawerP
           </button>
         </header>
         <div className="drawer-content">
-          {fact.evidence.map((evidence, index) => (
-            <section className="evidence-item" key={`${evidence.documentId}-${evidence.page}-${index}`}>
-              <dl className="evidence-meta">
-                <div>
-                  <dt>{evidence.documentId === "user" ? "来源" : "文档标识"}</dt>
-                  <dd className="document-id">{evidence.documentId === "user" ? "用户修改" : evidence.documentId}</dd>
+          {fact.evidence.map((evidence, index) => {
+            const userEvidence = evidence.extraction === "user";
+            return (
+              <section className="evidence-item" key={`${evidence.documentId}-${evidence.page}-${index}`}>
+                <dl className="evidence-meta">
+                  {userEvidence ? (
+                    <div>
+                      <dt>来源</dt>
+                      <dd>用户更正</dd>
+                    </div>
+                  ) : (
+                    <>
+                      <div>
+                        <dt>文档标识</dt>
+                        <dd className="document-id">{evidence.documentId}</dd>
+                      </div>
+                      <div>
+                        <dt>页码</dt>
+                        <dd>第 {evidence.page} 页</dd>
+                      </div>
+                      <div>
+                        <dt>提取方式</dt>
+                        <dd>{sourceLabel(evidence.extraction)}</dd>
+                      </div>
+                    </>
+                  )}
+                </dl>
+                <div className="quote-block">
+                  <h3>{userEvidence ? "更正记录" : "原文"}</h3>
+                  <blockquote>{evidence.text}</blockquote>
                 </div>
-                <div>
-                  <dt>页码</dt>
-                  <dd>第 {evidence.page} 页</dd>
-                </div>
-                <div>
-                  <dt>提取方式</dt>
-                  <dd>{sourceLabel(evidence.extraction)}</dd>
-                </div>
-              </dl>
-              <div className="quote-block">
-                <h3>原文</h3>
-                <blockquote>{evidence.text}</blockquote>
-              </div>
-            </section>
-          ))}
+              </section>
+            );
+          })}
         </div>
       </aside>
     </div>
@@ -96,5 +108,5 @@ export function EvidenceDrawer({ fact, returnFocusTo, onClose }: EvidenceDrawerP
 function sourceLabel(source: ProfileFact["evidence"][number]["extraction"]): string {
   if (source === "pdf_text") return "PDF 文本提取";
   if (source === "ocr") return "OCR 识别";
-  return "用户修改";
+  return "用户更正";
 }

@@ -89,9 +89,9 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
 .upload-progress span { animation: upload-progress 1.3s ease-in-out infinite; background: #238558; height: 100%; left: 0; position: absolute; width: 35%; }
 @keyframes upload-progress { from { transform: translateX(-100%); } to { transform: translateX(390%); } }
 @media (prefers-reduced-motion: reduce) { .upload-progress span, .spinner { animation: none !important; } }
-.upload-message { font-size: 13px; margin: 10px 0 0; }
+.upload-message { align-items: center; display: flex; flex-wrap: wrap; font-size: 13px; gap: 8px; margin: 10px 0 0; }
 .upload-message.success { color: #166a43; }
-.upload-message.error { color: #a52720; }
+.upload-message.error, .upload-message.accepted_refresh_error { color: #a52720; }
 
 .review-heading { align-items: flex-end; }
 .status-filter { background: #e9edef; border-radius: 7px; display: flex; gap: 2px; padding: 3px; }

@@ -1,4 +1,5 @@
 import Database from "better-sqlite3";
+import { DocumentResponseSchema, ErrorResponseSchema } from "@resume/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ExtractedDocument } from "@resume/profile-domain/src/pdf/types.js";
 import { migrateDatabase } from "../db/migrate.js";
@@ -112,7 +113,7 @@ describe("profile routes", () => {
     const upload = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) });
 
     expect(upload.statusCode).toBe(202);
-    expect(upload.json()).toEqual({ documentId: expect.any(String), fingerprint: "a".repeat(64) });
+    expect(DocumentResponseSchema.parse(upload.json())).toEqual({ documentId: expect.any(String), fingerprint: "a".repeat(64) });
 
     const facts = await app.inject({ method: "GET", url: "/api/profile/facts" });
     expect(facts.statusCode).toBe(200);
@@ -216,7 +217,7 @@ describe("profile routes", () => {
     const response = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes(), "text/plain") });
 
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: "Invalid PDF upload" });
+    expect(ErrorResponseSchema.parse(response.json())).toEqual({ error: "Invalid PDF upload" });
   });
 
   it("rejects a PDF MIME type with an invalid PDF signature", async () => {

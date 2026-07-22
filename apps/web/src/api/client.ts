@@ -1,12 +1,12 @@
-import { ProfileFactSchema, type ProfileFact } from "@resume/contracts";
+import {
+  DocumentResponseSchema,
+  ErrorResponseSchema,
+  ProfileFactSchema,
+  type ProfileFact
+} from "@resume/contracts";
 import { z } from "zod";
 
 const ProfileFactListSchema = z.array(ProfileFactSchema);
-const DocumentResponseSchema = z.object({
-  documentId: z.string().uuid(),
-  fingerprint: z.string().regex(/^[a-f0-9]{64}$/)
-}).strict();
-const ErrorResponseSchema = z.object({ error: z.string().min(1) }).strict();
 
 export interface ProfileApi {
   upload(file: File): Promise<{ documentId: string }>;

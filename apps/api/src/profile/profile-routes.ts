@@ -1,7 +1,7 @@
 import { Busboy as BusboyConstructor, type Busboy as BusboyParser, type BusboyFileStream } from "@fastify/busboy";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { JsonValueSchema, ProfileFactSchema } from "@resume/contracts";
+import { DocumentResponseSchema, JsonValueSchema, ProfileFactSchema } from "@resume/contracts";
 import { sendError } from "../http-response.js";
 import {
   DuplicateDocumentError,
@@ -18,7 +18,6 @@ const CorrectionBodySchema = z.object({
   value: JsonValueSchema
 }).strict();
 const ConfirmationBodySchema = z.union([z.undefined(), z.object({}).strict()]);
-const DocumentResponseSchema = z.object({ documentId: z.string().uuid(), fingerprint: z.string().regex(/^[a-f0-9]{64}$/) });
 const UploadMetadataSchema = z.object({
   fieldname: z.literal("file"),
   filename: z.string().min(1).max(255),
