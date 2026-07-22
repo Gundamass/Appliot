@@ -1,5 +1,6 @@
 node_modules/
 node_modules.pre-task2-native-backup/
+node_modules.pre-wrapper-*/
 dist/
 .env*
 data/
