@@ -13,7 +13,8 @@
 - Run entirely on the user's machine; bind the API to `127.0.0.1` only.
 - PDF originals, structured facts, evidence, indexes, and task records remain local.
 - An extracted fact is never eligible for automatic filling until the user confirms or corrects it.
-- Every generated value carries evidence, confidence, scope, and decision status.
+- Every `ProfileFact` carries evidence, confidence, scope, and `FactStatus`.
+- Every RAG `FieldDecision` carries evidence, confidence, and `DecisionStatus`.
 - Task-scoped answers override profile facts only inside that task and never become profile defaults without explicit user action.
 - Self-evaluation changes require user review and do not replace the base self-evaluation by default.
 - Do not implement browser control in this plan; Plan 2 owns that boundary.
