@@ -12,19 +12,29 @@ const standardFontDataUrl = `${resolve(
 ).replaceAll("\\", "/")}/`;
 
 function textFromPage(items: readonly unknown[]): string {
-  return items
-    .map((item) => {
-      if (typeof item !== "object" || item === null || !("str" in item)) return "";
-      return typeof item.str === "string" ? item.str : "";
-    })
-    .filter((text) => text.length > 0)
-    .join(" ")
-    .trim();
+  let text = "";
+
+  for (const item of items) {
+    if (typeof item !== "object" || item === null || !("str" in item) || typeof item.str !== "string") continue;
+    if (item.str.length > 0) {
+      if (text.length > 0 && !/[\s\n]$/.test(text)) text += " ";
+      text += item.str;
+    }
+    if ("hasEOL" in item && item.hasEOL === true) text = `${text.trimEnd()}\n`;
+  }
+
+  return text.trim();
+}
+
+export function hasUsablePdfText(text: string): boolean {
+  return text.replace(/[\s\p{Cc}\p{Cf}\p{Z}]/gu, "").length > 0;
 }
 
 export async function extractPdf(bytes: Uint8Array, ocr: OcrEngine): Promise<ExtractedDocument> {
+  const snapshot = Uint8Array.from(bytes);
+  const fingerprint = createHash("sha256").update(snapshot).digest("hex");
   const loadingTask = getDocument({
-    data: Uint8Array.from(bytes),
+    data: snapshot,
     standardFontDataUrl
   });
 
@@ -34,20 +44,25 @@ export async function extractPdf(bytes: Uint8Array, ocr: OcrEngine): Promise<Ext
 
     for (let pageNumber = 1; pageNumber <= document.numPages; pageNumber += 1) {
       const page = await document.getPage(pageNumber);
-      const content = await page.getTextContent();
-      const text = textFromPage(content.items);
 
-      if (text.length > 0) {
-        pages.push({ page: pageNumber, text, source: "pdf_text" });
-      } else {
-        const image = await renderPageForOcr(page);
-        const ocrText = await ocr.recognize(image, "chi_sim+eng");
-        pages.push({ page: pageNumber, text: ocrText, source: "ocr" });
+      try {
+        const content = await page.getTextContent();
+        const text = textFromPage(content.items);
+
+        if (hasUsablePdfText(text)) {
+          pages.push({ page: pageNumber, text, source: "pdf_text" });
+        } else {
+          const image = await renderPageForOcr(page);
+          const ocrText = await ocr.recognize(image, "chi_sim+eng");
+          pages.push({ page: pageNumber, text: ocrText, source: "ocr" });
+        }
+      } finally {
+        page.cleanup();
       }
     }
 
     return {
-      fingerprint: createHash("sha256").update(bytes).digest("hex"),
+      fingerprint,
       pages
     };
   } finally {

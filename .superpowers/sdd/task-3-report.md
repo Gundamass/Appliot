@@ -116,3 +116,94 @@ Reviewed `b45375e` against the task brief and final diff.
 - OCR language-model execution is intentionally not implemented here; callers supply an `OcrEngine` in a later composition layer.
 - `@napi-rs/canvas` is a native optional-platform dependency used only by the Node profile-domain renderer. It installed and rendered successfully on the current Windows environment.
 - `pnpm install` emitted the pre-existing non-fatal `prebuild-install@7.1.3` deprecation warning. It did not affect test, typecheck, or build results.
+
+## Review Fixes
+
+### Findings Verified
+
+All four Important findings were reproduced against commit `b45375e` before changing production code:
+
+- The parser received a defensive copy, but the fingerprint was calculated from caller-owned bytes after OCR awaited. Mutating those bytes in `recognize` produced a fingerprint different from the parsed document snapshot.
+- Any non-empty string was treated as usable PDF text; there was no visible-evidence predicate for controls, format characters, or separator-only text.
+- `PDFPageProxy.cleanup()` was never called when OCR rejected; an observed real proxy-prototype spy reported zero cleanup calls.
+- The original fallback fixture was a blank vector PDF page and asserted only the PNG signature.
+
+The stated Minor `hasEOL` finding was technically valid and fixed. `TextItem.hasEOL` boundaries are preserved as `\n`, with a regression test for two lines. The other Minor disposition is that no separately actionable second Minor finding was included in the review material supplied for this fix; no unrelated architecture or scope change was made.
+
+### RED
+
+Command:
+
+```powershell
+corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
+```
+
+Output summary:
+
+```text
+Test Files  1 failed (1)
+Tests       4 failed | 3 passed (7)
+Exit code: 1
+```
+
+Expected failures were:
+
+- snapshot race: SHA-256 of caller bytes mutated during OCR differed from the original snapshot hash;
+- `hasUsablePdfText` was missing for invisible-only text;
+- line breaks were collapsed to spaces;
+- observed `PDFPageProxy.cleanup` calls were `0` after an OCR error.
+
+An earlier fixture-mechanics RED run additionally confirmed these same production failures after correcting the assembled page order and obtaining a real PDF.js page prototype for cleanup observation.
+
+### GREEN
+
+Focused commands:
+
+```powershell
+corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
+corepack pnpm --filter @resume/profile-domain typecheck
+corepack pnpm --filter @resume/profile-domain build
+```
+
+Output:
+
+```text
+extract-pdf.test.ts: 1 test file passed, 7 tests passed, exit 0
+profile-domain typecheck: exit 0
+profile-domain build: exit 0
+```
+
+Covering verification commands:
+
+```powershell
+corepack pnpm test
+corepack pnpm typecheck
+corepack pnpm build
+git diff --check
+```
+
+Output:
+
+```text
+root test: 3 test files passed, 24 tests passed total
+  @resume/contracts: 5 passed
+  @resume/profile-domain: 7 passed
+  @resume/api: 12 passed
+root typecheck: exit 0
+root build: exit 0
+git diff --check: exit 0
+```
+
+### Test Files
+
+- `packages/profile-domain/src/pdf/extract-pdf.test.ts`
+- `tests/fixtures/create-pdf.ts`
+
+### Changes
+
+- `extractPdf` now takes one `Uint8Array` snapshot and hashes it before asynchronous parsing or OCR; PDF.js receives that same snapshot.
+- `hasUsablePdfText` removes whitespace, Unicode controls, format characters, and separators before deciding whether OCR is required. It has no arbitrary minimum character count.
+- Every acquired PDF page is released with `page.cleanup()` in a per-page `finally`; `loadingTask.destroy()` remains the top-level cleanup.
+- The generated OCR fixture embeds a deterministic scanned-style raster page with visible dark and red marks. The test decodes the OCR PNG, asserts its rendered 612x792 dimensions, and asserts non-white content pixels.
+- `textFromPage` preserves PDF.js `hasEOL` line boundaries while retaining deterministic item order.
+- OCR error and malformed-PDF propagation are covered. The malformed-PDF case causes PDF.js's expected `Warning: Indexing all PDF objects` recovery diagnostic but rejects as asserted.
