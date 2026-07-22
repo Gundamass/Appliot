@@ -2,18 +2,29 @@
   "name": "resume-application-assistant",
   "private": true,
   "packageManager": "pnpm@10.13.1",
-  "engines": { "node": ">=24.14.1" },
+  "engines": {
+    "node": ">=24.14.1"
+  },
   "scripts": {
-    "test": "vitest run",
+    "test": "corepack pnpm -r test",
     "typecheck": "tsc --noEmit",
-    "build": "pnpm -r build"
+    "build": "corepack pnpm -r build"
   },
   "devDependencies": {
     "@types/node": "24.0.0",
+    "node-gyp": "13.0.1",
     "typescript": "5.8.3",
     "vitest": "3.2.4"
   },
   "pnpm": {
-    "onlyBuiltDependencies": ["better-sqlite3"]
+    "onlyBuiltDependencies": [
+      "better-sqlite3"
+    ],
+    "overrides": {
+      "node-gyp": "13.0.1"
+    },
+    "patchedDependencies": {
+      "better-sqlite3@11.10.0": "patches/better-sqlite3@11.10.0.patch"
+    }
   }
 }

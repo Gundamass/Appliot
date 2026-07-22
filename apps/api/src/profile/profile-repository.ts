@@ -1,5 +1,5 @@
 import { randomUUID } from "node:crypto";
-import { ProfileFactSchema, type Evidence, type ProfileFact } from "@resume/contracts";
+import { ProfileFactSchema, type Evidence, type JsonValue, type ProfileFact } from "@resume/contracts";
 import type { SqliteDatabase } from "../db/client.js";
 
 interface FactRow {
@@ -26,8 +26,8 @@ interface ApplicationAnswerRow {
 export interface ProfileRepository {
   createExtracted(fact: ProfileFact): ProfileFact;
   confirm(factId: string): ProfileFact;
-  correct(factId: string, value: unknown, evidence: Evidence[]): ProfileFact;
-  putTaskAnswer(taskId: string, fieldPath: string, value: unknown, evidence: Evidence[]): ProfileFact;
+  correct(factId: string, value: JsonValue, evidence: Evidence[]): ProfileFact;
+  putTaskAnswer(taskId: string, fieldPath: string, value: JsonValue, evidence: Evidence[]): ProfileFact;
   resolveForTask(taskId: string, fieldPath: string): ProfileFact | undefined;
   listActive(): ProfileFact[];
   history(factId: string): ProfileFact[];
@@ -83,6 +83,13 @@ export function createProfileRepository(database: SqliteDatabase): ProfileReposi
     SET value_json = ?, status = 'user_corrected', confidence = 1, evidence_json = ?, revision = ?, updated_at = ?
     WHERE id = ?
   `);
+  const findReviewedAlternatives = database.prepare(`
+    SELECT * FROM profile_facts
+    WHERE scope = 'profile' AND field_path = ? AND id != ? AND status IN ('user_confirmed', 'user_corrected')
+  `);
+  const supersedeFact = database.prepare(`
+    UPDATE profile_facts SET status = 'superseded', revision = ?, updated_at = ? WHERE id = ?
+  `);
   const findTaskAnswer = database.prepare(
     "SELECT * FROM application_answers WHERE task_id = ? AND field_path = ?"
   );
@@ -102,6 +109,31 @@ export function createProfileRepository(database: SqliteDatabase): ProfileReposi
     const row = findFact.get(factId) as FactRow | undefined;
     if (!row) throw new Error(`profile fact not found: ${factId}`);
     return parseFact(row);
+  };
+
+  const snapshot = (fact: ProfileFact, timestamp: string): void => {
+    insertRevision.run(
+      randomUUID(),
+      fact.id,
+      fact.fieldPath,
+      JSON.stringify(fact.value),
+      fact.status,
+      fact.confidence,
+      fact.scope,
+      fact.taskId ?? null,
+      JSON.stringify(fact.evidence),
+      fact.revision,
+      timestamp
+    );
+  };
+
+  const supersedeReviewedAlternatives = (fact: ProfileFact, timestamp: string): void => {
+    if (fact.scope !== "profile") return;
+    const alternatives = findReviewedAlternatives.all(fact.fieldPath, fact.id) as FactRow[];
+    for (const alternative of alternatives.map(parseFact)) {
+      snapshot(alternative, timestamp);
+      supersedeFact.run(alternative.revision + 1, timestamp, alternative.id);
+    }
   };
 
   return {
@@ -126,10 +158,16 @@ export function createProfileRepository(database: SqliteDatabase): ProfileReposi
     },
 
     confirm(factId) {
-      const current = requireFact(factId);
-      if (current.status === "superseded") throw new Error(`cannot confirm superseded fact: ${factId}`);
-      updateStatus.run("user_confirmed", now(), factId);
-      return { ...current, status: "user_confirmed" };
+      return database.transaction(() => {
+        const current = requireFact(factId);
+        if (current.status === "superseded") throw new Error(`cannot confirm superseded fact: ${factId}`);
+        if (current.status === "user_confirmed" || current.status === "user_corrected") return current;
+        const timestamp = now();
+        updateStatus.run("user_confirmed", timestamp, factId);
+        const confirmed = { ...current, status: "user_confirmed" as const };
+        supersedeReviewedAlternatives(confirmed, timestamp);
+        return confirmed;
+      })();
     },
 
     correct(factId, value, evidence) {
@@ -138,19 +176,6 @@ export function createProfileRepository(database: SqliteDatabase): ProfileReposi
         if (current.status === "superseded") throw new Error(`cannot correct superseded fact: ${factId}`);
         const nextRevision = current.revision + 1;
         const timestamp = now();
-        insertRevision.run(
-          randomUUID(),
-          current.id,
-          current.fieldPath,
-          JSON.stringify(current.value),
-          current.status,
-          current.confidence,
-          current.scope,
-          current.taskId ?? null,
-          JSON.stringify(current.evidence),
-          current.revision,
-          timestamp
-        );
         const corrected = ProfileFactSchema.parse({
           ...current,
           value,
@@ -159,7 +184,9 @@ export function createProfileRepository(database: SqliteDatabase): ProfileReposi
           confidence: 1,
           revision: nextRevision
         });
+        snapshot(current, timestamp);
         updateFact.run(JSON.stringify(value), JSON.stringify(evidence), nextRevision, timestamp, factId);
+        supersedeReviewedAlternatives(corrected, timestamp);
         return corrected;
       })();
     },
@@ -187,7 +214,8 @@ export function createProfileRepository(database: SqliteDatabase): ProfileReposi
         timestamp,
         timestamp
       );
-      return fact;
+      const stored = findTaskAnswer.get(taskId, fieldPath) as ApplicationAnswerRow;
+      return parseApplicationAnswer(stored);
     },
 
     resolveForTask(taskId, fieldPath) {
@@ -196,7 +224,7 @@ export function createProfileRepository(database: SqliteDatabase): ProfileReposi
       const row = database.prepare(`
         SELECT * FROM profile_facts
         WHERE scope = 'profile' AND field_path = ? AND status IN ('user_corrected', 'user_confirmed')
-        ORDER BY CASE status WHEN 'user_corrected' THEN 0 ELSE 1 END, revision DESC
+        ORDER BY CASE status WHEN 'user_corrected' THEN 0 ELSE 1 END, revision DESC, updated_at DESC, id ASC
         LIMIT 1
       `).get(fieldPath) as FactRow | undefined;
       return row ? parseFact(row) : undefined;

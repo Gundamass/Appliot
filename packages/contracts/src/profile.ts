@@ -1,5 +1,39 @@
 import { z } from "zod";
 
+export type JsonValue = null | boolean | number | string | JsonValue[] | { [key: string]: JsonValue };
+
+export const JsonValueSchema = z.unknown().superRefine((value, context) => {
+  const ancestors = new Set<object>();
+
+  const validate = (candidate: unknown, path: (string | number)[]): void => {
+    if (candidate === null || typeof candidate === "string" || typeof candidate === "boolean") return;
+    if (typeof candidate === "number") {
+      if (Number.isFinite(candidate)) return;
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "JSON numbers must be finite", path });
+      return;
+    }
+    if (typeof candidate !== "object") {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "value must be JSON", path });
+      return;
+    }
+    if (ancestors.has(candidate)) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "JSON values cannot be cyclic", path });
+      return;
+    }
+    ancestors.add(candidate);
+    if (Array.isArray(candidate)) {
+      candidate.forEach((item, index) => validate(item, [...path, index]));
+    } else if (Object.getPrototypeOf(candidate) === Object.prototype || Object.getPrototypeOf(candidate) === null) {
+      Object.entries(candidate).forEach(([key, item]) => validate(item, [...path, key]));
+    } else {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "value must be a JSON object", path });
+    }
+    ancestors.delete(candidate);
+  };
+
+  validate(value, []);
+}) as z.ZodType<JsonValue>;
+
 export const FactStatusSchema = z.enum([
   "extracted",
   "user_confirmed",
@@ -22,7 +56,7 @@ export const EvidenceSchema = z.object({
 export const ProfileFactSchema = z.object({
   id: z.string().min(1),
   fieldPath: z.string().min(1),
-  value: z.unknown(),
+  value: JsonValueSchema,
   status: FactStatusSchema,
   confidence: z.number().min(0).max(1),
   scope: FactScopeSchema,

@@ -33,4 +33,36 @@ describe("ProfileFactSchema", () => {
     });
     expect(result.success).toBe(false);
   });
+
+  it("accepts JSON scalar, array, and object values", () => {
+    for (const value of ["text", 1, true, null, ["TypeScript", 5], { city: "Shanghai", remote: true }]) {
+      expect(ProfileFactSchema.safeParse({
+        id: "fact-json",
+        fieldPath: "preferences.value",
+        value,
+        status: "extracted",
+        confidence: 0.9,
+        scope: "profile",
+        evidence: [{ documentId: "resume.pdf", page: 1, text: "value", extraction: "pdf_text" }],
+        revision: 1
+      }).success).toBe(true);
+    }
+  });
+
+  it("rejects values that are not JSON", () => {
+    const cyclic: Record<string, unknown> = {};
+    cyclic.self = cyclic;
+    for (const value of [undefined, Number.NaN, Number.POSITIVE_INFINITY, 1n, cyclic]) {
+      expect(ProfileFactSchema.safeParse({
+        id: "fact-invalid-json",
+        fieldPath: "preferences.value",
+        value,
+        status: "extracted",
+        confidence: 0.9,
+        scope: "profile",
+        evidence: [{ documentId: "resume.pdf", page: 1, text: "value", extraction: "pdf_text" }],
+        revision: 1
+      }).success).toBe(false);
+    }
+  });
 });

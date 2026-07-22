@@ -1,4 +1,8 @@
-import { index, integer, real, sqliteTable, text } from "drizzle-orm/sqlite-core";
+import { sql } from "drizzle-orm";
+import { check, index, integer, real, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+
+const factStatuses = sql`('extracted', 'user_confirmed', 'user_corrected', 'superseded')`;
+const factScopes = sql`('profile', 'application')`;
 
 export const documents = sqliteTable("documents", {
   id: text("id").primaryKey(),
@@ -13,7 +17,10 @@ export const documentChunks = sqliteTable("document_chunks", {
   page: integer("page").notNull(),
   content: text("content").notNull(),
   createdAt: text("created_at").notNull()
-}, (table) => [index("document_chunks_document_id_idx").on(table.documentId)]);
+}, (table) => [
+  index("document_chunks_document_id_idx").on(table.documentId),
+  check("document_chunks_page_positive", sql`${table.page} > 0`)
+]);
 
 export const profileFacts = sqliteTable("profile_facts", {
   id: text("id").primaryKey(),
@@ -27,7 +34,16 @@ export const profileFacts = sqliteTable("profile_facts", {
   revision: integer("revision").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull()
-}, (table) => [index("profile_facts_field_path_idx").on(table.fieldPath)]);
+}, (table) => [
+  index("profile_facts_field_path_idx").on(table.fieldPath),
+  check("profile_facts_status_valid", sql`${table.status} IN ${factStatuses}`),
+  check("profile_facts_confidence_valid", sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`),
+  check("profile_facts_scope_valid", sql`${table.scope} IN ${factScopes}`),
+  check("profile_facts_revision_positive", sql`${table.revision} > 0`),
+  check("profile_facts_application_task_required", sql`${table.scope} != 'application' OR ${table.taskId} IS NOT NULL`),
+  check("profile_facts_value_json_valid", sql`json_valid(${table.valueJson})`),
+  check("profile_facts_evidence_json_valid", sql`json_valid(${table.evidenceJson}) AND json_type(${table.evidenceJson}) = 'array' AND json_array_length(${table.evidenceJson}) > 0`)
+]);
 
 export const factRevisions = sqliteTable("fact_revisions", {
   id: text("id").primaryKey(),
@@ -41,7 +57,17 @@ export const factRevisions = sqliteTable("fact_revisions", {
   evidenceJson: text("evidence_json").notNull(),
   revision: integer("revision").notNull(),
   createdAt: text("created_at").notNull()
-}, (table) => [index("fact_revisions_fact_id_revision_idx").on(table.factId, table.revision)]);
+}, (table) => [
+  index("fact_revisions_fact_id_revision_idx").on(table.factId, table.revision),
+  unique("fact_revisions_fact_id_revision_unique").on(table.factId, table.revision),
+  check("fact_revisions_status_valid", sql`${table.status} IN ${factStatuses}`),
+  check("fact_revisions_confidence_valid", sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`),
+  check("fact_revisions_scope_valid", sql`${table.scope} IN ${factScopes}`),
+  check("fact_revisions_revision_positive", sql`${table.revision} > 0`),
+  check("fact_revisions_application_task_required", sql`${table.scope} != 'application' OR ${table.taskId} IS NOT NULL`),
+  check("fact_revisions_value_json_valid", sql`json_valid(${table.valueJson})`),
+  check("fact_revisions_evidence_json_valid", sql`json_valid(${table.evidenceJson}) AND json_type(${table.evidenceJson}) = 'array' AND json_array_length(${table.evidenceJson}) > 0`)
+]);
 
 export const applicationAnswers = sqliteTable("application_answers", {
   id: text("id").primaryKey(),
@@ -52,7 +78,13 @@ export const applicationAnswers = sqliteTable("application_answers", {
   confidence: real("confidence").notNull(),
   createdAt: text("created_at").notNull(),
   updatedAt: text("updated_at").notNull()
-}, (table) => [index("application_answers_task_field_idx").on(table.taskId, table.fieldPath)]);
+}, (table) => [
+  index("application_answers_task_field_idx").on(table.taskId, table.fieldPath),
+  unique("application_answers_task_field_unique").on(table.taskId, table.fieldPath),
+  check("application_answers_confidence_valid", sql`${table.confidence} >= 0 AND ${table.confidence} <= 1`),
+  check("application_answers_value_json_valid", sql`json_valid(${table.valueJson})`),
+  check("application_answers_evidence_json_valid", sql`json_valid(${table.evidenceJson}) AND json_type(${table.evidenceJson}) = 'array' AND json_array_length(${table.evidenceJson}) > 0`)
+]);
 
 export const embeddings = sqliteTable("embeddings", {
   id: text("id").primaryKey(),
