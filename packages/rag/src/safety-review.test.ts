@@ -81,9 +81,14 @@ describe("review fix: evidence support", () => {
     "PMP certification: No.",
     "PMP certification; No.",
     "PMP certification\nNo.",
+    "PMP certification, No.",
+    "PMP certification ,   No.",
+    "PMP certification?!,  No.",
     "PMP certification? No. AWS certification: Yes.",
     "PMP certification? No, not currently.",
     "是否持有 PMP？否。",
+    "是否持有 PMP，否。",
+    "是否持有 PMP ？！ ， 否。",
     "是否持有 PMP？否。已通过 AWS 认证。",
     "PMP 证书：没有"
   ])("rejects an immediate clause answer that denies the candidate: %s", (text) => {
@@ -92,9 +97,13 @@ describe("review fix: evidence support", () => {
 
   it.each([
     "PMP certification? Yes.",
+    "PMP, Yes.",
+    "PMP？是。",
     "PMP certification：是。",
     "持有 PMP 证书。",
     "PMP certification completed. No relocation required.",
+    "PMP certification completed. No, relocation is not required.",
+    "持有 PMP 证书。否，不需要其他认证。",
     "PMP certified! No restrictions apply.",
     "PMP certification recorded.\nNo travel preference was provided."
   ])("preserves affirmative or unrelated later evidence: %s", (text) => {
@@ -126,7 +135,9 @@ describe("review fix: evidence support", () => {
 
   it.each([
     "PMP certification? No.",
-    "是否持有 PMP？否。"
+    "PMP certification, No.",
+    "是否持有 PMP？否。",
+    "是否持有 PMP，否。"
   ])("never auto-verifies an exact confirmed question-answer denial: %s", async (text) => {
     const candidate = fact({ value: "PMP", evidence: [pdfEvidence(text)] });
 

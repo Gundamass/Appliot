@@ -204,20 +204,37 @@ function hasPrecedingNegation(context: string): boolean {
 }
 
 function hasImmediateNegativeAnswer(context: string): boolean {
-  const separatorIndex = findAnswerSeparator(context);
-  if (separatorIndex < 0 || separatorIndex > 24) return false;
-  const answer = context.slice(separatorIndex + 1).trim();
-  return isStandaloneNegativeAnswer(answer);
+  for (let index = 0; index <= 24 && index < context.length;) {
+    const character = codePointAt(context, index);
+    if (isStatementTerminator(character)) return false;
+    if (!isClauseSeparator(character)) {
+      index += character.length;
+      continue;
+    }
+
+    let answerStart = index;
+    while (answerStart < context.length) {
+      const separator = codePointAt(context, answerStart);
+      if (isStatementTerminator(separator)) return false;
+      if (!isClauseSeparator(separator)) break;
+      answerStart += separator.length;
+    }
+    if (isStandaloneNegativeAnswer(context.slice(answerStart))) return true;
+    index = answerStart;
+  }
+  return false;
 }
 
-function findAnswerSeparator(context: string): number {
-  const separators = new Set(["?", "!", ":", ";", "\n", "？", "！", "：", "；"]);
-  for (let index = 0; index < context.length; index += 1) {
-    const character = context[index]!;
-    if (character === "." || character === "。") return -1;
-    if (separators.has(character)) return index;
-  }
-  return -1;
+function codePointAt(value: string, index: number): string {
+  return String.fromCodePoint(value.codePointAt(index)!);
+}
+
+function isClauseSeparator(character: string): boolean {
+  return /[\p{P}\p{S}\s]/u.test(character);
+}
+
+function isStatementTerminator(character: string): boolean {
+  return character === "." || character === "。";
 }
 
 function isStandaloneNegativeAnswer(answer: string): boolean {
