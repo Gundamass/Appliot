@@ -54,14 +54,29 @@ importers:
         specifier: 3.25.67
         version: 3.25.67
 
+  packages/model-provider:
+    dependencies:
+      zod:
+        specifier: 3.25.67
+        version: 3.25.67
+
   packages/profile-domain:
     dependencies:
       '@napi-rs/canvas':
         specifier: 0.1.70
         version: 0.1.70
+      '@resume/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      '@resume/model-provider':
+        specifier: workspace:*
+        version: link:../model-provider
       pdfjs-dist:
         specifier: 5.3.31
         version: 5.3.31
+      zod:
+        specifier: 3.25.67
+        version: 3.25.67
 
 packages:
 

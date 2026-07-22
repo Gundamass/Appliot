@@ -1,0 +1,12 @@
+{
+  "name": "@resume/model-provider",
+  "private": true,
+  "type": "module",
+  "exports": { ".": "./src/index.ts" },
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit -p ../../tsconfig.json",
+    "build": "tsc --noEmit -p ../../tsconfig.json"
+  },
+  "dependencies": { "zod": "3.25.67" }
+}
