@@ -90,6 +90,30 @@ export function migrateDatabase(database: SqliteDatabase): void {
       created_at TEXT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS embeddings_document_chunk_id_idx ON embeddings(document_chunk_id);
+
+    CREATE TABLE IF NOT EXISTS embedding_indexes (
+      id TEXT PRIMARY KEY,
+      model TEXT NOT NULL,
+      model_revision TEXT NOT NULL,
+      dimensions INTEGER NOT NULL CHECK (dimensions > 0),
+      normalization TEXT NOT NULL CHECK (normalization = 'l2'),
+      instruction_version TEXT NOT NULL,
+      status TEXT NOT NULL CHECK (status IN ('building', 'active', 'retired')),
+      created_at TEXT NOT NULL,
+      activated_at TEXT
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS embedding_indexes_one_active
+      ON embedding_indexes(status) WHERE status = 'active';
+
+    CREATE TABLE IF NOT EXISTS fact_embeddings (
+      index_id TEXT NOT NULL REFERENCES embedding_indexes(id),
+      fact_id TEXT NOT NULL REFERENCES profile_facts(id),
+      fact_revision INTEGER NOT NULL CHECK (fact_revision > 0),
+      content_hash TEXT NOT NULL,
+      vector_json TEXT NOT NULL CHECK (json_valid(vector_json)),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (index_id, fact_id)
+    );
   `);
 
   const documentColumns = database.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;

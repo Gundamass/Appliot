@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, real, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import { check, index, integer, primaryKey, real, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
 
 const factStatuses = sql`('extracted', 'user_confirmed', 'user_corrected', 'superseded')`;
 const factScopes = sql`('profile', 'application')`;
@@ -97,3 +97,32 @@ export const embeddings = sqliteTable("embeddings", {
   vectorJson: text("vector_json").notNull(),
   createdAt: text("created_at").notNull()
 }, (table) => [index("embeddings_document_chunk_id_idx").on(table.documentChunkId)]);
+
+export const embeddingIndexes = sqliteTable("embedding_indexes", {
+  id: text("id").primaryKey(),
+  model: text("model").notNull(),
+  modelRevision: text("model_revision").notNull(),
+  dimensions: integer("dimensions").notNull(),
+  normalization: text("normalization").notNull(),
+  instructionVersion: text("instruction_version").notNull(),
+  status: text("status").notNull(),
+  createdAt: text("created_at").notNull(),
+  activatedAt: text("activated_at")
+}, (table) => [
+  check("embedding_indexes_dimensions_positive", sql`${table.dimensions} > 0`),
+  check("embedding_indexes_normalization_valid", sql`${table.normalization} = 'l2'`),
+  check("embedding_indexes_status_valid", sql`${table.status} IN ('building', 'active', 'retired')`)
+]);
+
+export const factEmbeddings = sqliteTable("fact_embeddings", {
+  indexId: text("index_id").notNull().references(() => embeddingIndexes.id),
+  factId: text("fact_id").notNull().references(() => profileFacts.id),
+  factRevision: integer("fact_revision").notNull(),
+  contentHash: text("content_hash").notNull(),
+  vectorJson: text("vector_json").notNull(),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  primaryKey({ columns: [table.indexId, table.factId] }),
+  check("fact_embeddings_fact_revision_positive", sql`${table.factRevision} > 0`),
+  check("fact_embeddings_vector_json_valid", sql`json_valid(${table.vectorJson})`)
+]);
