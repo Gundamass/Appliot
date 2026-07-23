@@ -174,6 +174,65 @@ describe("DeepSeekStructuredModelProvider", () => {
     expect(JSON.parse(fetch.mock.calls[1]![1]!.body as string).model).toBe("deepseek-v4-flash");
   });
 
+  it("does not escalate when exhausted Flash attempts mix transport and validation failures", async () => {
+    const fetch = fakeFetch(response(500), completion("not-json"));
+    const provider = new DeepSeekStructuredModelProvider(config, { fetch: fetch as typeof globalThis.fetch, sleep: async () => undefined });
+
+    await expect(provider.generateStructured({
+      system: "Return json.", user: "resume", schema: FactsSchema, jsonExample: { facts: [] }
+    })).rejects.toMatchObject({ kind: "validation" });
+
+    expect(fetch).toHaveBeenCalledTimes(2);
+    expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string).model).toBe("deepseek-v4-flash");
+    expect(JSON.parse(fetch.mock.calls[1]![1]!.body as string).model).toBe("deepseek-v4-flash");
+  });
+
+  it("sanitizes a rejected retry sleep", async () => {
+    const sleepSecret = "retry-sleep-secret";
+    const fetch = fakeFetch(response(500));
+    const sleep = vi.fn(async () => { throw new Error(sleepSecret); });
+    const provider = new DeepSeekStructuredModelProvider(config, { fetch: fetch as typeof globalThis.fetch, sleep });
+
+    const error = await capture(() => provider.generateStructured({
+      system: "Return json.", user: "resume", schema: FactsSchema, jsonExample: { facts: [] }
+    }));
+
+    expect(error).toBeInstanceOf(DeepSeekProviderError);
+    expect(error).toMatchObject({ kind: "response" });
+    expect(errorText(error)).not.toContain(sleepSecret);
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(sleep).toHaveBeenCalledTimes(1);
+  });
+
+  it("does not escalate when retry sleep ends Flash validation retries early", async () => {
+    const fetch = fakeFetch(completion("not-json"));
+    const sleep = vi.fn(async () => { throw new Error("retry-sleep-secret"); });
+    const provider = new DeepSeekStructuredModelProvider(config, { fetch: fetch as typeof globalThis.fetch, sleep });
+
+    await expect(provider.generateStructured({
+      system: "Return json.", user: "resume", schema: FactsSchema, jsonExample: { facts: [] }
+    })).rejects.toMatchObject({ kind: "validation" });
+
+    expect(fetch).toHaveBeenCalledTimes(1);
+    expect(JSON.parse(fetch.mock.calls[0]![1]!.body as string).model).toBe("deepseek-v4-flash");
+  });
+
+  it.each([
+    ["BigInt", BigInt(1)],
+    ["cyclic object", (() => { const value: { self?: unknown } = {}; value.self = value; return value; })()]
+  ])("rejects a non-serializable %s example locally", async (_caseName, jsonExample) => {
+    const fetch = fakeFetch(completion(JSON.stringify({ facts: [] })));
+    const sleep = vi.fn(async () => undefined);
+    const provider = new DeepSeekStructuredModelProvider(config, { fetch: fetch as typeof globalThis.fetch, sleep });
+
+    await expect(provider.generateStructured({
+      system: "Return json.", user: "resume", schema: FactsSchema, jsonExample
+    })).rejects.toMatchObject({ kind: "validation" });
+
+    expect(fetch).not.toHaveBeenCalled();
+    expect(sleep).not.toHaveBeenCalled();
+  });
+
   it("does not expose reasoning content in a successful result", async () => {
     const fetch = fakeFetch(completion(JSON.stringify({ facts: [] }), "reasoning-secret-content"));
     const provider = new DeepSeekStructuredModelProvider(config, { fetch: fetch as typeof globalThis.fetch, sleep: async () => undefined });

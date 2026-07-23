@@ -77,7 +77,7 @@ export class DeepSeekStructuredModelProvider implements StructuredModelProvider 
     const flashFailure = await this.generateWithModel(this.config.defaultModel, input);
     if (flashFailure.ok) return flashFailure.value;
 
-    if (flashFailure.failure.failureClass === "retryable_validation") {
+    if (flashFailure.exhaustedAttempts && flashFailure.allAttemptsValidation) {
       const escalationFailure = await this.generateWithModel(this.config.escalationModel, input);
       if (escalationFailure.ok) return escalationFailure.value;
       throw escalationFailure.failure.providerError;
@@ -88,9 +88,10 @@ export class DeepSeekStructuredModelProvider implements StructuredModelProvider 
 
   private async generateWithModel<T>(model: string, input: StructuredGenerationInput<T>): Promise<
     | { ok: true; value: T }
-    | { ok: false; failure: ClassifiedFailure }
+    | { ok: false; failure: ClassifiedFailure; allAttemptsValidation: boolean; exhaustedAttempts: boolean }
   > {
     let latestFailure: ClassifiedFailure | undefined;
+    let allAttemptsValidation = true;
 
     for (let attempt = 0; attempt <= this.config.maxRetries; attempt += 1) {
       try {
@@ -98,10 +99,15 @@ export class DeepSeekStructuredModelProvider implements StructuredModelProvider 
       } catch (error) {
         const failure = toClassifiedFailure(error);
         latestFailure = failure;
+        allAttemptsValidation &&= failure.failureClass === "retryable_validation";
         if (failure.failureClass === "fatal" || attempt === this.config.maxRetries) {
-          return { ok: false, failure };
+          return { ok: false, failure, allAttemptsValidation, exhaustedAttempts: attempt === this.config.maxRetries };
         }
-        await this.sleep(retryDelay(attempt));
+        try {
+          await this.sleep(retryDelay(attempt));
+        } catch {
+          return { ok: false, failure, allAttemptsValidation, exhaustedAttempts: false };
+        }
       }
     }
 
@@ -109,7 +115,12 @@ export class DeepSeekStructuredModelProvider implements StructuredModelProvider 
   }
 
   private async request<T>(model: string, input: StructuredGenerationInput<T>): Promise<T> {
-    const serializedExample = JSON.stringify(input.jsonExample);
+    let serializedExample: string | undefined;
+    try {
+      serializedExample = JSON.stringify(input.jsonExample);
+    } catch {
+      throw new DeepSeekProviderError("validation");
+    }
     if (serializedExample === undefined) throw new DeepSeekProviderError("validation");
 
     const controller = new AbortController();
