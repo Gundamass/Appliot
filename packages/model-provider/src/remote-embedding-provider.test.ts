@@ -130,6 +130,19 @@ describe("RemoteEmbeddingProvider", () => {
   });
 
   it.each([
+    ["unexpected top-level field", { unexpected: true }],
+    ["unexpected data-entry field", {
+      data: [{ index: 0, embedding: [1, 0, 0, 0], unexpected: true }]
+    }]
+  ])("rejects a response with an %s", async (_caseName, overrides) => {
+    const fetch = embeddingFetch([responseFor([[1, 0, 0, 0]], 4, overrides)]);
+    const provider = new RemoteEmbeddingProvider(testConfig(), { fetch: fetch as typeof globalThis.fetch });
+
+    await expect(provider.embedDocuments(["resume fact"])).rejects.toMatchObject({ kind: "response" });
+    expect(fetch).toHaveBeenCalledTimes(1);
+  });
+
+  it.each([
     ["empty batch", [], "input"],
     ["blank text", ["  "], "input"],
     ["too many inputs", Array.from({ length: 33 }, () => "resume fact"), "input"],
@@ -199,5 +212,41 @@ describe("RemoteEmbeddingProvider", () => {
     expect(sleep).toHaveBeenCalledWith(100);
     expect(sleep).toHaveBeenCalledWith(200);
     expect(errorText(error)).not.toContain("timeout-secret");
+  });
+
+  it("keeps the timeout active while parsing a stalled response body and retries", async () => {
+    vi.useFakeTimers();
+    try {
+      const signals: AbortSignal[] = [];
+      const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+        signals.push(init!.signal!);
+        return responseFor([[1, 0, 0, 0]]);
+      });
+      const sleep = vi.fn(async () => undefined);
+      const parseResponse = vi.fn(async () => new Promise<never>((_resolve, reject) => {
+        signals.at(-1)?.addEventListener("abort", () => {
+          reject(new DOMException("stalled-body-secret", "AbortError"));
+        }, { once: true });
+      }));
+      const provider = new RemoteEmbeddingProvider(testConfig({ timeoutMs: 10 }), {
+        fetch: fetch as typeof globalThis.fetch,
+        sleep,
+        parseResponse
+      });
+      const operation = capture(() => provider.embedDocuments(["resume fact"]));
+
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(fetch).toHaveBeenCalledTimes(3);
+      expect(parseResponse).toHaveBeenCalledTimes(3);
+      expect(sleep).toHaveBeenCalledTimes(2);
+      const error = await operation;
+      expect(error).toMatchObject({ kind: "timeout" });
+      expect(errorText(error)).not.toContain("stalled-body-secret");
+    } finally {
+      vi.useRealTimers();
+    }
   });
 });

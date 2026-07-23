@@ -121,60 +121,63 @@ export class RemoteEmbeddingProvider implements EmbeddingProvider {
   private async request(texts: string[]): Promise<number[][]> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
-    let response: Response;
     try {
-      response = await this.fetch(`${this.config.baseUrl}/v1/embeddings`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.config.apiToken}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({ model: this.config.model, input: texts }),
-        signal: controller.signal
-      });
-    } catch (error) {
-      if (isAbortError(error)) throw new ClassifiedFailure(new RemoteEmbeddingError("timeout"), true);
-      throw new ClassifiedFailure(new RemoteEmbeddingError("network"), true);
-    } finally {
-      clearTimeout(timeout);
-    }
+      let response: Response;
+      try {
+        response = await this.fetch(`${this.config.baseUrl}/v1/embeddings`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.config.apiToken}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({ model: this.config.model, input: texts }),
+          signal: controller.signal
+        });
+      } catch (error) {
+        if (isAbortError(error)) throw new ClassifiedFailure(new RemoteEmbeddingError("timeout"), true);
+        throw new ClassifiedFailure(new RemoteEmbeddingError("network"), true);
+      }
 
-    if (!response.ok) throw failureForStatus(response.status);
+      if (!response.ok) throw failureForStatus(response.status);
 
-    let payload: unknown;
-    try {
-      payload = await this.parseResponse(response);
-    } catch {
-      throw new RemoteEmbeddingError("response");
-    }
+      let payload: unknown;
+      try {
+        payload = await this.parseResponse(response);
+      } catch (error) {
+        if (isAbortError(error)) throw new ClassifiedFailure(new RemoteEmbeddingError("timeout"), true);
+        throw new RemoteEmbeddingError("response");
+      }
 
-    const parsed = EmbeddingResponseSchema.safeParse(payload);
-    if (!parsed.success) throw new RemoteEmbeddingError("response");
-    if (
-      parsed.data.model !== this.config.model
-      || parsed.data.modelRevision !== this.config.modelRevision
-      || parsed.data.dimensions !== this.config.dimensions
-      || parsed.data.data.length !== texts.length
-    ) {
-      throw new RemoteEmbeddingError("response");
-    }
-
-    const vectors = [...parsed.data.data].sort((left, right) => left.index - right.index);
-    if (vectors.some((entry, index) => entry.index !== index)) {
-      throw new RemoteEmbeddingError("response");
-    }
-
-    for (const { embedding } of vectors) {
+      const parsed = EmbeddingResponseSchema.safeParse(payload);
+      if (!parsed.success) throw new RemoteEmbeddingError("response");
       if (
-        embedding.length !== this.config.dimensions
-        || embedding.some((value) => !Number.isFinite(value))
-        || Math.abs(vectorNorm(embedding) - 1) > NORM_TOLERANCE
+        parsed.data.model !== this.config.model
+        || parsed.data.modelRevision !== this.config.modelRevision
+        || parsed.data.dimensions !== this.config.dimensions
+        || parsed.data.data.length !== texts.length
       ) {
         throw new RemoteEmbeddingError("response");
       }
-    }
 
-    return vectors.map(({ embedding }) => [...embedding]);
+      const vectors = [...parsed.data.data].sort((left, right) => left.index - right.index);
+      if (vectors.some((entry, index) => entry.index !== index)) {
+        throw new RemoteEmbeddingError("response");
+      }
+
+      for (const { embedding } of vectors) {
+        if (
+          embedding.length !== this.config.dimensions
+          || embedding.some((value) => !Number.isFinite(value))
+          || Math.abs(vectorNorm(embedding) - 1) > NORM_TOLERANCE
+        ) {
+          throw new RemoteEmbeddingError("response");
+        }
+      }
+
+      return vectors.map(({ embedding }) => [...embedding]);
+    } finally {
+      clearTimeout(timeout);
+    }
   }
 }
 
