@@ -6,6 +6,7 @@ from pathlib import Path
 
 import pytest
 
+import resume_embedding_worker.config as config
 from resume_embedding_worker.config import load_settings
 from resume_embedding_worker.types import (
     EMBEDDING_DIMENSIONS,
@@ -133,3 +134,51 @@ def test_settings_reject_manifest_missing_file(tmp_path: Path):
 
     with pytest.raises(ValueError, match="manifest"):
         load_settings(environment(tmp_path, EMBEDDING_MODEL_PATH=str(model_path)))
+
+
+def test_settings_reject_empty_manifest_before_model_load(tmp_path: Path):
+    model_path = model_directory(tmp_path)
+    manifest_path = model_path / "model-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"] = []
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+    with pytest.raises(ValueError, match="at least one model file"):
+        load_settings(environment(tmp_path, EMBEDDING_MODEL_PATH=str(model_path)))
+
+
+def test_settings_reject_manifest_with_unlisted_model_file(tmp_path: Path):
+    model_path = model_directory(tmp_path)
+    (model_path / "extra-config.json").write_text("{}", encoding="utf-8")
+
+    with pytest.raises(ValueError, match="cover all model files"):
+        load_settings(environment(tmp_path, EMBEDDING_MODEL_PATH=str(model_path)))
+
+
+def test_windows_acl_rejects_later_extra_principal_with_read_access(tmp_path: Path, monkeypatch):
+    model_path = model_directory(tmp_path)
+    token_path = token_file(tmp_path / "acl")
+    current_user = os.environ["USERNAME"]
+    acl_output = "\n".join(
+        [
+            f"{token_path} {current_user}:(F)",
+            "                      BUILTIN\\Users:(RX)",
+            "Successfully processed 1 files; Failed processing 0 files",
+        ]
+    )
+
+    monkeypatch.setattr(config.os, "name", "nt")
+    monkeypatch.setattr(
+        config.subprocess,
+        "run",
+        lambda *args, **kwargs: type("Completed", (), {"returncode": 0, "stdout": acl_output})(),
+    )
+
+    with pytest.raises(ValueError, match="0600"):
+        load_settings(
+            environment(
+                tmp_path,
+                EMBEDDING_MODEL_PATH=str(model_path),
+                EMBEDDING_API_TOKEN_FILE=str(token_path),
+            )
+        )

@@ -25,6 +25,7 @@ from .types import (
 
 _GPU = "5"
 _SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
+_WINDOWS_READ_ACCESS = frozenset({"F", "M", "RX", "R"})
 
 
 @dataclass(frozen=True)
@@ -135,19 +136,33 @@ def _has_secure_token_permissions(path: Path) -> bool:
         return False
     if result.returncode != 0:
         return False
-    entries = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-    if not entries:
+    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
+    if not lines:
         return False
-    acl_line = entries[0]
-    principal_and_rights = acl_line[len(str(path)) :].strip()
     username = os.environ.get("USERNAME", "")
-    principal, separator, rights = principal_and_rights.rpartition(":")
-    return (
-        bool(username)
-        and separator == ":"
-        and rights.lower() == "(f)"
-        and (principal.lower() == username.lower() or principal.lower().endswith(f"\\{username.lower()}"))
-    )
+    if not username:
+        return False
+
+    current_user_has_access = False
+    for line in lines:
+        if line.lower().startswith("successfully processed"):
+            continue
+        if line.startswith(str(path)):
+            line = line[len(str(path)) :].strip()
+        principal, separator, rights = line.rpartition(":")
+        if separator != ":":
+            continue
+        flags = {flag.upper() for flag in re.findall(r"\(([^()]*)\)", rights)}
+        if "DENY" in flags or not flags & _WINDOWS_READ_ACCESS:
+            continue
+        is_current_user = principal.casefold() == username.casefold() or principal.casefold().endswith(
+            f"\\{username.casefold()}"
+        )
+        if not is_current_user:
+            return False
+        current_user_has_access = True
+
+    return current_user_has_access
 
 
 def _validate_manifest(
@@ -176,12 +191,18 @@ def _validate_manifest(
     files = manifest.get("files")
     if not isinstance(files, list):
         raise ValueError("model-manifest.json files must be a list.")
+    if not files:
+        raise ValueError("model-manifest.json must list at least one model file.")
+    listed_files: set[Path] = set()
     for item in files:
         if not isinstance(item, dict) or not isinstance(item.get("path"), str):
             raise ValueError("model-manifest.json contains an invalid file entry.")
         relative_path = Path(item["path"])
         if relative_path.is_absolute() or ".." in relative_path.parts:
             raise ValueError("model-manifest.json contains an unsafe file path.")
+        if relative_path in listed_files:
+            raise ValueError("model-manifest.json contains a duplicate file entry.")
+        listed_files.add(relative_path)
         expected_hash = item.get("sha256")
         if not isinstance(expected_hash, str) or not _SHA256.fullmatch(expected_hash):
             raise ValueError("model-manifest.json contains an invalid hash.")
@@ -195,3 +216,11 @@ def _validate_manifest(
         actual_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
         if not hmac.compare_digest(actual_hash, expected_hash.lower()):
             raise ValueError("model-manifest.json file hash does not match.")
+
+    actual_files = {
+        file_path.relative_to(model_path)
+        for file_path in model_path.rglob("*")
+        if file_path.is_file() and file_path.resolve() != manifest_path
+    }
+    if listed_files != actual_files:
+        raise ValueError("model-manifest.json does not cover all model files.")
