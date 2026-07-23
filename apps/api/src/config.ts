@@ -29,6 +29,11 @@ const positiveInteger = z.preprocess(
   z.number().int().positive()
 );
 
+const nonNegativeInteger = z.preprocess(
+  (value) => typeof value === "string" && value.trim() !== "" ? Number(value) : value,
+  z.number().int().nonnegative()
+);
+
 const nonEmptyString = z.string().min(1);
 const url = nonEmptyString.url().refine((value) => {
   const protocol = new URL(value).protocol;
@@ -42,7 +47,7 @@ const deepSeekSchema = z.object({
   escalationModel: nonEmptyString,
   thinking: z.literal("disabled"),
   timeoutMs: positiveInteger,
-  maxRetries: z.number().int().nonnegative()
+  maxRetries: nonNegativeInteger
 });
 
 function invalidVariables(result: z.SafeParseError<unknown>, variables: Record<string, string>): string[] {
@@ -69,7 +74,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
       escalationModel: env.DEEPSEEK_MODEL_ESCALATION ?? "deepseek-v4-pro",
       thinking: env.DEEPSEEK_THINKING ?? "disabled",
       timeoutMs: env.DEEPSEEK_TIMEOUT_MS ?? "60000",
-      maxRetries: env.DEEPSEEK_MAX_RETRIES === undefined ? 2 : Number(env.DEEPSEEK_MAX_RETRIES)
+      maxRetries: env.DEEPSEEK_MAX_RETRIES ?? 2
     };
     const result = deepSeekSchema.safeParse(values);
     if (!result.success) {

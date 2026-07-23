@@ -39,4 +39,13 @@ describe("API configuration", () => {
     expect(captureError(() => loadConfig({ DEEPSEEK_API_KEY: secret, DEEPSEEK_TIMEOUT_MS: "NaN" })))
       .not.toContain(secret);
   });
+
+  it("rejects blank max retries but accepts the explicit zero value", () => {
+    expect(loadConfig({ DEEPSEEK_API_KEY: "test-key", DEEPSEEK_MAX_RETRIES: "0" }).deepseek?.maxRetries)
+      .toBe(0);
+    expect(() => loadConfig({ DEEPSEEK_API_KEY: "test-key", DEEPSEEK_MAX_RETRIES: "" }))
+      .toThrow("DEEPSEEK_MAX_RETRIES");
+    expect(() => loadConfig({ DEEPSEEK_API_KEY: "test-key", DEEPSEEK_MAX_RETRIES: "   " }))
+      .toThrow("DEEPSEEK_MAX_RETRIES");
+  });
 });
