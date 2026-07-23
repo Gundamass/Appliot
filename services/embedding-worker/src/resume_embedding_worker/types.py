@@ -8,7 +8,9 @@ EMBEDDING_MODEL = "Qwen/Qwen3-Embedding-8B"
 EMBEDDING_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
 EMBEDDING_DIMENSIONS = 4096
 EMBEDDING_DTYPE = "float16"
-MAX_REQUEST_BYTES = 1_048_576
+# 32 inputs * 30,000 Unicode code points * 4 UTF-8 bytes plus JSON framing.
+MAX_REQUEST_BYTES = 4 * 1024 * 1024
+MAX_EMPTY_REQUEST_BODY_FRAMES = 1_024
 MAX_TEXT_CHARACTERS = 30_000
 UNIT_NORM_TOLERANCE = 1e-3
 
@@ -23,6 +25,7 @@ class WorkerSettings:
     dimensions: int = EMBEDDING_DIMENSIONS
     dtype: str = EMBEDDING_DTYPE
     max_request_bytes: int = MAX_REQUEST_BYTES
+    max_empty_request_body_frames: int = MAX_EMPTY_REQUEST_BODY_FRAMES
     max_text_characters: int = MAX_TEXT_CHARACTERS
 
 

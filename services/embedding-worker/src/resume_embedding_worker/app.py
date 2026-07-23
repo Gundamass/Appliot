@@ -46,9 +46,10 @@ class InvalidBackendOutput(Exception):
 
 
 class EmbeddingRequestBodyLimitMiddleware:
-    def __init__(self, app: ASGIApp, max_request_bytes: int) -> None:
+    def __init__(self, app: ASGIApp, max_request_bytes: int, max_empty_frames: int) -> None:
         self.app = app
         self.max_request_bytes = max_request_bytes
+        self.max_empty_frames = max_empty_frames
 
     async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
         if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] != "/v1/embeddings":
@@ -73,8 +74,9 @@ class EmbeddingRequestBodyLimitMiddleware:
                 )
                 return
 
-        buffered_messages: list[Message] = []
+        buffered_body = bytearray()
         received_bytes = 0
+        empty_frames = 0
         while True:
             message = await receive()
             if message["type"] == "http.disconnect":
@@ -82,7 +84,8 @@ class EmbeddingRequestBodyLimitMiddleware:
             if message["type"] != "http.request":
                 continue
 
-            received_bytes += len(message.get("body", b""))
+            body = message.get("body", b"")
+            received_bytes += len(body)
             if received_bytes > self.max_request_bytes:
                 await _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.")(
                     scope,
@@ -91,14 +94,30 @@ class EmbeddingRequestBodyLimitMiddleware:
                 )
                 return
 
-            buffered_messages.append(message)
+            if body:
+                buffered_body.extend(body)
+            else:
+                empty_frames += 1
+                if empty_frames > self.max_empty_frames:
+                    await _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.")(
+                        scope,
+                        receive,
+                        send,
+                    )
+                    return
+
             if not message.get("more_body", False):
                 break
 
-        buffered_iterator = iter(buffered_messages)
+        bounded_body = bytes(buffered_body)
+        replayed = False
 
         async def replay_receive() -> Message:
-            return next(buffered_iterator, {"type": "http.disconnect"})
+            nonlocal replayed
+            if replayed:
+                return {"type": "http.disconnect"}
+            replayed = True
+            return {"type": "http.request", "body": bounded_body, "more_body": False}
 
         await self.app(scope, replay_receive, send)
 
@@ -106,7 +125,11 @@ class EmbeddingRequestBodyLimitMiddleware:
 def create_app(backend: EmbeddingBackend, settings: WorkerSettings) -> FastAPI:
     _validate_backend_metadata(backend, settings)
     app = FastAPI()
-    app.add_middleware(EmbeddingRequestBodyLimitMiddleware, max_request_bytes=settings.max_request_bytes)
+    app.add_middleware(
+        EmbeddingRequestBodyLimitMiddleware,
+        max_request_bytes=settings.max_request_bytes,
+        max_empty_frames=settings.max_empty_request_body_frames,
+    )
     inference_lock = threading.Lock()
 
     def require_auth(authorization: Annotated[str | None, Header()] = None) -> None:
@@ -120,9 +143,15 @@ def create_app(backend: EmbeddingBackend, settings: WorkerSettings) -> FastAPI:
     def healthz() -> dict[str, str]:
         return {"status": "alive"}
 
-    @app.get("/readyz", dependencies=[Depends(require_auth)])
-    def readyz() -> dict[str, str | int]:
-        if not backend.ready:
+    @app.get("/readyz", dependencies=[Depends(require_auth)], response_model=None)
+    def readyz() -> dict[str, str | int] | JSONResponse:
+        started = time.perf_counter()
+        request_id = uuid.uuid4().hex
+        try:
+            is_ready = backend.ready
+        except Exception as error:
+            return _backend_failure_response(error, request_id, 0, started)
+        if not is_ready:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Worker is not ready.",
@@ -141,32 +170,23 @@ def create_app(backend: EmbeddingBackend, settings: WorkerSettings) -> FastAPI:
                 status_code=status.HTTP_400_BAD_REQUEST,
                 detail="Unsupported embedding model.",
             )
-        if not backend.ready:
+        started = time.perf_counter()
+        request_id = uuid.uuid4().hex
+        try:
+            is_ready = backend.ready
+        except Exception as error:
+            return _backend_failure_response(error, request_id, len(request.input), started)
+        if not is_ready:
             raise HTTPException(
                 status_code=status.HTTP_503_SERVICE_UNAVAILABLE,
                 detail="Worker is not ready.",
             )
-
-        started = time.perf_counter()
-        request_id = uuid.uuid4().hex
         try:
             with inference_lock:
                 vectors = backend.embed(request.input)
                 _validate_vectors(vectors, len(request.input), settings.dimensions)
         except Exception as error:
-            elapsed_ms = round((time.perf_counter() - started) * 1000)
-            LOGGER.info(
-                "embedding request failed request_id=%s count=%d elapsed_ms=%d error_class=%s",
-                request_id,
-                len(request.input),
-                elapsed_ms,
-                type(error).__name__,
-            )
-            return _error_response(
-                status.HTTP_503_SERVICE_UNAVAILABLE,
-                "Embedding temporarily unavailable.",
-                request_id=request_id,
-            )
+            return _backend_failure_response(error, request_id, len(request.input), started)
 
         return {
             "model": settings.model,
@@ -188,6 +208,22 @@ def _validate_backend_metadata(backend: EmbeddingBackend, settings: WorkerSettin
         or backend.dimensions != settings.dimensions
     ):
         raise ValueError("Backend metadata does not match Worker settings.")
+
+
+def _backend_failure_response(error: Exception, request_id: str, count: int, started: float) -> JSONResponse:
+    elapsed_ms = round((time.perf_counter() - started) * 1000)
+    LOGGER.info(
+        "embedding request failed request_id=%s count=%d elapsed_ms=%d error_class=%s",
+        request_id,
+        count,
+        elapsed_ms,
+        type(error).__name__,
+    )
+    return _error_response(
+        status.HTTP_503_SERVICE_UNAVAILABLE,
+        "Embedding temporarily unavailable.",
+        request_id=request_id,
+    )
 
 
 def _validate_vectors(vectors: object, expected_count: int, dimensions: int) -> None:

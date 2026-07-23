@@ -122,7 +122,7 @@ def test_worker_defaults_pin_the_deployment_contract():
     assert settings.revision == REVISION == "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"
     assert settings.dimensions == EMBEDDING_DIMENSIONS == 4096
     assert settings.dtype == EMBEDDING_DTYPE == "float16"
-    assert settings.max_request_bytes == MAX_REQUEST_BYTES == 1_048_576
+    assert settings.max_request_bytes == MAX_REQUEST_BYTES == 4 * 1024 * 1024
     assert settings.max_text_characters == MAX_TEXT_CHARACTERS == 30_000
 
 
@@ -161,6 +161,38 @@ def test_readyz_returns_safe_model_identity(client, token):
         "modelRevision": REVISION,
         "dimensions": 4,
     }
+
+
+def test_ready_property_failures_use_generic_redacted_backend_error_path(token, caplog):
+    secret = "ready-property-secret"
+
+    class ExplodingReadyBackend(FakeBackend):
+        @property
+        def ready(self):
+            raise RuntimeError(f"backend readiness failed: {secret}")
+
+    backend = ExplodingReadyBackend()
+    client = TestClient(
+        create_app(backend, WorkerSettings(api_token=token, dimensions=4)),
+        raise_server_exceptions=False,
+    )
+
+    with caplog.at_level(logging.INFO, logger="resume_embedding_worker"):
+        ready_response = client.get("/readyz", headers=authorized(token))
+        embedding_response = client.post(
+            "/v1/embeddings",
+            headers=authorized(token),
+            json={"model": MODEL, "input": ["resume"]},
+        )
+
+    for response in [ready_response, embedding_response]:
+        assert response.status_code == 503
+        assert response.json()["detail"] == "Embedding temporarily unavailable."
+        assert isinstance(response.json()["requestId"], str)
+        assert secret not in response.text
+    assert secret not in caplog.text
+    assert token not in caplog.text
+    assert caplog.text.count("RuntimeError") == 2
 
 
 def test_embeddings_requires_auth_and_returns_indexed_vectors(client, token):
@@ -234,6 +266,23 @@ def test_embeddings_rejects_declared_oversized_body_before_parsing(client, backe
     assert backend.calls == []
 
 
+def test_embeddings_accepts_maximum_cjk_batch_within_logical_limits(token):
+    vectors = [[1.0, 0.0, 0.0, 0.0] for _ in range(32)]
+    backend = FakeBackend(vectors=vectors)
+    client = TestClient(create_app(backend, WorkerSettings(api_token=token, dimensions=4)))
+    maximum_cjk_text = "简" * MAX_TEXT_CHARACTERS
+
+    response = client.post(
+        "/v1/embeddings",
+        headers=authorized(token),
+        json={"model": MODEL, "input": [maximum_cjk_text] * 32},
+    )
+
+    assert response.status_code == 200
+    assert len(response.json()["data"]) == 32
+    assert backend.calls == [[maximum_cjk_text] * 32]
+
+
 def test_embeddings_rejects_oversized_headerless_body_before_parsing(token):
     backend = FakeBackend()
     app = create_app(backend, WorkerSettings(api_token=token, dimensions=4))
@@ -243,6 +292,18 @@ def test_embeddings_rejects_oversized_headerless_body_before_parsing(token):
         [b"{" + b"x" * (MAX_REQUEST_BYTES - 1), b"x" * 2],
         token,
     )
+
+    assert next(message for message in messages if message["type"] == "http.response.start")["status"] == 413
+    assert b"".join(message.get("body", b"") for message in messages) == b'{"detail":"Request body is too large."}'
+    assert backend.calls == []
+
+
+def test_embeddings_rejects_headerless_empty_frame_flood(token):
+    backend = FakeBackend()
+    app = create_app(backend, WorkerSettings(api_token=token, dimensions=4))
+    valid_body = b'{"model":"Qwen/Qwen3-Embedding-8B","input":["resume"]}'
+
+    messages = asgi_response_without_content_length(app, [b""] * 1025 + [valid_body], token)
 
     assert next(message for message in messages if message["type"] == "http.response.start")["status"] == 413
     assert b"".join(message.get("body", b"") for message in messages) == b'{"detail":"Request body is too large."}'
