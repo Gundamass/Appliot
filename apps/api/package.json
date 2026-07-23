@@ -6,7 +6,8 @@
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p ../../tsconfig.json",
     "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.js --external:@napi-rs/canvas --external:better-sqlite3 --external:drizzle-orm --external:drizzle-orm/* --external:fastify --external:@fastify/* --external:pdfjs-dist/*",
-    "start": "node dist/server.js"
+    "start": "node --env-file-if-exists=../../.env.local dist/server.js",
+    "dev": "node --env-file-if-exists=../../.env.local --import tsx src/server.ts"
   },
   "dependencies": {
     "@fastify/busboy": "3.2.0",

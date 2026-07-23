@@ -14,6 +14,7 @@
     "@types/node": "24.0.0",
     "node-gyp": "12.1.0",
     "pdf-lib": "1.17.1",
+    "tsx": "4.20.3",
     "typescript": "5.8.3",
     "vitest": "3.2.4"
   },
