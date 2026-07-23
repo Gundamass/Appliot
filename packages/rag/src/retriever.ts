@@ -79,17 +79,16 @@ export async function retrieveCandidates(
   const candidates = retainLifecyclePrecedence(visible, request.taskId)
     .map((fact): RetrievedCandidate => ({ fact, source: "keyword", score: 0 }));
 
-  if (!plan.strategy.includes("embedding") || candidates.length === 0 || !dependencies.modelProvider) {
+  if (!plan.strategy.includes("embedding") || candidates.length === 0 || !dependencies.embeddingProvider) {
     return { candidates };
   }
   if (candidates.some(({ fact }) => typeof fact.value !== "string")) return { candidates };
 
   let vectors: number[][];
   try {
-    vectors = await dependencies.modelProvider.embed([
-      embeddingQuery(request, plan),
-      ...candidates.map(({ fact }) => fact.value as string)
-    ]);
+    const queryVector = await dependencies.embeddingProvider.embedQuery(embeddingQuery(request, plan));
+    const documentVectors = await dependencies.embeddingProvider.embedDocuments(candidates.map(({ fact }) => fact.value as string));
+    vectors = [queryVector, ...documentVectors];
   } catch {
     return { candidates: [], invalidReason: "embedding provider failed" };
   }

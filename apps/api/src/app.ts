@@ -2,7 +2,7 @@ import Fastify from "fastify";
 import multipart from "@fastify/multipart";
 import type { ProfileFact } from "@resume/contracts";
 import type { ExtractedDocument } from "@resume/profile-domain/src/pdf/types.js";
-import type { ModelProvider } from "@resume/model-provider";
+import type { StructuredModelProvider } from "@resume/model-provider";
 import type { SqliteDatabase } from "./db/client.js";
 import { sendError } from "./http-response.js";
 import { MAX_PDF_BYTES } from "./profile/import-service.js";
@@ -20,7 +20,7 @@ export interface AppDependencies {
   reviewRepository?: SelfEvaluationReviewRepository;
   extractPdf(bytes: Uint8Array): Promise<ExtractedDocument>;
   extractFacts(document: ExtractedDocument): Promise<ProfileFact[]>;
-  selfEvaluationModelProvider?: ModelProvider;
+  selfEvaluationModelProvider?: StructuredModelProvider;
   close?(): void | Promise<void>;
 }
 

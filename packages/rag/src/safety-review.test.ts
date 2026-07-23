@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Evidence, JsonValue, ProfileFact } from "@resume/contracts";
-import type { ModelProvider } from "@resume/model-provider";
+import type { EmbeddingProvider } from "@resume/model-provider";
 import {
   applyAnswer,
   createRagService,
@@ -294,7 +294,7 @@ describe("review fix: retrieval visibility and precedence", () => {
     const decision = await createRagService({
       repository: emptyRepository(),
       search: fakeSearch([first, second]),
-      modelProvider: fakeProvider([[1, 0], [1, 0], [0, 1]])
+      embeddingProvider: fakeProvider([[1, 0], [1, 0], [0, 1]])
     }).resolveField(request);
 
     expect(decision.status).toBe("needs_question");
@@ -359,7 +359,7 @@ describe("review fix: numerically stable embeddings", () => {
     const retrieval = await retrieveCandidates(request, planField(request), {
       repository: emptyRepository(),
       search: fakeSearch([first, second]),
-      modelProvider: fakeProvider(vectors)
+      embeddingProvider: fakeProvider(vectors)
     });
 
     expect(retrieval.invalidReason).toBeUndefined();
@@ -378,7 +378,7 @@ describe("review fix: numerically stable embeddings", () => {
     const retrieval = await retrieveCandidates(request, planField(request), {
       repository: emptyRepository(),
       search: fakeSearch([first, second]),
-      modelProvider: fakeProvider([[1, 0], [2, 0], [3, 0]])
+      embeddingProvider: fakeProvider([[1, 0], [2, 0], [3, 0]])
     });
 
     expect(retrieval.candidates.map(({ fact }) => fact.id)).toEqual(["z-first", "a-second"]);
@@ -395,7 +395,7 @@ describe("review fix: numerically stable embeddings", () => {
     const retrieval = await retrieveCandidates(request, planField(request), {
       repository: emptyRepository(),
       search: fakeSearch([first, second]),
-      modelProvider: fakeProvider(vectors)
+      embeddingProvider: fakeProvider(vectors)
     });
 
     expect(retrieval.candidates).toEqual([]);
@@ -468,11 +468,10 @@ function fakeSearch(results: ProfileFact[]): KeywordSearchPort {
   return { search: vi.fn(async () => structuredClone(results)) };
 }
 
-function fakeProvider(vectors: number[][]): ModelProvider {
+function fakeProvider(vectors: number[][]): EmbeddingProvider {
+  const [queryVector = [], ...documentVectors] = vectors;
   return {
-    embed: vi.fn(async () => structuredClone(vectors)),
-    generateStructured: vi.fn(async () => {
-      throw new Error("generation must not be used");
-    })
+    embedDocuments: vi.fn(async () => structuredClone(documentVectors)),
+    embedQuery: vi.fn(async () => structuredClone(queryVector))
   };
 }

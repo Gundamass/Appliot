@@ -6,11 +6,17 @@ import {
   type SelfEvaluationDraft,
   type SelfEvaluationGeneratedDraft
 } from "@resume/contracts";
-import type { ModelProvider } from "@resume/model-provider";
+import type { StructuredModelProvider } from "@resume/model-provider";
 
 export interface TailorSelfEvaluationInput { taskId: string; original: string; jobDescription: string; facts: ProfileFact[]; }
 
-export async function tailorSelfEvaluation(input: TailorSelfEvaluationInput, provider: ModelProvider): Promise<SelfEvaluationDraft> {
+const SELF_EVALUATION_JSON_EXAMPLE = {
+  draft: "Original facts restated for the role.",
+  reasons: ["Emphasized relevant verified experience."],
+  claims: [{ text: "verified experience", kind: "evidence", evidenceFactIds: ["fact-id"] }]
+};
+
+export async function tailorSelfEvaluation(input: TailorSelfEvaluationInput, provider: StructuredModelProvider): Promise<SelfEvaluationDraft> {
   let eligibleFacts: ProfileFact[];
   try { eligibleFacts = canonicalEligibleFacts(input.facts, input.taskId); }
   catch { return blocked(input.taskId, input.original, "Conflicting eligible evidence fact IDs"); }
@@ -18,7 +24,8 @@ export async function tailorSelfEvaluation(input: TailorSelfEvaluationInput, pro
     const output = SelfEvaluationGeneratedDraftSchema.parse(await provider.generateStructured({
       system: "Tailor only the supplied self-evaluation. Do not invent facts. Declare every new material claim with evidence fact IDs.",
       user: JSON.stringify({ original: input.original, jobDescription: input.jobDescription, evidenceFacts: eligibleFacts.map(toFactInput) }),
-      schema: SelfEvaluationGeneratedDraftSchema
+      schema: SelfEvaluationGeneratedDraftSchema,
+      jsonExample: SELF_EVALUATION_JSON_EXAMPLE
     }));
     return buildSelfEvaluationDraft(input.taskId, input.original, output, eligibleFacts);
   } catch {

@@ -1,6 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ProfileFactSchema, type ProfileFact } from "@resume/contracts";
-import type { ModelProvider } from "@resume/model-provider";
+import type { StructuredModelProvider } from "@resume/model-provider";
 import type { ExtractedDocument, ExtractedPage } from "../pdf/types.js";
 import { ExtractionSchema, type ExtractionOutput } from "./extraction-schema.js";
 
@@ -10,12 +10,23 @@ export const EXTRACTION_RULES = [
   "Do not infer or add unsupported claims."
 ].join(" ");
 
-export async function extractFacts(document: ExtractedDocument, provider: ModelProvider): Promise<ProfileFact[]> {
+const EXTRACTION_JSON_EXAMPLE = {
+  facts: [{
+    fieldPath: "basics.email",
+    value: "candidate@example.com",
+    page: 1,
+    quote: "candidate@example.com",
+    confidence: 0.99
+  }]
+};
+
+export async function extractFacts(document: ExtractedDocument, provider: StructuredModelProvider): Promise<ProfileFact[]> {
   const pages = indexPages(document.pages);
   const output = ExtractionSchema.parse(await provider.generateStructured({
     system: EXTRACTION_RULES,
     user: serializePages(document.pages),
-    schema: ExtractionSchema
+    schema: ExtractionSchema,
+    jsonExample: EXTRACTION_JSON_EXAMPLE
   }));
 
   return output.facts.map((candidate) => createFact(document, pages, candidate));

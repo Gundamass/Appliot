@@ -6,7 +6,7 @@ import {
   type ProfileFact,
   type SelfEvaluationReview
 } from "@resume/contracts";
-import type { ModelProvider } from "@resume/model-provider";
+import type { StructuredModelProvider } from "@resume/model-provider";
 import { tailorSelfEvaluation, validateEditedSelfEvaluation } from "@resume/rag";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -19,7 +19,7 @@ const SelfEvaluationFieldPath = "selfEvaluation";
 export interface ReviewRouteDependencies {
   reviewRepository: SelfEvaluationReviewRepository;
   profileRepository: ProfileRepository;
-  selfEvaluationModelProvider?: ModelProvider;
+  selfEvaluationModelProvider?: StructuredModelProvider;
 }
 
 export function registerReviewRoutes(app: FastifyInstance, dependencies: ReviewRouteDependencies): void {

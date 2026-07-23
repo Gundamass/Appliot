@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import type { ModelProvider, StructuredGenerationInput } from "@resume/model-provider";
+import type { StructuredGenerationInput, StructuredModelProvider } from "@resume/model-provider";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { migrateDatabase } from "../db/migrate.js";
 import { createApp, type AppDependencies } from "../app.js";
@@ -19,10 +19,9 @@ const generatedDraft = {
   claims: [{ text: "Original self-evaluation with React", kind: "evidence" as const, evidenceFactIds: ["react"] }]
 };
 
-function providerReturning(output: unknown = generatedDraft): ModelProvider {
+function providerReturning(output: unknown = generatedDraft): StructuredModelProvider {
   return {
-    async generateStructured<T>() { return output as T; },
-    async embed() { return []; }
+    async generateStructured<T>() { return output as T; }
   };
 }
 
@@ -78,7 +77,7 @@ describe("self-evaluation review routes", () => {
     profileRepository.putTaskAnswer("task-1", "preferences.city", "Shenzhen", [{ documentId: "user", page: 1, text: "Shenzhen", extraction: "user" }]);
     profileRepository.putTaskAnswer("task-2", "preferences.city", "Beijing", [{ documentId: "user", page: 1, text: "Beijing", extraction: "user" }]);
     let providerInput = "";
-    const provider: ModelProvider = {
+    const provider: StructuredModelProvider = {
       async generateStructured<T>(input: StructuredGenerationInput<T>) {
         providerInput = input.user;
         return {
@@ -86,8 +85,7 @@ describe("self-evaluation review routes", () => {
           reasons: ["Reviewed against the role"],
           claims: []
         } as T;
-      },
-      async embed() { return []; }
+      }
     };
     const app = await createApp({
       database,

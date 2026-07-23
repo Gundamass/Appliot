@@ -1,19 +1,31 @@
-import type { ModelProvider, StructuredGenerationInput } from "./provider.js";
+import type { EmbeddingProvider, StructuredGenerationInput, StructuredModelProvider } from "./provider.js";
 
-export class FakeModelProvider implements ModelProvider {
+export class FakeStructuredModelProvider implements StructuredModelProvider {
   private readonly structuredResponse: unknown;
-  private readonly embeddings: number[][];
 
-  constructor(structuredResponse: unknown, embeddings: number[][] = []) {
+  constructor(structuredResponse: unknown) {
     this.structuredResponse = structuredClone(structuredResponse);
-    this.embeddings = structuredClone(embeddings);
   }
 
   async generateStructured<T>(input: StructuredGenerationInput<T>): Promise<T> {
     return input.schema.parse(structuredClone(this.structuredResponse));
   }
+}
 
-  async embed(texts: string[]): Promise<number[][]> {
-    return texts.map((_, index) => structuredClone(this.embeddings[index] ?? []));
+export class FakeEmbeddingProvider implements EmbeddingProvider {
+  private readonly documentVectors: number[][];
+  private readonly queryVector: number[];
+
+  constructor(documentVectors: number[][] = [], queryVector: number[] = []) {
+    this.documentVectors = structuredClone(documentVectors);
+    this.queryVector = structuredClone(queryVector);
+  }
+
+  async embedDocuments(texts: string[]): Promise<number[][]> {
+    return texts.map((_, index) => structuredClone(this.documentVectors[index] ?? []));
+  }
+
+  async embedQuery(_text: string): Promise<number[]> {
+    return structuredClone(this.queryVector);
   }
 }

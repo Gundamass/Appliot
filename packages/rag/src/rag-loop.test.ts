@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Evidence, JsonValue, ProfileFact } from "@resume/contracts";
-import type { ModelProvider } from "@resume/model-provider";
+import type { EmbeddingProvider } from "@resume/model-provider";
 import {
   applyAnswer,
   createRagService,
@@ -300,16 +300,13 @@ describe("planning and layered retrieval", () => {
     const retrieval = await retrieveCandidates(request, plan, {
       repository: fakeRepository(),
       search: fakeSearch([first, second]),
-      modelProvider: provider
+      embeddingProvider: provider
     });
 
-    expect(provider.embed).toHaveBeenCalledTimes(1);
-    expect(provider.embed).toHaveBeenCalledWith([
-      "Cover letter application.coverLetter\nDistributed storage",
-      first.value,
-      second.value
-    ]);
-    expect(provider.generateStructured).not.toHaveBeenCalled();
+    expect(provider.embedQuery).toHaveBeenCalledTimes(1);
+    expect(provider.embedQuery).toHaveBeenCalledWith("Cover letter application.coverLetter\nDistributed storage");
+    expect(provider.embedDocuments).toHaveBeenCalledTimes(1);
+    expect(provider.embedDocuments).toHaveBeenCalledWith([first.value, second.value]);
     expect(retrieval.candidates.map(({ fact }) => fact.id)).toEqual(["second", "first"]);
   });
 
@@ -319,10 +316,10 @@ describe("planning and layered retrieval", () => {
       fact({ value: "me@example.com", status: "user_confirmed" })
     ]);
 
-    await createRagService({ repository, modelProvider: provider }).resolveField(emailRequest);
+    await createRagService({ repository, embeddingProvider: provider }).resolveField(emailRequest);
 
-    expect(provider.embed).not.toHaveBeenCalled();
-    expect(provider.generateStructured).not.toHaveBeenCalled();
+    expect(provider.embedQuery).not.toHaveBeenCalled();
+    expect(provider.embedDocuments).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -338,7 +335,7 @@ describe("planning and layered retrieval", () => {
     const decision = await createRagService({
       repository: fakeRepository(),
       search: fakeSearch(candidates),
-      modelProvider: fakeProvider(vectors)
+      embeddingProvider: fakeProvider(vectors)
     }).resolveField({
       taskId: "task-1",
       fieldId: "summary",
@@ -362,7 +359,7 @@ describe("planning and layered retrieval", () => {
     const result = await retrieveCandidates(request, plan, {
       repository: fakeRepository(),
       search: fakeSearch([fact({ value: "Supported long text." })]),
-      modelProvider: fakeProvider([[1, 0]])
+      embeddingProvider: fakeProvider([[1, 0]])
     });
 
     expect(result).toMatchObject({ candidates: [], invalidReason: "embedding response count mismatch" });
@@ -692,14 +689,13 @@ function fakeSearch(results: ProfileFact[]): KeywordSearchPort & { search: Retur
   };
 }
 
-function fakeProvider(vectors: number[][]): ModelProvider & {
-  embed: ReturnType<typeof vi.fn>;
-  generateStructured: ReturnType<typeof vi.fn>;
+function fakeProvider(vectors: number[][]): EmbeddingProvider & {
+  embedDocuments: ReturnType<typeof vi.fn>;
+  embedQuery: ReturnType<typeof vi.fn>;
 } {
+  const [queryVector = [], ...documentVectors] = vectors;
   return {
-    embed: vi.fn(async () => structuredClone(vectors)),
-    generateStructured: vi.fn(async () => {
-      throw new Error("generation must not be used as a fact source");
-    })
+    embedDocuments: vi.fn(async () => structuredClone(documentVectors)),
+    embedQuery: vi.fn(async () => structuredClone(queryVector))
   };
 }

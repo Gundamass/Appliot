@@ -1,5 +1,5 @@
 import type { DecisionStatus, Evidence, JsonValue, ProfileFact } from "@resume/contracts";
-import type { ModelProvider } from "@resume/model-provider";
+import type { EmbeddingProvider } from "@resume/model-provider";
 
 export type FieldType = "text" | "textarea" | "select" | "boolean" | "date";
 export type RetrievalSource = "exact" | "keyword";
@@ -76,7 +76,7 @@ export interface KeywordSearchPort {
 export interface RagDependencies {
   repository: ProfileRepositoryPort;
   search?: KeywordSearchPort;
-  modelProvider?: ModelProvider;
+  embeddingProvider?: EmbeddingProvider;
 }
 
 export interface RetrievedCandidate {

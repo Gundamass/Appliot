@@ -1,6 +1,6 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ProfileFact } from "@resume/contracts";
-import type { ModelProvider } from "@resume/model-provider";
+import type { StructuredModelProvider } from "@resume/model-provider";
 import { tailorSelfEvaluation, validateEditedSelfEvaluation } from "./self-evaluation.js";
 
 const original = "Experienced TypeScript developer with React delivery experience.";
@@ -19,12 +19,11 @@ function fact(overrides: Partial<ProfileFact> = {}): ProfileFact {
   };
 }
 
-function providerReturning(value: unknown): ModelProvider & { generateStructured: ReturnType<typeof vi.fn> } {
+function providerReturning(value: unknown): StructuredModelProvider & { generateStructured: ReturnType<typeof vi.fn> } {
   const generateStructured = vi.fn(async () => value);
   return {
-    generateStructured,
-    embed: vi.fn(async () => [])
-  } as unknown as ModelProvider & { generateStructured: ReturnType<typeof vi.fn> };
+    generateStructured
+  } as unknown as StructuredModelProvider & { generateStructured: ReturnType<typeof vi.fn> };
 }
 
 describe("self-evaluation tailoring", () => {

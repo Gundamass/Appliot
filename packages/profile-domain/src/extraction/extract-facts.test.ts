@@ -1,13 +1,13 @@
 import { describe, expect, it, vi } from "vitest";
 import { ZodError } from "zod";
-import { FakeModelProvider } from "@resume/model-provider";
-import type { ModelProvider } from "@resume/model-provider";
+import { FakeStructuredModelProvider } from "@resume/model-provider";
+import type { StructuredModelProvider } from "@resume/model-provider";
 import { extractFacts } from "./extract-facts.js";
 import type { ExtractedDocument } from "../pdf/types.js";
 
 describe("extractFacts", () => {
   it("returns an extracted profile fact with exact page evidence", async () => {
-    const provider = new FakeModelProvider({
+    const provider = new FakeStructuredModelProvider({
       facts: [{ fieldPath: "basics.email", value: "ada@example.com", page: 1, quote: "ada@example.com", confidence: 0.98 }]
     });
 
@@ -28,7 +28,7 @@ describe("extractFacts", () => {
   });
 
   it("rejects a model fact whose quoted evidence is absent from the page", async () => {
-    const provider = new FakeModelProvider({
+    const provider = new FakeStructuredModelProvider({
       facts: [{ fieldPath: "skills[0]", value: "Rust", page: 1, quote: "Experienced Rust", confidence: 0.9 }]
     });
 
@@ -37,7 +37,7 @@ describe("extractFacts", () => {
   });
 
   it("rejects a model fact whose evidence page does not exist", async () => {
-    const provider = new FakeModelProvider({
+    const provider = new FakeStructuredModelProvider({
       facts: [{ fieldPath: "skills[0]", value: "TypeScript", page: 2, quote: "TypeScript", confidence: 0.9 }]
     });
 
@@ -87,7 +87,7 @@ describe("extractFacts", () => {
   });
 
   it("rejects unsupported claims", async () => {
-    const provider = new FakeModelProvider({
+    const provider = new FakeStructuredModelProvider({
       facts: [{ fieldPath: "skills[0]", value: "Kubernetes", page: 1, quote: "Kubernetes", confidence: 0.86 }]
     });
 
@@ -103,22 +103,16 @@ function documentWithPage(text: string): ExtractedDocument {
   };
 }
 
-function providerReturning(response: unknown): ModelProvider {
+function providerReturning(response: unknown): StructuredModelProvider {
   return {
     async generateStructured<T>(): Promise<T> {
       return response as T;
-    },
-    async embed(): Promise<number[][]> {
-      return [];
     }
   };
 }
 
-function uncalledProvider(): ModelProvider & { generateStructured: ReturnType<typeof vi.fn> } {
+function uncalledProvider(): StructuredModelProvider & { generateStructured: ReturnType<typeof vi.fn> } {
   return {
-    generateStructured: vi.fn(),
-    async embed(): Promise<number[][]> {
-      return [];
-    }
+    generateStructured: vi.fn()
   };
 }

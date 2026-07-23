@@ -4,9 +4,14 @@ export interface StructuredGenerationInput<T> {
   system: string;
   user: string;
   schema: z.ZodType<T>;
+  jsonExample: unknown;
 }
 
-export interface ModelProvider {
+export interface StructuredModelProvider {
   generateStructured<T>(input: StructuredGenerationInput<T>): Promise<T>;
-  embed(texts: string[]): Promise<number[][]>;
+}
+
+export interface EmbeddingProvider {
+  embedDocuments(texts: string[]): Promise<number[][]>;
+  embedQuery(text: string): Promise<number[]>;
 }
