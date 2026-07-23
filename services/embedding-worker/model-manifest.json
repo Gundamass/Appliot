@@ -1,0 +1,6 @@
+{
+  "model": "Qwen/Qwen3-Embedding-8B",
+  "revision": "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af",
+  "dimensions": 4096,
+  "files": []
+}
