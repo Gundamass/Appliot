@@ -27,6 +27,16 @@ describe("extractFacts", () => {
     expect(facts[0]?.id).toMatch(/^[0-9a-f-]{36}$/i);
   });
 
+  it("instructs the structured provider to return json", async () => {
+    const provider = providerReturning({ facts: [] });
+
+    await extractFacts(documentWithPage("Ada Lovelace"), provider);
+
+    expect(provider.generateStructured).toHaveBeenCalledWith(expect.objectContaining({
+      system: expect.stringContaining("json")
+    }));
+  });
+
   it("rejects a model fact whose quoted evidence is absent from the page", async () => {
     const provider = new FakeStructuredModelProvider({
       facts: [{ fieldPath: "skills[0]", value: "Rust", page: 1, quote: "Experienced Rust", confidence: 0.9 }]
@@ -103,12 +113,9 @@ function documentWithPage(text: string): ExtractedDocument {
   };
 }
 
-function providerReturning(response: unknown): StructuredModelProvider {
-  return {
-    async generateStructured<T>(): Promise<T> {
-      return response as T;
-    }
-  };
+function providerReturning(response: unknown): StructuredModelProvider & { generateStructured: ReturnType<typeof vi.fn> } {
+  const generateStructured = vi.fn(async () => response);
+  return { generateStructured } as unknown as StructuredModelProvider & { generateStructured: ReturnType<typeof vi.fn> };
 }
 
 function uncalledProvider(): StructuredModelProvider & { generateStructured: ReturnType<typeof vi.fn> } {

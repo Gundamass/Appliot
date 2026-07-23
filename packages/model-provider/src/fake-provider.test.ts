@@ -52,4 +52,14 @@ describe("split fake providers", () => {
     await expect(embeddings.embedDocuments(["resume"])).resolves.toEqual([[0.1, 0.2]]);
     await expect(embeddings.embedQuery("query")).resolves.toEqual([0.9, 0.1]);
   });
+
+  it("preserves configured document vectors regardless of input count", async () => {
+    const embeddings = new FakeEmbeddingProvider([[0.1, 0.2], [0.3, 0.4]], [0.9, 0.1]);
+
+    const first = await embeddings.embedDocuments(["one document"]);
+    first[0]?.push(0.5);
+
+    await expect(embeddings.embedDocuments(["one", "two", "three"]))
+      .resolves.toEqual([[0.1, 0.2], [0.3, 0.4]]);
+  });
 });

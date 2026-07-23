@@ -27,6 +27,20 @@ function providerReturning(value: unknown): StructuredModelProvider & { generate
 }
 
 describe("self-evaluation tailoring", () => {
+  it("instructs the structured provider to return json", async () => {
+    const provider = providerReturning({
+      draft: original,
+      reasons: [],
+      claims: []
+    });
+
+    await tailorSelfEvaluation({ taskId: "task-1", original, jobDescription: "React role", facts: [] }, provider);
+
+    expect(provider.generateStructured).toHaveBeenCalledWith(expect.objectContaining({
+      system: expect.stringContaining("json")
+    }));
+  });
+
   it("keeps evidence-backed emphasis reviewable without changing the original", async () => {
     const provider = providerReturning({
       draft: "TypeScript developer with React delivery experience.",

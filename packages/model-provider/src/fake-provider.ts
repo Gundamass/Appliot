@@ -21,8 +21,8 @@ export class FakeEmbeddingProvider implements EmbeddingProvider {
     this.queryVector = structuredClone(queryVector);
   }
 
-  async embedDocuments(texts: string[]): Promise<number[][]> {
-    return texts.map((_, index) => structuredClone(this.documentVectors[index] ?? []));
+  async embedDocuments(_texts: string[]): Promise<number[][]> {
+    return structuredClone(this.documentVectors);
   }
 
   async embedQuery(_text: string): Promise<number[]> {

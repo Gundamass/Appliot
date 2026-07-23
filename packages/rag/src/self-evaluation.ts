@@ -22,7 +22,7 @@ export async function tailorSelfEvaluation(input: TailorSelfEvaluationInput, pro
   catch { return blocked(input.taskId, input.original, "Conflicting eligible evidence fact IDs"); }
   try {
     const output = SelfEvaluationGeneratedDraftSchema.parse(await provider.generateStructured({
-      system: "Tailor only the supplied self-evaluation. Do not invent facts. Declare every new material claim with evidence fact IDs.",
+      system: "Tailor only the supplied self-evaluation. Do not invent facts. Declare every new material claim with evidence fact IDs. Return the result as json.",
       user: JSON.stringify({ original: input.original, jobDescription: input.jobDescription, evidenceFacts: eligibleFacts.map(toFactInput) }),
       schema: SelfEvaluationGeneratedDraftSchema,
       jsonExample: SELF_EVALUATION_JSON_EXAMPLE

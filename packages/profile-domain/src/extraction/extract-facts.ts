@@ -23,7 +23,7 @@ const EXTRACTION_JSON_EXAMPLE = {
 export async function extractFacts(document: ExtractedDocument, provider: StructuredModelProvider): Promise<ProfileFact[]> {
   const pages = indexPages(document.pages);
   const output = ExtractionSchema.parse(await provider.generateStructured({
-    system: EXTRACTION_RULES,
+    system: `${EXTRACTION_RULES} Return the result as json.`,
     user: serializePages(document.pages),
     schema: ExtractionSchema,
     jsonExample: EXTRACTION_JSON_EXAMPLE
