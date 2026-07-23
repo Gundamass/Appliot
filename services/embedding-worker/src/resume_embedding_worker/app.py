@@ -1,13 +1,16 @@
 import logging
 import math
+import threading
 import time
 import uuid
-from collections.abc import Awaitable, Callable
 from typing import Annotated
 
 from fastapi import Depends, FastAPI, Header, HTTPException, Request, status
-from fastapi.responses import JSONResponse, Response
+from fastapi.exceptions import RequestValidationError
+from fastapi.responses import JSONResponse
 from pydantic import BaseModel, ConfigDict, Field, field_validator
+from starlette.datastructures import Headers
+from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import require_bearer_token
 from .types import (
@@ -42,30 +45,76 @@ class InvalidBackendOutput(Exception):
     """The injected backend violated the Worker response contract."""
 
 
+class EmbeddingRequestBodyLimitMiddleware:
+    def __init__(self, app: ASGIApp, max_request_bytes: int) -> None:
+        self.app = app
+        self.max_request_bytes = max_request_bytes
+
+    async def __call__(self, scope: Scope, receive: Receive, send: Send) -> None:
+        if scope["type"] != "http" or scope["method"] != "POST" or scope["path"] != "/v1/embeddings":
+            await self.app(scope, receive, send)
+            return
+
+        content_length = Headers(scope=scope).get("content-length")
+        if content_length is not None:
+            try:
+                declared_size = int(content_length)
+            except ValueError:
+                await _error_response(status.HTTP_400_BAD_REQUEST, "Invalid Content-Length.")(scope, receive, send)
+                return
+            if declared_size < 0:
+                await _error_response(status.HTTP_400_BAD_REQUEST, "Invalid Content-Length.")(scope, receive, send)
+                return
+            if declared_size > self.max_request_bytes:
+                await _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.")(
+                    scope,
+                    receive,
+                    send,
+                )
+                return
+
+        buffered_messages: list[Message] = []
+        received_bytes = 0
+        while True:
+            message = await receive()
+            if message["type"] == "http.disconnect":
+                return
+            if message["type"] != "http.request":
+                continue
+
+            received_bytes += len(message.get("body", b""))
+            if received_bytes > self.max_request_bytes:
+                await _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.")(
+                    scope,
+                    receive,
+                    send,
+                )
+                return
+
+            buffered_messages.append(message)
+            if not message.get("more_body", False):
+                break
+
+        buffered_iterator = iter(buffered_messages)
+
+        async def replay_receive() -> Message:
+            return next(buffered_iterator, {"type": "http.disconnect"})
+
+        await self.app(scope, replay_receive, send)
+
+
 def create_app(backend: EmbeddingBackend, settings: WorkerSettings) -> FastAPI:
     _validate_backend_metadata(backend, settings)
     app = FastAPI()
+    app.add_middleware(EmbeddingRequestBodyLimitMiddleware, max_request_bytes=settings.max_request_bytes)
+    inference_lock = threading.Lock()
 
     def require_auth(authorization: Annotated[str | None, Header()] = None) -> None:
         require_bearer_token(authorization, settings.api_token)
 
-    @app.middleware("http")
-    async def reject_oversized_bodies(
-        request: Request,
-        call_next: Callable[[Request], Awaitable[Response]],
-    ) -> Response:
-        if request.method == "POST" and request.url.path == "/v1/embeddings":
-            content_length = request.headers.get("content-length")
-            if content_length is not None:
-                try:
-                    declared_size = int(content_length)
-                except ValueError:
-                    return _error_response(status.HTTP_400_BAD_REQUEST, "Invalid Content-Length.")
-                if declared_size < 0:
-                    return _error_response(status.HTTP_400_BAD_REQUEST, "Invalid Content-Length.")
-                if declared_size > settings.max_request_bytes:
-                    return _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.")
-        return await call_next(request)
+    @app.exception_handler(RequestValidationError)
+    async def invalid_embedding_request(_: Request, __: RequestValidationError) -> JSONResponse:
+        return _error_response(status.HTTP_422_UNPROCESSABLE_ENTITY, "Invalid embedding request.")
 
     @app.get("/healthz")
     def healthz() -> dict[str, str]:
@@ -101,8 +150,9 @@ def create_app(backend: EmbeddingBackend, settings: WorkerSettings) -> FastAPI:
         started = time.perf_counter()
         request_id = uuid.uuid4().hex
         try:
-            vectors = backend.embed(request.input)
-            _validate_vectors(vectors, len(request.input), settings.dimensions)
+            with inference_lock:
+                vectors = backend.embed(request.input)
+                _validate_vectors(vectors, len(request.input), settings.dimensions)
         except Exception as error:
             elapsed_ms = round((time.perf_counter() - started) * 1000)
             LOGGER.info(

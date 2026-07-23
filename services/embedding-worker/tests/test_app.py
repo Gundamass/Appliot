@@ -1,5 +1,9 @@
+import asyncio
 import logging
 import math
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
 
 import pytest
 from fastapi.testclient import TestClient
@@ -62,6 +66,51 @@ def client(backend, token):
 
 def authorized(token):
     return {"Authorization": f"Bearer {token}"}
+
+
+def asgi_response_without_content_length(app, chunks, token):
+    async def call_app():
+        request_messages = iter(
+            [
+                {
+                    "type": "http.request",
+                    "body": chunk,
+                    "more_body": index < len(chunks) - 1,
+                }
+                for index, chunk in enumerate(chunks)
+            ]
+        )
+        response_messages = []
+
+        async def receive():
+            return next(request_messages)
+
+        async def send(message):
+            response_messages.append(message)
+
+        await app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/v1/embeddings",
+                "raw_path": b"/v1/embeddings",
+                "query_string": b"",
+                "headers": [
+                    (b"authorization", f"Bearer {token}".encode()),
+                    (b"content-type", b"application/json"),
+                ],
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+            },
+            receive,
+            send,
+        )
+        return response_messages
+
+    return asyncio.run(call_app())
 
 
 def test_worker_defaults_pin_the_deployment_contract():
@@ -183,6 +232,77 @@ def test_embeddings_rejects_declared_oversized_body_before_parsing(client, backe
     assert response.status_code == 413
     assert response.json() == {"detail": "Request body is too large."}
     assert backend.calls == []
+
+
+def test_embeddings_rejects_oversized_headerless_body_before_parsing(token):
+    backend = FakeBackend()
+    app = create_app(backend, WorkerSettings(api_token=token, dimensions=4))
+
+    messages = asgi_response_without_content_length(
+        app,
+        [b"{" + b"x" * (MAX_REQUEST_BYTES - 1), b"x" * 2],
+        token,
+    )
+
+    assert next(message for message in messages if message["type"] == "http.response.start")["status"] == 413
+    assert b"".join(message.get("body", b"") for message in messages) == b'{"detail":"Request body is too large."}'
+    assert backend.calls == []
+
+
+def test_request_validation_response_does_not_echo_submitted_text(client, backend, token):
+    secret = "very-secret-resume-content"
+    response = client.post(
+        "/v1/embeddings",
+        headers=authorized(token),
+        json={"model": MODEL, "input": [secret * (MAX_TEXT_CHARACTERS + 1)]},
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid embedding request."}
+    assert secret not in response.text
+    assert backend.calls == []
+
+
+def test_embeddings_execute_one_at_a_time(token):
+    class ConcurrentBackend(FakeBackend):
+        def __init__(self):
+            super().__init__()
+            self._counter_lock = threading.Lock()
+            self.active_embeddings = 0
+            self.max_active_embeddings = 0
+
+        def embed(self, texts):
+            with self._counter_lock:
+                self.active_embeddings += 1
+                self.max_active_embeddings = max(self.max_active_embeddings, self.active_embeddings)
+            try:
+                time.sleep(0.1)
+                return super().embed(texts)
+            finally:
+                with self._counter_lock:
+                    self.active_embeddings -= 1
+
+    backend = ConcurrentBackend()
+    app = create_app(backend, WorkerSettings(api_token=token, dimensions=4))
+    start = threading.Barrier(3)
+
+    def post_embedding():
+        with TestClient(app) as concurrent_client:
+            start.wait(timeout=2)
+            return concurrent_client.post(
+                "/v1/embeddings",
+                headers=authorized(token),
+                json={"model": MODEL, "input": ["resume"]},
+            )
+
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        first = executor.submit(post_embedding)
+        second = executor.submit(post_embedding)
+        start.wait(timeout=2)
+        responses = [first.result(timeout=3), second.result(timeout=3)]
+
+    assert [response.status_code for response in responses] == [200, 200]
+    assert backend.max_active_embeddings == 1
 
 
 def test_embeddings_returns_generic_unavailable_error_and_redacted_log(token, caplog):
