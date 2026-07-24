@@ -1,0 +1,21 @@
+[build-system]
+requires = ["setuptools>=68"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resume-ocr-worker"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+  "fastapi==0.115.12",
+  "uvicorn[standard]==0.34.3",
+  "pydantic==2.11.7",
+  "Pillow==11.2.1"
+]
+
+[project.optional-dependencies]
+test = ["pytest==8.4.1", "httpx==0.28.1"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]
