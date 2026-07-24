@@ -1,0 +1,15 @@
+[Unit]
+Description=Resume AI embedding worker
+After=network.target
+
+[Service]
+Type=simple
+Environment=RESUME_AI_ROOT=/home/heqing/resume-ai
+ExecStart=/home/heqing/resume-ai/services/bin/run-embedding.sh
+Restart=on-failure
+RestartSec=5
+UMask=0077
+NoNewPrivileges=true
+
+[Install]
+WantedBy=default.target
