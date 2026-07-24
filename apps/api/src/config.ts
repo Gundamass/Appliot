@@ -47,6 +47,7 @@ const positiveInteger = z.preprocess(
   (value) => typeof value === "string" && value.trim() !== "" ? Number(value) : value,
   z.number().int().positive()
 );
+const tcpPort = positiveInteger.refine((value) => value <= 65_535);
 
 const nonNegativeInteger = z.preprocess(
   (value) => typeof value === "string" && value.trim() !== "" ? Number(value) : value,
@@ -60,11 +61,16 @@ const url = nonEmptyString.url().refine((value) => {
 });
 const loopbackTunnelUrl = (port: number) => nonEmptyString.url().refine((value) => {
   const parsed = new URL(value);
+  const bareOrigins = new Set([`http://127.0.0.1:${port}`, `http://localhost:${port}`]);
   return parsed.protocol === "http:"
     && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost")
     && parsed.port === String(port)
     && parsed.username === ""
-    && parsed.password === "";
+    && parsed.password === ""
+    && parsed.pathname === "/"
+    && parsed.search === ""
+    && parsed.hash === ""
+    && (bareOrigins.has(value) || bareOrigins.has(value.slice(0, -1)) && value.endsWith("/"));
 });
 
 const deepSeekSchema = z.object({
@@ -104,7 +110,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
   const databaseFile = env.DATABASE_FILE ?? "data/resume-assistant.sqlite";
   if (!nonEmptyString.safeParse(databaseFile).success) coreErrors.push("DATABASE_FILE");
 
-  const portResult = positiveInteger.safeParse(env.API_PORT ?? "43120");
+  const portResult = tcpPort.safeParse(env.API_PORT ?? "43120");
   const port = portResult.success ? portResult.data : 0;
   if (!portResult.success) coreErrors.push("API_PORT");
 

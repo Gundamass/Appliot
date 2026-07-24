@@ -1,11 +1,12 @@
 import { ProfileFactSchema, type ProfileFact } from "@resume/contracts";
-import type {
-  EmbeddingSearchResult,
-  FieldRequest,
-  RagDependencies,
-  RetrievalPlan,
-  RetrievalResult,
-  RetrievedCandidate
+import {
+  EmbeddingSearchUnavailableError,
+  type EmbeddingSearchResult,
+  type FieldRequest,
+  type RagDependencies,
+  type RetrievalPlan,
+  type RetrievalResult,
+  type RetrievedCandidate
 } from "./types.js";
 
 const SEARCH_LIMIT = 20;
@@ -40,7 +41,7 @@ export async function retrieveCandidates(
   if (keyword.invalidReason) return keyword;
 
   if (!plan.strategy.includes("embedding")) return finalizeCandidates(keyword.candidates, request.taskId);
-  if (!dependencies.embeddingSearch) return { candidates: [], invalidReason: "embedding search unavailable" };
+  if (!dependencies.embeddingSearch) return finalizeCandidates(keyword.candidates, request.taskId);
 
   let embeddingResults: EmbeddingSearchResult[];
   try {
@@ -52,8 +53,11 @@ export async function retrieveCandidates(
         ? { jobDescription: request.jobDescription.trim() }
         : {})
     });
-  } catch {
-    return { candidates: [], invalidReason: "embedding search unavailable" };
+  } catch (error) {
+    if (error instanceof EmbeddingSearchUnavailableError) {
+      return finalizeCandidates(keyword.candidates, request.taskId);
+    }
+    throw error;
   }
 
   if (!Array.isArray(embeddingResults)) {

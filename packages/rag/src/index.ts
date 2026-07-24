@@ -47,3 +47,4 @@ export type {
   RetrievalStrategy,
   RetrievedCandidate
 } from "./types.js";
+export { EmbeddingSearchUnavailableError } from "./types.js";

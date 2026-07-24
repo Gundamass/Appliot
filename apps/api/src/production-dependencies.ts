@@ -25,6 +25,12 @@ export function createProductionDependencies(
   adapters: ProductionAdapterDependencies = {}
 ): AppDependencies {
   const database = createSqliteDatabase(config.databaseFile);
+  let closed = false;
+  const close = () => {
+    if (closed) return;
+    closed = true;
+    database.close();
+  };
   try {
     migrateDatabase(database);
     const profileRepository = createProfileRepository(database);
@@ -58,12 +64,10 @@ export function createProductionDependencies(
         })
       }),
       adapterHealth: unprobedAdapterHealth,
-      close: () => {
-        database.close();
-      }
+      close
     };
   } catch (error) {
-    database.close();
+    close();
     throw error;
   }
 }

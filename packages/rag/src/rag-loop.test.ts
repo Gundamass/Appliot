@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { Evidence, JsonValue, ProfileFact } from "@resume/contracts";
 import {
   applyAnswer,
+  EmbeddingSearchUnavailableError,
   createRagService,
   planField,
   retrieveCandidates,
@@ -224,7 +225,7 @@ describe("RAG field resolution", () => {
 });
 
 describe("planning and layered retrieval", () => {
-  it("invalidates an embedding-planned retrieval when semantic search is unavailable", async () => {
+  it("keeps keyword candidates when semantic search is absent", async () => {
     const request: FieldRequest = {
       taskId: "task-1",
       fieldId: "cover-letter",
@@ -239,7 +240,37 @@ describe("planning and layered retrieval", () => {
       search: fakeSearch([keyword])
     });
 
-    expect(retrieval).toMatchObject({ candidates: [], invalidReason: "embedding search unavailable" });
+    expect(retrieval).toMatchObject({ candidates: [{ fact: { value: "Supported long text." }, source: "keyword" }] });
+    expect(retrieval.invalidReason).toBeUndefined();
+  });
+
+  it("keeps keyword candidates when semantic search reports unavailability", async () => {
+    const request: FieldRequest = {
+      taskId: "task-1", fieldId: "cover-letter", semantic: "application.coverLetter", label: "Cover letter", type: "textarea"
+    };
+    const keyword = fact({ fieldPath: request.semantic, value: "Supported long text.", evidence: [evidence("Supported long text.")] });
+
+    const retrieval = await retrieveCandidates(request, planField(request), {
+      repository: fakeRepository(),
+      search: fakeSearch([keyword]),
+      embeddingSearch: { async search() { throw new EmbeddingSearchUnavailableError(); } }
+    });
+
+    expect(retrieval).toMatchObject({ candidates: [{ fact: { value: "Supported long text." }, source: "keyword" }] });
+    expect(retrieval.invalidReason).toBeUndefined();
+  });
+
+  it("does not suppress unexpected semantic search defects", async () => {
+    const defect = new TypeError("programming defect");
+    const request: FieldRequest = {
+      taskId: "task-1", fieldId: "cover-letter", semantic: "application.coverLetter", label: "Cover letter", type: "textarea"
+    };
+
+    await expect(retrieveCandidates(request, planField(request), {
+      repository: fakeRepository(),
+      search: fakeSearch([]),
+      embeddingSearch: { async search() { throw defect; } }
+    })).rejects.toBe(defect);
   });
 
   it("emits a normalized retrieval plan with safety metadata", () => {

@@ -77,6 +77,13 @@ export interface EmbeddingSearchResult {
   score: number;
 }
 
+export class EmbeddingSearchUnavailableError extends Error {
+  constructor() {
+    super("embedding search unavailable");
+    this.name = "EmbeddingSearchUnavailableError";
+  }
+}
+
 export interface EmbeddingSearchPort {
   search(input: {
     query: string;

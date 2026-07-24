@@ -1,6 +1,7 @@
 import { createHash, randomUUID } from "node:crypto";
 import { ProfileFactSchema, type JsonValue, type ProfileFact } from "@resume/contracts";
 import type { EmbeddingProvider } from "@resume/model-provider";
+import { EmbeddingSearchUnavailableError } from "@resume/rag";
 import type { SqliteDatabase } from "../db/client.js";
 import type { ProfileRepository } from "../profile/profile-repository.js";
 import {
@@ -12,12 +13,7 @@ import {
 
 export type FactEmbeddingIndexConfig = Omit<EmbeddingIndexConfig, "id">;
 
-export class EmbeddingSearchUnavailableError extends Error {
-  constructor() {
-    super("embedding search unavailable");
-    this.name = "EmbeddingSearchUnavailableError";
-  }
-}
+export { EmbeddingSearchUnavailableError } from "@resume/rag";
 
 export function factEmbeddingText(fact: ProfileFact): string {
   const evidence = fact.evidence

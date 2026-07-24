@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import { loadConfig } from "./config.js";
+import { createApp } from "./app.js";
 
 const fakes = vi.hoisted(() => ({
   databases: [] as Array<{ closeCalls: number }>,
@@ -87,6 +88,17 @@ describe("production dependency composition", () => {
     fakes.migrationFailure = failure;
 
     expect(() => createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }))).toThrow(failure);
+    expect(fakes.databases[0]?.closeCalls).toBe(1);
+  });
+
+  it("closes the owned database once across repeated direct and app close paths", async () => {
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }));
+    const app = await createApp(dependencies);
+
+    await dependencies.close?.();
+    await dependencies.close?.();
+    await app.close();
+
     expect(fakes.databases[0]?.closeCalls).toBe(1);
   });
 });

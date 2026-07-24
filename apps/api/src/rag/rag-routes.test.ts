@@ -3,7 +3,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { afterEach, describe, expect, it } from "vitest";
-import type { EmbeddingSearchPort } from "@resume/rag";
+import { EmbeddingSearchUnavailableError, type EmbeddingSearchPort } from "@resume/rag";
 import { migrateDatabase } from "../db/migrate.js";
 import { createApp } from "../app.js";
 import { createProfileRepository } from "../profile/profile-repository.js";
@@ -140,5 +140,61 @@ describe("RAG routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ decision: { status: "needs_review", value: "Supported long text." } });
+  });
+
+  it("preserves keyword fallback and follow-up behavior without semantic search", async () => {
+    const { app, profileRepository } = await context();
+    profileRepository.createExtracted({
+      id: "summary", fieldPath: "application.coverLetter", value: "Supported long text.", status: "extracted",
+      confidence: 0.8, scope: "profile",
+      evidence: [{ documentId: "resume", page: 1, text: "Supported long text.", extraction: "pdf_text" }], revision: 1
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/rag/fields/resolve",
+      payload: { ...request, semantic: "application.coverLetter", fieldId: "cover", label: "Cover letter", type: "textarea" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      decision: {
+        status: "needs_review",
+        value: "Supported long text.",
+        evidence: [{ text: "Supported long text." }]
+      }
+    });
+  });
+
+  it("preserves keyword fallback when semantic search reports unavailability", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const profileRepository = createProfileRepository(database);
+    profileRepository.createExtracted({
+      id: "summary", fieldPath: "application.coverLetter", value: "Supported long text.", status: "extracted",
+      confidence: 0.8, scope: "profile",
+      evidence: [{ documentId: "resume", page: 1, text: "Supported long text.", extraction: "pdf_text" }], revision: 1
+    });
+    const root = await mkdtemp(join(tmpdir(), "resume-rag-routes-"));
+    const app = await createApp({
+      database,
+      profileRepository,
+      originalDocumentStore: createLocalOriginalDocumentStore(root),
+      extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }),
+      extractFacts: async () => [],
+      embeddingSearch: { async search() { throw new EmbeddingSearchUnavailableError(); } }
+    });
+    resources.push({ app, database, root });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/rag/fields/resolve",
+      payload: { ...request, semantic: "application.coverLetter", fieldId: "cover", label: "Cover letter", type: "textarea" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      decision: { status: "needs_review", value: "Supported long text.", evidence: [{ text: "Supported long text." }] }
+    });
   });
 });

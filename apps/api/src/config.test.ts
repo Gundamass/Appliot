@@ -108,6 +108,29 @@ describe("API configuration", () => {
     }
   });
 
+  it("rejects remote tunnel URLs with paths, queries, or fragments without reflecting secrets", () => {
+    const secret = "remote-url-secret";
+    for (const [variable, baseUrl] of [
+      ["EMBEDDING_BASE_URL", "http://127.0.0.1:18080/v1"],
+      ["EMBEDDING_BASE_URL", "http://localhost:18080/?token=remote-url-secret"],
+      ["EMBEDDING_BASE_URL", "http://127.0.0.1:18080?"],
+      ["OCR_BASE_URL", "http://127.0.0.1:43121/#remote-url-secret"],
+      ["OCR_BASE_URL", "http://127.0.0.1:43121#"]
+    ] as const) {
+      const error = captureError(() => loadConfig({ [variable]: baseUrl }));
+      expect(error).toContain(variable);
+      expect(error).not.toContain(secret);
+    }
+  });
+
+  it("accepts API port boundaries and rejects ports outside the TCP range", () => {
+    expect(loadConfig({ API_PORT: "1" }).port).toBe(1);
+    expect(loadConfig({ API_PORT: "65535" }).port).toBe(65535);
+    for (const port of ["0", "65536", "1.5", "NaN"]) {
+      expect(() => loadConfig({ API_PORT: port })).toThrow("API_PORT");
+    }
+  });
+
   it("rejects invalid remote dimensions and timeouts", () => {
     expect(() => loadConfig({ EMBEDDING_DIMENSIONS: "0" })).toThrow("EMBEDDING_DIMENSIONS");
     expect(() => loadConfig({ EMBEDDING_TIMEOUT_MS: "NaN" })).toThrow("EMBEDDING_TIMEOUT_MS");
