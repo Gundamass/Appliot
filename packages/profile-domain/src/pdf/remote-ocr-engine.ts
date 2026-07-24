@@ -38,7 +38,7 @@ export type RemoteOcrErrorKind =
   | "response";
 
 export class RemoteOcrError extends Error {
-  constructor(readonly kind: RemoteOcrErrorKind) {
+  constructor(readonly kind: RemoteOcrErrorKind, readonly unavailable: boolean) {
     super(errorMessage(kind));
     this.name = "RemoteOcrError";
   }
@@ -77,7 +77,11 @@ export class RemoteOcrEngine implements OcrEngine {
         return await this.request(image, contentType);
       } catch (error) {
         const failure = toClassifiedFailure(error);
-        if (!failure.retryable || attempt === MAX_RETRIES) throw failure.ocrError;
+        if (!failure.retryable) throw failure.ocrError;
+        if (attempt === MAX_RETRIES) {
+          if (failure.ocrError.kind === "response") throw new RemoteOcrError("response", true);
+          throw failure.ocrError;
+        }
         try {
           await this.sleep(RETRY_DELAY_MS);
         } catch {
@@ -86,7 +90,7 @@ export class RemoteOcrEngine implements OcrEngine {
       }
     }
 
-    throw new RemoteOcrError("response");
+    throw new RemoteOcrError("response", false);
   }
 
   private async request(image: Uint8Array, contentType: "image/png" | "image/jpeg"): Promise<string> {
@@ -106,8 +110,8 @@ export class RemoteOcrEngine implements OcrEngine {
           signal: controller.signal
         });
       } catch (error) {
-        if (isAbortError(error)) throw new ClassifiedFailure(new RemoteOcrError("timeout"), true);
-        throw new ClassifiedFailure(new RemoteOcrError("network"), true);
+        if (isAbortError(error)) throw new ClassifiedFailure(new RemoteOcrError("timeout", true), true);
+        throw new ClassifiedFailure(new RemoteOcrError("network", true), true);
       }
 
       if (!response.ok) throw failureForStatus(response.status);
@@ -116,21 +120,21 @@ export class RemoteOcrEngine implements OcrEngine {
       try {
         payload = await response.json();
       } catch (error) {
-        if (isAbortError(error)) throw new ClassifiedFailure(new RemoteOcrError("timeout"), true);
-        throw new RemoteOcrError("response");
+        if (isAbortError(error)) throw new ClassifiedFailure(new RemoteOcrError("timeout", true), true);
+        throw new RemoteOcrError("response", false);
       }
 
       const parsed = OcrResponseSchema.safeParse(payload);
-      if (!parsed.success) throw new RemoteOcrError("response");
+      if (!parsed.success) throw new RemoteOcrError("response", false);
       if (
         parsed.data.model !== this.config.model
         || parsed.data.modelRevision !== this.config.modelRevision
       ) {
-        throw new RemoteOcrError("response");
+        throw new RemoteOcrError("response", false);
       }
 
       const text = parsed.data.text.trim();
-      if (text === "") throw new RemoteOcrError("response");
+      if (text === "") throw new RemoteOcrError("response", false);
       return text;
     } finally {
       clearTimeout(timeout);
@@ -147,7 +151,7 @@ function normalizeConfig(config: RemoteOcrConfig): NormalizedConfig {
     || config.modelRevision !== OCR_REVISION
     || !Number.isInteger(timeoutMs) || timeoutMs <= 0
   ) {
-    throw new RemoteOcrError("configuration");
+    throw new RemoteOcrError("configuration", false);
   }
 
   return {
@@ -160,7 +164,7 @@ function normalizeConfig(config: RemoteOcrConfig): NormalizedConfig {
 }
 
 function imageContentType(image: Uint8Array): "image/png" | "image/jpeg" {
-  if (!(image instanceof Uint8Array)) throw new RemoteOcrError("input");
+  if (!(image instanceof Uint8Array)) throw new RemoteOcrError("input", false);
   if (
     image.length >= 8
     && image[0] === 137
@@ -177,7 +181,7 @@ function imageContentType(image: Uint8Array): "image/png" | "image/jpeg" {
   if (image.length >= 3 && image[0] === 255 && image[1] === 216 && image[2] === 255) {
     return "image/jpeg";
   }
-  throw new RemoteOcrError("input");
+  throw new RemoteOcrError("input", false);
 }
 
 function isNonEmptyString(value: unknown): value is string {
@@ -195,18 +199,18 @@ function isHttpUrl(value: string): boolean {
 
 function failureForStatus(status: number): ClassifiedFailure {
   if (status === 401 || status === 403) {
-    return new ClassifiedFailure(new RemoteOcrError("authentication"), false);
+    return new ClassifiedFailure(new RemoteOcrError("authentication", false), false);
   }
   if (status >= 500 && status <= 599) {
-    return new ClassifiedFailure(new RemoteOcrError("response"), true);
+    return new ClassifiedFailure(new RemoteOcrError("response", false), true);
   }
-  return new ClassifiedFailure(new RemoteOcrError("response"), false);
+  return new ClassifiedFailure(new RemoteOcrError("response", false), false);
 }
 
 function toClassifiedFailure(error: unknown): ClassifiedFailure {
   if (error instanceof ClassifiedFailure) return error;
   if (error instanceof RemoteOcrError) return new ClassifiedFailure(error, false);
-  return new ClassifiedFailure(new RemoteOcrError("network"), true);
+  return new ClassifiedFailure(new RemoteOcrError("network", true), true);
 }
 
 function isAbortError(error: unknown): boolean {

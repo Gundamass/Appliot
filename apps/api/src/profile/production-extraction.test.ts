@@ -29,13 +29,31 @@ describe("createProductionExtraction", () => {
     await expect(extraction.extractPdf(await createScannedPdf())).rejects.toBeInstanceOf(ProfileImportUnavailableError);
   });
 
-  it("maps a remote OCR failure to ProfileImportUnavailableError", async () => {
+  it.each([
+    ["network", new RemoteOcrError("network", true)],
+    ["timeout", new RemoteOcrError("timeout", true)],
+    ["retry-exhausted 5xx", new RemoteOcrError("response", true)]
+  ])("maps %s OCR unavailability to ProfileImportUnavailableError", async (_caseName, ocrError) => {
     const extraction = createProductionExtraction({
       structuredProvider: structuredProvider(),
-      ocrEngine: { async recognize() { throw new RemoteOcrError("timeout"); } }
+      ocrEngine: { async recognize() { throw ocrError; } }
     });
 
     await expect(extraction.extractPdf(await createScannedPdf())).rejects.toBeInstanceOf(ProfileImportUnavailableError);
+  });
+
+  it.each([
+    ["authentication", new RemoteOcrError("authentication", false)],
+    ["configuration", new RemoteOcrError("configuration", false)],
+    ["input", new RemoteOcrError("input", false)],
+    ["contract response", new RemoteOcrError("response", false)]
+  ])("preserves %s OCR failures", async (_caseName, ocrError) => {
+    const extraction = createProductionExtraction({
+      structuredProvider: structuredProvider(),
+      ocrEngine: { async recognize() { throw ocrError; } }
+    });
+
+    await expect(extraction.extractPdf(await createScannedPdf())).rejects.toBe(ocrError);
   });
 
   it("preserves malformed PDF errors", async () => {

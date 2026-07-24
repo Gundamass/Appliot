@@ -26,7 +26,7 @@ export function createProductionExtraction(dependencies: ProductionExtractionDep
       try {
         return await extractProfilePdf(bytes, ocrEngine);
       } catch (error) {
-        if (error instanceof RemoteOcrError || error instanceof UnavailableOcrError) {
+        if (error instanceof UnavailableOcrError || (error instanceof RemoteOcrError && error.unavailable)) {
           throw new ProfileImportUnavailableError();
         }
         throw error;

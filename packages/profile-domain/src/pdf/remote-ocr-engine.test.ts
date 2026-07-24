@@ -87,6 +87,7 @@ describe("RemoteOcrEngine", () => {
     ["wrong revision", ocrResponse({ modelRevision: "other-revision" })],
     ["wrong mode", ocrResponse({ mode: "plain_text" })],
     ["unexpected response field", ocrResponse({ extra: true })],
+    ["malformed JSON", new Response("not-json", { status: 200 })],
     ["unauthorized", new Response(RESPONSE_SECRET, { status: 401 })],
     ["payload too large", new Response(RESPONSE_SECRET, { status: 413 })]
   ])("does not retry %s or expose response data", async (_caseName, outcome) => {
@@ -101,6 +102,7 @@ describe("RemoteOcrEngine", () => {
 
     expect(error).toBeInstanceOf(RemoteOcrError);
     expect(error).toMatchObject({ kind: outcome instanceof Response && outcome.status === 401 ? "authentication" : "response" });
+    expect(error).toMatchObject({ unavailable: false });
     expect(fetch).toHaveBeenCalledTimes(1);
     expect(sleep).not.toHaveBeenCalled();
     expect(errorText(error)).not.toContain(TOKEN);
@@ -111,9 +113,15 @@ describe("RemoteOcrEngine", () => {
     const fetch = fakeFetch([ocrResponse()]);
     const engine = new RemoteOcrEngine(testConfig(), { fetch: fetch as typeof globalThis.fetch });
 
-    await expect(engine.recognize(Uint8Array.from([0, 1, 2]))).rejects.toMatchObject({ kind: "input" });
-    await expect(engine.recognize("https://example.test/page.png" as unknown as Uint8Array)).rejects.toMatchObject({ kind: "input" });
+    await expect(engine.recognize(Uint8Array.from([0, 1, 2]))).rejects.toMatchObject({ kind: "input", unavailable: false });
+    await expect(engine.recognize("https://example.test/page.png" as unknown as Uint8Array)).rejects.toMatchObject({ kind: "input", unavailable: false });
     expect(fetch).not.toHaveBeenCalled();
+  });
+
+  it("classifies invalid configuration as not unavailable", () => {
+    expect(() => new RemoteOcrEngine(testConfig({ apiToken: "" }))).toThrowError(
+      expect.objectContaining({ kind: "configuration", unavailable: false })
+    );
   });
 
   it.each([
@@ -131,12 +139,27 @@ describe("RemoteOcrEngine", () => {
 
     expect(error).toBeInstanceOf(RemoteOcrError);
     expect(error).toMatchObject({ kind: outcome instanceof Error ? "network" : "response" });
+    expect(error).toMatchObject({ unavailable: true });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(sleep).toHaveBeenCalledTimes(1);
     expect(sleep).toHaveBeenCalledWith(100);
     expect(errorText(error)).not.toContain(TOKEN);
     expect(errorText(error)).not.toContain(RESPONSE_SECRET);
     expect(errorText(error)).not.toContain("network-secret");
+  });
+
+  it("does not classify a 5xx as unavailable before its retry is exhausted", async () => {
+    const fetch = fakeFetch([new Response(RESPONSE_SECRET, { status: 503 })]);
+    const engine = new RemoteOcrEngine(testConfig(), {
+      fetch: fetch as typeof globalThis.fetch,
+      sleep: async () => { throw new Error("sleep defect"); }
+    });
+
+    await expect(engine.recognize(PNG_BYTES)).rejects.toMatchObject({
+      kind: "response",
+      unavailable: false
+    });
+    expect(fetch).toHaveBeenCalledOnce();
   });
 
   it("times out one request attempt at a time and retries once", async () => {
@@ -158,7 +181,7 @@ describe("RemoteOcrEngine", () => {
       await vi.advanceTimersByTimeAsync(10);
 
       const error = await operation;
-      expect(error).toMatchObject({ kind: "timeout" });
+      expect(error).toMatchObject({ kind: "timeout", unavailable: true });
       expect(fetch).toHaveBeenCalledTimes(2);
       expect(sleep).toHaveBeenCalledTimes(1);
       expect(errorText(error)).not.toContain("timeout-secret");
