@@ -7,7 +7,9 @@ import { afterEach, describe, expect, it, vi } from "vitest";
 import { migrateDatabase } from "../db/migrate.js";
 import { createProfileRepository } from "./profile-repository.js";
 import { createLocalOriginalDocumentStore } from "./original-document-store.js";
-import { DuplicateDocumentError, importProfileDocument } from "./import-service.js";
+import { DuplicateDocumentError, importProfileDocument, ProfileImportUnavailableError } from "./import-service.js";
+import { createProductionExtraction } from "./production-extraction.js";
+import { createScannedPdf } from "../../../../tests/fixtures/create-pdf.js";
 
 const roots: string[] = [];
 
@@ -77,6 +79,25 @@ describe("importProfileDocument", () => {
     await expect(importProfileDocument(dependencies, "resume.pdf", Uint8Array.from(bytes))).rejects.toBeInstanceOf(DuplicateDocumentError);
     expect(extractPdf).not.toHaveBeenCalled();
     expect(extractFacts).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it("retains a scanned PDF when production OCR is unavailable", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const root = await mkdtemp(join(tmpdir(), "resume-ocr-unavailable-"));
+    roots.push(root);
+    const bytes = await createScannedPdf();
+    const fingerprint = createHash("sha256").update(bytes).digest("hex");
+    const dependencies = {
+      database,
+      profileRepository: createProfileRepository(database),
+      originalDocumentStore: createLocalOriginalDocumentStore(root),
+      ...createProductionExtraction({})
+    };
+
+    await expect(importProfileDocument(dependencies, "resume.pdf", bytes)).rejects.toBeInstanceOf(ProfileImportUnavailableError);
+    expect((database.prepare("SELECT import_status FROM documents WHERE fingerprint = ?").get(fingerprint) as { import_status: string }).import_status).toBe("retained");
     database.close();
   });
 });

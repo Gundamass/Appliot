@@ -12,6 +12,8 @@ import { InvalidPdfError, ProfileImportUnavailableError } from "./import-service
 import { createProfileRepository } from "./profile-repository.js";
 import { createLocalOriginalDocumentStore } from "./original-document-store.js";
 import { extractPdf as parsePdf } from "@resume/profile-domain/src/pdf/extract-pdf.js";
+import { createScannedPdf } from "../../../../tests/fixtures/create-pdf.js";
+import { createProductionExtraction } from "./production-extraction.js";
 
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
 
@@ -335,6 +337,18 @@ describe("profile routes", () => {
       extractFacts: async () => { throw new ProfileImportUnavailableError(); }
     });
     const response = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) });
+
+    expect(response.statusCode).toBe(503);
+    expect(response.json()).toEqual({ error: "Profile import is temporarily unavailable" });
+  });
+
+  it("returns 503 without exposing a scanned-page OCR outage", async () => {
+    const app = await buildTestApp(createProductionExtraction({}));
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/documents",
+      ...multipartPdf(await createScannedPdf())
+    });
 
     expect(response.statusCode).toBe(503);
     expect(response.json()).toEqual({ error: "Profile import is temporarily unavailable" });
