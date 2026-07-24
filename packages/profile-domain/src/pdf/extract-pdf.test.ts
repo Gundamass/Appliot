@@ -1,9 +1,20 @@
 import { createCanvas, loadImage } from "@napi-rs/canvas";
 import { createHash } from "node:crypto";
+import {
+  PDFDocument,
+  PDFHexString,
+  StandardFonts,
+  beginText,
+  endText,
+  moveText,
+  setFontAndSize,
+  showText
+} from "pdf-lib";
 import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { describe, expect, it, vi } from "vitest";
 import { createPdf, createScannedPdf } from "../../../../tests/fixtures/create-pdf.js";
-import { extractPdf, hasUsablePdfText, InvalidPdfDocumentError } from "./extract-pdf.js";
+import { OcrOutputError } from "./ocr.js";
+import { classifyPdfText, extractPdf, hasUsablePdfText, InvalidPdfDocumentError } from "./extract-pdf.js";
 
 describe("extractPdf", () => {
   it("preserves page numbers and uses OCR only for image-only pages", async () => {
@@ -41,6 +52,23 @@ describe("extractPdf", () => {
     ))).toBeGreaterThan(100);
   });
 
+  it("uses OCR only for corrupt and image-only pages", async () => {
+    const textPdf = await createPdf(["Ada Lovelace\nada@example.com"]);
+    const corruptTextPdf = await createControlHeavyPdf();
+    const scannedPdf = await createScannedPdf();
+    const pdf = await appendPdfPages(textPdf, corruptTextPdf, scannedPdf);
+    const recognize = vi.fn(async (): Promise<string> => "OCR fallback text");
+
+    const result = await extractPdf(pdf, { recognize });
+
+    expect(result.pages).toEqual([
+      expect.objectContaining({ page: 1, source: "pdf_text", text: expect.stringContaining("Ada Lovelace") }),
+      { page: 2, source: "ocr", text: "OCR fallback text" },
+      { page: 3, source: "ocr", text: "OCR fallback text" }
+    ]);
+    expect(recognize).toHaveBeenCalledTimes(2);
+  });
+
   it("returns a stable SHA-256 fingerprint for duplicate PDF bytes", async () => {
     const pdf = await createPdf(["Same resume"]);
     const ocr = { recognize: async (): Promise<string> => "unused" };
@@ -73,6 +101,15 @@ describe("extractPdf", () => {
     expect(hasUsablePdfText("A\u0301")).toBe(true);
   });
 
+  it.each([
+    ["Ada Lovelace\nada@example.com", "usable"],
+    ["\u0000\u200B\u200C\u200D\u2060\uFEFF", "empty"],
+    ["A\uFFFD\uFFFD\uFFFD\uFFFD", "corrupt"],
+    ["A", "suspiciously_short"]
+  ])("classifies PDF text %j as %s", (text, expected) => {
+    expect(classifyPdfText(text)).toBe(expected);
+  });
+
   it("preserves PDF text line boundaries", async () => {
     const result = await extractPdf(await createPdf(["First line\nSecond line"]), unusedOcr);
 
@@ -100,6 +137,14 @@ describe("extractPdf", () => {
     }
   });
 
+  it("rejects blank OCR output without appending an empty page", async () => {
+    const pdf = await createScannedPdf();
+
+    await expect(extractPdf(pdf, {
+      async recognize(): Promise<string> { return " \n\t "; }
+    })).rejects.toBeInstanceOf(OcrOutputError);
+  });
+
   it("propagates malformed PDF errors", async () => {
     await expect(extractPdf(Buffer.from("%PDF-malformed"), unusedOcr)).rejects.toBeInstanceOf(InvalidPdfDocumentError);
   });
@@ -116,6 +161,20 @@ async function appendPdfPages(...documents: Uint8Array[]): Promise<Uint8Array> {
     pages.forEach((page) => result.addPage(page));
   }
   return result.save();
+}
+
+async function createControlHeavyPdf(): Promise<Uint8Array> {
+  const document = await PDFDocument.create();
+  const page = document.addPage([612, 792]);
+  const font = await document.embedFont(StandardFonts.Helvetica);
+  page.pushOperators(
+    beginText(),
+    setFontAndSize(font.name, 12),
+    moveText(72, 720),
+    showText(PDFHexString.of("4100410041004100410041004100410041004100")),
+    endText()
+  );
+  return document.save();
 }
 
 function countPixels(

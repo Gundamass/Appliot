@@ -3,6 +3,8 @@ import type { PDFPageProxy } from "pdfjs-dist/legacy/build/pdf.mjs";
 
 const OCR_RENDER_SCALE = 2;
 
+export class OcrOutputError extends Error {}
+
 export async function renderPageForOcr(page: PDFPageProxy): Promise<Uint8Array> {
   const viewport = page.getViewport({ scale: OCR_RENDER_SCALE });
   const canvas = createCanvas(Math.ceil(viewport.width), Math.ceil(viewport.height));
