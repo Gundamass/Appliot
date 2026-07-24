@@ -1,0 +1,21 @@
+# EXTERNAL ACCEPTANCE BLOCKER: this is a fail-closed requirements template,
+# not a deployable Linux x86-64 lock. Resolve it on the target-compatible
+# Linux environment and replace every entry with the reviewed pinned version
+# and all wheel hashes before installation.
+--require-hashes
+
+torch==2.6.0+cu118
+torchvision==0.21.0+cu118
+torchaudio==2.6.0+cu118
+transformers==4.46.3
+tokenizers==0.20.3
+flash-attn==2.7.3
+PyMuPDF
+img2pdf
+einops
+easydict
+addict
+Pillow==11.2.1
+numpy
+fastapi==0.115.12
+uvicorn==0.34.3
