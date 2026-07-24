@@ -140,6 +140,7 @@ for directory, worker, version, wheel in (
     root = bundle / "workers" / directory
     paths = ["requirements.lock", f"wheelhouse/{wheel}"]
     manifest = {
+        "verificationStatus": "verified",
         "worker": worker,
         "python": version,
         "wheel": f"wheelhouse/{wheel}",
@@ -154,12 +155,11 @@ models = (
 for directory, model, revision, custom in models:
     root = bundle / "models" / directory
     paths = ["config.json", "weights.bin"]
-    manifest = {"model": model, "revision": revision}
+    manifest = {"verificationStatus": "verified", "model": model, "revision": revision}
     if directory == "Qwen3-Embedding-8B":
         manifest["dimensions"] = 4096
     if custom:
         paths.append("modeling_deepseekocr.py")
-        manifest["verificationStatus"] = "verified"
         manifest["customCodeFiles"] = ["modeling_deepseekocr.py"]
     manifest["files"] = [{"path": path, "sha256": digest(root / path)} for path in paths]
     (root / "model-manifest.json").write_text(json.dumps(manifest))

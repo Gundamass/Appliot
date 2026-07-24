@@ -13,12 +13,12 @@ deliberately non-deployable templates. Deployment remains blocked until all of
 these artifacts have been produced and reviewed on a Linux x86-64 environment:
 
 - a complete Qwen snapshot for revision
-  `1d8ad4ca9b3dd8059ad90a75d4983776a23d44af` and a manifest covering every file;
+  `1d8ad4ca9b3dd8059ad90a75d4983776a23d44af` and a verified manifest covering every file;
 - a complete DeepSeek OCR snapshot for revision
   `aaa02f3811945a91062062994c5c4a3f4c0af2b0`, including reviewed custom Python
   files and a `verificationStatus` of `verified`;
 - Linux wheelhouses containing every locked dependency and each built Worker
-  wheel;
+  wheel, with both Worker manifests marked `verificationStatus: verified`;
 - fully pinned `requirements.lock` files in pip `--require-hashes` format. The
   embedding lock must also install Supervisor for the non-systemd fallback.
 

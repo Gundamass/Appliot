@@ -1,3 +1,4 @@
+import ast
 import hashlib
 import importlib.util
 import json
@@ -55,6 +56,29 @@ class AssetVerifierTests(unittest.TestCase):
         self.assertRegex(first, r"^[0-9a-f]{64}$")
         self.assertEqual(first, second)
 
+    def test_fingerprint_changes_when_verified_payload_changes(self) -> None:
+        verifier = self._load_verifier()
+        first = verifier.verify_bundle(self.bundle)
+        model_root = self.bundle / "models/Qwen3-Embedding-8B"
+        weights = model_root / "weights.bin"
+        weights.write_bytes(b"updated weights")
+        self._refresh_manifest_hash(model_root, "model-manifest.json", "weights.bin")
+
+        second = verifier.verify_bundle(self.bundle)
+
+        self.assertNotEqual(first, second)
+
+    def test_fingerprint_changes_when_manifest_bytes_change(self) -> None:
+        verifier = self._load_verifier()
+        first = verifier.verify_bundle(self.bundle)
+        manifest_path = self.bundle / "models/Qwen3-Embedding-8B/model-manifest.json"
+        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        manifest_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
+
+        second = verifier.verify_bundle(self.bundle)
+
+        self.assertNotEqual(first, second)
+
     def test_rejects_checksum_mismatch(self) -> None:
         verifier = self._load_verifier()
         config = self.bundle / "models/Qwen3-Embedding-8B/config.json"
@@ -73,6 +97,25 @@ class AssetVerifierTests(unittest.TestCase):
         with self.assertRaisesRegex(verifier.VerificationError, "unsafe path"):
             verifier.verify_bundle(self.bundle)
 
+    def test_rejects_posix_and_windows_absolute_manifest_paths(self) -> None:
+        verifier = self._load_verifier()
+        manifest_path = self.bundle / "models/Qwen3-Embedding-8B/model-manifest.json"
+        original = manifest_path.read_text(encoding="utf-8")
+
+        for absolute_path in ("/etc/passwd", "C:/Windows/System32/config"):
+            with self.subTest(path=absolute_path):
+                manifest = json.loads(original)
+                manifest["files"][0]["path"] = absolute_path
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaisesRegex(
+                    verifier.VerificationError,
+                    "file path is an unsafe path",
+                ):
+                    verifier.verify_bundle(self.bundle)
+
+                manifest_path.write_text(original, encoding="utf-8")
+
     def test_rejects_duplicate_manifest_paths(self) -> None:
         verifier = self._load_verifier()
         manifest_path = self.bundle / "models/Qwen3-Embedding-8B/model-manifest.json"
@@ -83,6 +126,32 @@ class AssetVerifierTests(unittest.TestCase):
         with self.assertRaisesRegex(verifier.VerificationError, "duplicate path"):
             verifier.verify_bundle(self.bundle)
 
+    def test_rejects_duplicate_top_level_json_fields(self) -> None:
+        verifier = self._load_verifier()
+        manifest_path = self.bundle / "models/Qwen3-Embedding-8B/model-manifest.json"
+        text = manifest_path.read_text(encoding="utf-8").replace(
+            '"verificationStatus": "verified"',
+            '"verificationStatus": "unverified", "verificationStatus": "verified"',
+            1,
+        )
+        manifest_path.write_text(text, encoding="utf-8")
+
+        with self.assertRaisesRegex(verifier.VerificationError, "duplicate JSON field"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_duplicate_nested_json_fields(self) -> None:
+        verifier = self._load_verifier()
+        manifest_path = self.bundle / "models/Qwen3-Embedding-8B/model-manifest.json"
+        text = manifest_path.read_text(encoding="utf-8").replace(
+            '"path": "config.json"',
+            '"path": "decoy.json", "path": "config.json"',
+            1,
+        )
+        manifest_path.write_text(text, encoding="utf-8")
+
+        with self.assertRaisesRegex(verifier.VerificationError, "duplicate JSON field"):
+            verifier.verify_bundle(self.bundle)
+
     @unittest.skipIf(os.name == "nt", "Windows symlink creation requires elevated privileges")
     def test_rejects_symlinks(self) -> None:
         verifier = self._load_verifier()
@@ -90,6 +159,28 @@ class AssetVerifierTests(unittest.TestCase):
         target = model_root / "config.json"
         target.unlink()
         target.symlink_to(model_root / "weights.bin")
+
+        with self.assertRaisesRegex(verifier.VerificationError, "symlink"):
+            verifier.verify_bundle(self.bundle)
+
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation requires elevated privileges")
+    def test_rejects_top_level_directory_symlink(self) -> None:
+        verifier = self._load_verifier()
+        models = self.bundle / "models"
+        target = self.bundle.parent / "outside-models"
+        models.rename(target)
+        models.symlink_to(target, target_is_directory=True)
+
+        with self.assertRaisesRegex(verifier.VerificationError, "symlink"):
+            verifier.verify_bundle(self.bundle)
+
+    @unittest.skipIf(os.name == "nt", "Windows symlink creation requires elevated privileges")
+    def test_rejects_intermediate_directory_symlink(self) -> None:
+        verifier = self._load_verifier()
+        wheelhouse = self.bundle / "workers/embedding-worker/wheelhouse"
+        target = self.bundle.parent / "outside-wheelhouse"
+        wheelhouse.rename(target)
+        wheelhouse.symlink_to(target, target_is_directory=True)
 
         with self.assertRaisesRegex(verifier.VerificationError, "symlink"):
             verifier.verify_bundle(self.bundle)
@@ -107,12 +198,118 @@ class AssetVerifierTests(unittest.TestCase):
     def test_rejects_unverified_ocr_manifest(self) -> None:
         verifier = self._load_verifier()
         manifest_path = self.bundle / "models/DeepSeek-OCR-2/model-manifest.json"
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
-        manifest["verificationStatus"] = "template_unverified"
-        manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+        original = manifest_path.read_text(encoding="utf-8")
 
-        with self.assertRaisesRegex(verifier.VerificationError, "not verified"):
+        for status in ("template_unverified", "unverified", "non-verified"):
+            with self.subTest(status=status):
+                manifest = json.loads(original)
+                manifest["verificationStatus"] = status
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaisesRegex(verifier.VerificationError, "not verified"):
+                    verifier.verify_bundle(self.bundle)
+
+                manifest_path.write_text(original, encoding="utf-8")
+
+    def test_rejects_unverified_qwen_manifest(self) -> None:
+        verifier = self._load_verifier()
+        manifest_path = self.bundle / "models/Qwen3-Embedding-8B/model-manifest.json"
+        original = manifest_path.read_text(encoding="utf-8")
+
+        for status in ("template_unverified", "unverified", "non-verified"):
+            with self.subTest(status=status):
+                manifest = json.loads(original)
+                manifest["verificationStatus"] = status
+                manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                with self.assertRaisesRegex(verifier.VerificationError, "not verified"):
+                    verifier.verify_bundle(self.bundle)
+
+                manifest_path.write_text(original, encoding="utf-8")
+
+    def test_rejects_unverified_worker_manifests(self) -> None:
+        verifier = self._load_verifier()
+        for worker in ("embedding-worker", "ocr-worker"):
+            manifest_path = self.bundle / "workers" / worker / "worker-manifest.json"
+            original = manifest_path.read_text(encoding="utf-8")
+            for status in ("template_unverified", "unverified", "non-verified"):
+                with self.subTest(worker=worker, status=status):
+                    manifest = json.loads(original)
+                    manifest["verificationStatus"] = status
+                    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+
+                    with self.assertRaisesRegex(verifier.VerificationError, "not verified"):
+                        verifier.verify_bundle(self.bundle)
+
+                    manifest_path.write_text(original, encoding="utf-8")
+
+    def test_rejects_extra_top_level_file(self) -> None:
+        verifier = self._load_verifier()
+        (self.bundle / "notes.txt").write_text("not part of the bundle", encoding="utf-8")
+
+        with self.assertRaisesRegex(verifier.VerificationError, "bundle structure"):
             verifier.verify_bundle(self.bundle)
+
+    def test_rejects_extra_top_level_directory(self) -> None:
+        verifier = self._load_verifier()
+        (self.bundle / "staging").mkdir()
+
+        with self.assertRaisesRegex(verifier.VerificationError, "bundle structure"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_extra_worker_directory(self) -> None:
+        verifier = self._load_verifier()
+        (self.bundle / "workers/unreviewed-worker").mkdir()
+
+        with self.assertRaisesRegex(verifier.VerificationError, "workers structure"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_extra_model_directory(self) -> None:
+        verifier = self._load_verifier()
+        (self.bundle / "models/unreviewed-model").mkdir()
+
+        with self.assertRaisesRegex(verifier.VerificationError, "models structure"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_extra_intermediate_files(self) -> None:
+        verifier = self._load_verifier()
+
+        for relative, message in (
+            ("models/notes.txt", "models structure"),
+            ("workers/notes.txt", "workers structure"),
+        ):
+            with self.subTest(path=relative):
+                extra = self.bundle / relative
+                extra.write_text("not part of the bundle", encoding="utf-8")
+
+                with self.assertRaisesRegex(verifier.VerificationError, message):
+                    verifier.verify_bundle(self.bundle)
+
+                extra.unlink()
+
+    def test_rejects_worker_root_extra_directory(self) -> None:
+        verifier = self._load_verifier()
+        (self.bundle / "workers/embedding-worker/unreviewed").mkdir()
+
+        with self.assertRaisesRegex(verifier.VerificationError, "Worker structure"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_empty_model_directory_not_covered_by_files(self) -> None:
+        verifier = self._load_verifier()
+        (self.bundle / "models/Qwen3-Embedding-8B/empty").mkdir()
+
+        with self.assertRaisesRegex(verifier.VerificationError, "directory closure"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_empty_worker_directory_not_covered_by_files(self) -> None:
+        verifier = self._load_verifier()
+        (self.bundle / "workers/embedding-worker/wheelhouse/empty").mkdir()
+
+        with self.assertRaisesRegex(verifier.VerificationError, "directory closure"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_verifier_is_python_3_8_parseable(self) -> None:
+        ast.parse(SCRIPT.read_text(encoding="utf-8"), filename=str(SCRIPT), feature_version=(3, 8))
 
     def test_rejects_unlisted_files(self) -> None:
         verifier = self._load_verifier()
@@ -178,6 +375,7 @@ class AssetVerifierTests(unittest.TestCase):
         wheel = wheelhouse / wheel_name
         wheel.write_bytes(b"fixture wheel")
         manifest = {
+            "verificationStatus": "verified",
             "worker": worker,
             "python": python,
             "wheel": f"wheelhouse/{wheel_name}",
@@ -208,6 +406,7 @@ class AssetVerifierTests(unittest.TestCase):
             {"path": "weights.bin", "sha256": sha256(weights)},
         ]
         manifest: dict[str, object] = {
+            "verificationStatus": "verified",
             "model": model,
             "revision": revision,
             "files": files,
@@ -223,11 +422,19 @@ class AssetVerifierTests(unittest.TestCase):
         (root / "model-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
 
     def _refresh_worker_hash(self, worker_root: Path, relative_path: str) -> None:
-        manifest_path = worker_root / "worker-manifest.json"
+        self._refresh_manifest_hash(worker_root, "worker-manifest.json", relative_path)
+
+    def _refresh_manifest_hash(
+        self,
+        root: Path,
+        manifest_name: str,
+        relative_path: str,
+    ) -> None:
+        manifest_path = root / manifest_name
         manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
         for item in manifest["files"]:
             if item["path"] == relative_path:
-                item["sha256"] = sha256(worker_root / relative_path)
+                item["sha256"] = sha256(root / relative_path)
         manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
 

@@ -10,8 +10,8 @@ import json
 import os
 import re
 import sys
-from pathlib import Path, PurePosixPath
-from typing import Any
+from pathlib import Path, PurePosixPath, PureWindowsPath
+from typing import Any, Dict, List, Optional, Set, Tuple, Union
 
 
 SHA256 = re.compile(r"^[0-9a-fA-F]{64}$")
@@ -51,14 +51,37 @@ class VerificationError(ValueError):
     """Raised when an offline deployment asset cannot be trusted."""
 
 
-def verify_bundle(bundle: Path | str) -> str:
+def verify_bundle(bundle: Union[Path, str]) -> str:
     bundle_root = _safe_root(Path(bundle), "bundle")
-    fingerprint = hashlib.sha256()
+    _assert_exact_children(bundle_root, {"models", "workers"}, set(), "bundle structure")
+    _assert_exact_children(
+        bundle_root / "workers",
+        {item["directory"] for item in WORKERS},
+        set(),
+        "workers structure",
+    )
+    _assert_exact_children(
+        bundle_root / "models",
+        {item["directory"] for item in MODELS},
+        set(),
+        "models structure",
+    )
 
     for expected in WORKERS:
         root = _safe_root(bundle_root / "workers" / expected["directory"], "Worker directory")
+        _assert_exact_children(
+            root,
+            {"wheelhouse"},
+            {"requirements.lock", "worker-manifest.json"},
+            "Worker structure",
+        )
         manifest_path = root / "worker-manifest.json"
         manifest = _read_manifest(manifest_path)
+        _assert_manifest_keys(
+            manifest_path,
+            manifest,
+            {"verificationStatus", "worker", "python", "wheel", "files"},
+        )
         if (
             manifest.get("worker") != expected["worker"]
             or manifest.get("python") != expected["python"]
@@ -73,12 +96,17 @@ def verify_bundle(bundle: Path | str) -> str:
         if PurePosixPath("requirements.lock") not in verified:
             raise VerificationError(f"{manifest_path}: requirements.lock is not covered")
         _verify_requirement_lock(lock_path)
-        _update_fingerprint(fingerprint, manifest_path, manifest, verified)
 
     for expected in MODELS:
         root = _safe_root(bundle_root / "models" / expected["directory"], "model directory")
         manifest_path = root / "model-manifest.json"
         manifest = _read_manifest(manifest_path)
+        required_keys = {"verificationStatus", "model", "revision", "files"}
+        if "dimensions" in expected:
+            required_keys.add("dimensions")
+        if expected.get("requires_review"):
+            required_keys.add("customCodeFiles")
+        _assert_manifest_keys(manifest_path, manifest, required_keys)
         if manifest.get("model") != expected["model"] or manifest.get("revision") != expected["revision"]:
             raise VerificationError(f"{manifest_path}: model identity or revision is not pinned")
         if "dimensions" in expected and manifest.get("dimensions") != expected["dimensions"]:
@@ -86,9 +114,7 @@ def verify_bundle(bundle: Path | str) -> str:
         verified = _verify_file_manifest(root, manifest_path, manifest)
         if expected.get("requires_review"):
             _verify_custom_code_review(manifest_path, manifest, verified)
-        _update_fingerprint(fingerprint, manifest_path, manifest, verified)
-
-    return fingerprint.hexdigest()
+    return _fingerprint_closure(bundle_root)
 
 
 def _safe_root(path: Path, label: str) -> Path:
@@ -103,28 +129,72 @@ def _safe_root(path: Path, label: str) -> Path:
     return resolved
 
 
-def _read_manifest(path: Path) -> dict[str, Any]:
+def _read_manifest(path: Path) -> Dict[str, Any]:
     if path.is_symlink():
         raise VerificationError(f"{path}: manifest must not be a symlink")
+
+    def reject_duplicate_fields(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+        value: Dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise VerificationError(f"{path}: duplicate JSON field {key}")
+            value[key] = item
+        return value
+
     try:
-        value = json.loads(path.read_text(encoding="utf-8"))
+        value = json.loads(
+            path.read_text(encoding="utf-8"),
+            object_pairs_hook=reject_duplicate_fields,
+        )
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise VerificationError(f"{path}: manifest is missing or invalid") from error
     if not isinstance(value, dict):
         raise VerificationError(f"{path}: manifest must contain an object")
+    if value.get("verificationStatus") != "verified":
+        raise VerificationError(f"{path}: manifest is not verified")
     return value
+
+
+def _assert_manifest_keys(path: Path, manifest: Dict[str, Any], expected: Set[str]) -> None:
+    if set(manifest) != expected:
+        raise VerificationError(f"{path}: manifest fields do not match the deployment schema")
+
+
+def _assert_exact_children(
+    root: Path,
+    expected_directories: Set[str],
+    expected_files: Set[str],
+    label: str,
+) -> None:
+    actual_directories: Set[str] = set()
+    actual_files: Set[str] = set()
+    try:
+        children = list(root.iterdir())
+    except OSError as error:
+        raise VerificationError(f"{root}: {label} cannot be inspected") from error
+    for child in children:
+        if child.is_symlink():
+            raise VerificationError(f"{root}: {label} contains a symlink")
+        if child.is_dir():
+            actual_directories.add(child.name)
+        elif child.is_file():
+            actual_files.add(child.name)
+        else:
+            raise VerificationError(f"{root}: {label} contains a non-regular entry")
+    if actual_directories != expected_directories or actual_files != expected_files:
+        raise VerificationError(f"{root}: {label} is not exact")
 
 
 def _verify_file_manifest(
     root: Path,
     manifest_path: Path,
-    manifest: dict[str, Any],
-) -> dict[PurePosixPath, str]:
+    manifest: Dict[str, Any],
+) -> Dict[PurePosixPath, str]:
     entries = manifest.get("files")
     if not isinstance(entries, list) or not entries:
         raise VerificationError(f"{manifest_path}: files must be a non-empty list")
 
-    verified: dict[PurePosixPath, str] = {}
+    verified: Dict[PurePosixPath, str] = {}
     for entry in entries:
         if not isinstance(entry, dict):
             raise VerificationError(f"{manifest_path}: invalid file entry")
@@ -150,12 +220,19 @@ def _verify_file_manifest(
             raise VerificationError(f"{manifest_path}: hash mismatch for {relative.as_posix()}")
         verified[relative] = actual_hash
 
-    actual = _regular_files(root, manifest_path)
-    if set(verified) != actual:
-        missing = sorted(path.as_posix() for path in actual - set(verified))
-        stale = sorted(path.as_posix() for path in set(verified) - actual)
+    actual_files, actual_directories = _regular_entries(root, manifest_path)
+    if set(verified) != actual_files:
+        missing = sorted(path.as_posix() for path in actual_files - set(verified))
+        stale = sorted(path.as_posix() for path in set(verified) - actual_files)
         detail = f" unlisted={missing} missing={stale}"
         raise VerificationError(f"{manifest_path}: manifest does not exactly cover its directory;{detail}")
+    expected_directories = {
+        PurePosixPath(*path.parts[:index])
+        for path in verified
+        for index in range(1, len(path.parts))
+    }
+    if actual_directories != expected_directories:
+        raise VerificationError(f"{manifest_path}: directory closure does not match manifested files")
     return verified
 
 
@@ -163,7 +240,13 @@ def _manifest_relative_path(value: object, manifest_path: Path, label: str) -> P
     if not isinstance(value, str) or not value or "\\" in value or "\x00" in value:
         raise VerificationError(f"{manifest_path}: {label} is an unsafe path")
     path = PurePosixPath(value)
-    if path.is_absolute() or path.as_posix() != value or any(part in ("", ".", "..") for part in path.parts):
+    windows_path = PureWindowsPath(value)
+    if (
+        path.is_absolute()
+        or bool(windows_path.drive)
+        or path.as_posix() != value
+        or any(part in ("", ".", "..") for part in path.parts)
+    ):
         raise VerificationError(f"{manifest_path}: {label} is an unsafe path")
     return path
 
@@ -176,16 +259,17 @@ def _reject_symlink_components(root: Path, relative: PurePosixPath, manifest_pat
             raise VerificationError(f"{manifest_path}: file path contains a symlink: {relative.as_posix()}")
 
 
-def _regular_files(root: Path, manifest_path: Path) -> set[PurePosixPath]:
-    files: set[PurePosixPath] = set()
+def _regular_entries(root: Path, manifest_path: Path) -> Tuple[Set[PurePosixPath], Set[PurePosixPath]]:
+    files: Set[PurePosixPath] = set()
+    directory_paths: Set[PurePosixPath] = set()
 
     def on_error(error: OSError) -> None:
         raise error
 
     try:
-        for current_root, directories, names in os.walk(root, followlinks=False, onerror=on_error):
+        for current_root, directory_names, names in os.walk(root, followlinks=False, onerror=on_error):
             current = Path(current_root)
-            for name in [*directories, *names]:
+            for name in [*directory_names, *names]:
                 item = current / name
                 if item.is_symlink():
                     raise VerificationError(f"{manifest_path}: directory contains a symlink")
@@ -195,9 +279,12 @@ def _regular_files(root: Path, manifest_path: Path) -> set[PurePosixPath]:
                     raise VerificationError(f"{manifest_path}: directory contains a non-regular file")
                 if item != manifest_path:
                     files.add(PurePosixPath(item.relative_to(root).as_posix()))
+            for name in directory_names:
+                item = current / name
+                directory_paths.add(PurePosixPath(item.relative_to(root).as_posix()))
     except OSError as error:
         raise VerificationError(f"{manifest_path}: directory could not be inspected safely") from error
-    return files
+    return files, directory_paths
 
 
 def _verify_requirement_lock(path: Path) -> None:
@@ -226,8 +313,8 @@ def _verify_requirement_lock(path: Path) -> None:
             raise VerificationError(f"{path}: every requirement must be pinned and hash-locked")
 
 
-def _logical_requirements(text: str) -> list[str]:
-    requirements: list[str] = []
+def _logical_requirements(text: str) -> List[str]:
+    requirements: List[str] = []
     current = ""
     for raw_line in text.splitlines():
         line = raw_line.split(" #", 1)[0].strip()
@@ -250,15 +337,15 @@ def _logical_requirements(text: str) -> list[str]:
 
 def _verify_custom_code_review(
     manifest_path: Path,
-    manifest: dict[str, Any],
-    verified: dict[PurePosixPath, str],
+    manifest: Dict[str, Any],
+    verified: Dict[PurePosixPath, str],
 ) -> None:
     if manifest.get("verificationStatus") != "verified":
         raise VerificationError(f"{manifest_path}: OCR model manifest is not verified")
     raw_custom_paths = manifest.get("customCodeFiles")
     if not isinstance(raw_custom_paths, list) or not raw_custom_paths:
         raise VerificationError(f"{manifest_path}: reviewed customCodeFiles must be non-empty")
-    custom_paths: set[PurePosixPath] = set()
+    custom_paths: Set[PurePosixPath] = set()
     for value in raw_custom_paths:
         path = _manifest_relative_path(value, manifest_path, "custom code path")
         if path in custom_paths:
@@ -277,20 +364,27 @@ def _sha256_file(path: Path) -> str:
     return digest.hexdigest()
 
 
-def _update_fingerprint(
-    fingerprint: Any,
-    manifest_path: Path,
-    manifest: dict[str, Any],
-    verified: dict[PurePosixPath, str],
-) -> None:
-    fingerprint.update(manifest_path.name.encode("ascii"))
-    fingerprint.update(json.dumps(manifest, sort_keys=True, separators=(",", ":")).encode("utf-8"))
-    for path, digest in sorted(verified.items(), key=lambda item: item[0].as_posix()):
-        fingerprint.update(path.as_posix().encode("utf-8"))
-        fingerprint.update(digest.encode("ascii"))
+def _fingerprint_closure(root: Path) -> str:
+    fingerprint = hashlib.sha256()
+    entries: List[Tuple[str, PurePosixPath, Optional[Path]]] = []
+    for current_root, directory_names, file_names in os.walk(root, followlinks=False):
+        current = Path(current_root)
+        for name in directory_names:
+            path = current / name
+            entries.append(("D", PurePosixPath(path.relative_to(root).as_posix()), None))
+        for name in file_names:
+            path = current / name
+            entries.append(("F", PurePosixPath(path.relative_to(root).as_posix()), path))
+    for kind, relative, file_path in sorted(entries, key=lambda item: (item[1].as_posix(), item[0])):
+        fingerprint.update(kind.encode("ascii") + b"\0")
+        fingerprint.update(relative.as_posix().encode("utf-8") + b"\0")
+        if file_path is not None:
+            fingerprint.update(_sha256_file(file_path).encode("ascii"))
+        fingerprint.update(b"\0")
+    return fingerprint.hexdigest()
 
 
-def main(argv: list[str] | None = None) -> int:
+def main(argv: Optional[List[str]] = None) -> int:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--bundle", required=True, type=Path)
     arguments = parser.parse_args(argv)
