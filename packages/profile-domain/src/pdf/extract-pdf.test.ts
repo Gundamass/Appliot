@@ -12,9 +12,8 @@ describe("extractPdf", () => {
     const pdf = await appendPdfPages(textPdf, scannedPdf);
     const images: Uint8Array[] = [];
     const ocr = {
-      async recognize(image: Uint8Array, language: "chi_sim+eng"): Promise<string> {
+      async recognize(image: Uint8Array): Promise<string> {
         images.push(image);
-        expect(language).toBe("chi_sim+eng");
         return "Scanned work experience";
       }
     };

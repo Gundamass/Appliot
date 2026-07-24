@@ -10,5 +10,5 @@ export interface ExtractedDocument {
 }
 
 export interface OcrEngine {
-  recognize(image: Uint8Array, language: "chi_sim+eng"): Promise<string>;
+  recognize(image: Uint8Array): Promise<string>;
 }

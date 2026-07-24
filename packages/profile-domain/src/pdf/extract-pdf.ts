@@ -60,7 +60,7 @@ export async function extractPdf(bytes: Uint8Array, ocr: OcrEngine): Promise<Ext
           pages.push({ page: pageNumber, text, source: "pdf_text" });
         } else {
           const image = await renderPageForOcr(page);
-          const ocrText = await ocr.recognize(image, "chi_sim+eng");
+          const ocrText = await ocr.recognize(image);
           pages.push({ page: pageNumber, text: ocrText, source: "ocr" });
         }
       } finally {
