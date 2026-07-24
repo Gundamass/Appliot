@@ -6,7 +6,7 @@ import {
   type ProfileFact,
   type SelfEvaluationReview
 } from "@resume/contracts";
-import type { StructuredModelProvider } from "@resume/model-provider";
+import type { StructuredGenerationInput, StructuredModelProvider } from "@resume/model-provider";
 import { tailorSelfEvaluation, validateEditedSelfEvaluation } from "@resume/rag";
 import type { FastifyInstance } from "fastify";
 import { z } from "zod";
@@ -42,6 +42,17 @@ export function registerReviewRoutes(app: FastifyInstance, dependencies: ReviewR
       return sendError(reply, 503, "Self-evaluation tailoring is temporarily unavailable");
     }
     const facts = eligibleFacts(dependencies.profileRepository.listForTask(params.data.taskId), params.data.taskId);
+    let generationFailed = false;
+    const callScopedProvider: StructuredModelProvider = {
+      async generateStructured<T>(input: StructuredGenerationInput<T>) {
+        try {
+          return await dependencies.selfEvaluationModelProvider!.generateStructured(input);
+        } catch (error) {
+          generationFailed = true;
+          throw error;
+        }
+      }
+    };
     let draft;
     try {
       draft = await tailorSelfEvaluation({
@@ -49,11 +60,11 @@ export function registerReviewRoutes(app: FastifyInstance, dependencies: ReviewR
         original: base.value as string,
         jobDescription: body.data.jobDescription,
         facts
-      }, dependencies.selfEvaluationModelProvider);
+      }, callScopedProvider);
     } catch {
       return sendError(reply, 503, "Self-evaluation tailoring is temporarily unavailable");
     }
-    if (dependencies.adapterHealth.getState("deepseek") === "unavailable") {
+    if (generationFailed) {
       return sendError(reply, 503, "Self-evaluation tailoring is temporarily unavailable");
     }
     if (draft.status !== "needs_review") return sendError(reply, 400, "Draft contains unsupported claims");

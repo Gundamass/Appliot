@@ -13,8 +13,9 @@ describe("HealthApi HTTP contract", () => {
     const fetchMock = vi.fn(async () => Response.json(payload));
     vi.stubGlobal("fetch", fetchMock);
 
-    await expect(createHealthApi().getStatuses()).resolves.toEqual(payload);
-    expect(fetchMock).toHaveBeenCalledWith("/api/health/adapters", { method: "GET" });
+    const controller = new AbortController();
+    await expect(createHealthApi().getStatuses(controller.signal)).resolves.toEqual(payload);
+    expect(fetchMock).toHaveBeenCalledWith("/api/health/adapters", { method: "GET", signal: controller.signal });
   });
 
   it("rejects secret-bearing fields even from a successful response", async () => {

@@ -8,6 +8,7 @@ import { migrateDatabase } from "../db/migrate.js";
 import { createApp } from "../app.js";
 import { createProfileRepository } from "../profile/profile-repository.js";
 import { createLocalOriginalDocumentStore } from "../profile/original-document-store.js";
+import { createAdapterHealthRegistry } from "../health/adapter-health.js";
 
 const resources: Array<{ app: Awaited<ReturnType<typeof createApp>>; database: InstanceType<typeof Database>; root: string }> = [];
 
@@ -129,7 +130,10 @@ describe("RAG routes", () => {
       extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }),
       extractFacts: async () => [],
       embeddingSearch,
-      adapterHealth: { getStatuses: vi.fn(), getState: () => "ready", setDeepSeekState: vi.fn() }
+      adapterHealth: {
+        getStatuses: vi.fn(), getState: () => "ready", setDeepSeekState: vi.fn(), close: vi.fn(),
+        ensureFresh: vi.fn(async () => ({ id: "embedding", state: "ready" } as const))
+      }
     });
     resources.push({ app, database, root });
 
@@ -141,6 +145,41 @@ describe("RAG routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ decision: { status: "needs_review", value: "Supported long text." } });
+  });
+
+  it("refreshes stale embedding readiness before new semantic work", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const profileRepository = createProfileRepository(database);
+    const embeddingSearch: EmbeddingSearchPort = { search: vi.fn(async () => []) };
+    const healthFetch = vi.fn(async () => Response.json({
+      status: "ready",
+      model: "Qwen/Qwen3-Embedding-8B",
+      modelRevision: "revision",
+      dimensions: 4096
+    }));
+    const adapterHealth = createAdapterHealthRegistry({
+      embedding: {
+        apiToken: "token", baseUrl: "http://127.0.0.1:18080",
+        model: "Qwen/Qwen3-Embedding-8B", modelRevision: "revision", dimensions: 4096, timeoutMs: 60_000
+      }
+    }, { fetch: healthFetch });
+    const root = await mkdtemp(join(tmpdir(), "resume-rag-routes-"));
+    const app = await createApp({
+      database, profileRepository, originalDocumentStore: createLocalOriginalDocumentStore(root),
+      extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }), extractFacts: async () => [],
+      embeddingSearch, adapterHealth
+    });
+    resources.push({ app, database, root });
+
+    const response = await app.inject({
+      method: "POST", url: "/api/rag/fields/resolve",
+      payload: { ...request, semantic: "application.coverLetter", fieldId: "cover", label: "Cover letter", type: "textarea" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(healthFetch).toHaveBeenCalledTimes(1);
+    expect(embeddingSearch.search).toHaveBeenCalledTimes(1);
   });
 
   it("omits semantic search until embedding is ready while preserving keyword results", async () => {
@@ -158,7 +197,10 @@ describe("RAG routes", () => {
       database, profileRepository, originalDocumentStore: createLocalOriginalDocumentStore(root),
       extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }), extractFacts: async () => [],
       embeddingSearch,
-      adapterHealth: { getStatuses: vi.fn(), getState: () => "configured", setDeepSeekState: vi.fn() }
+      adapterHealth: {
+        getStatuses: vi.fn(), getState: () => "configured", setDeepSeekState: vi.fn(), close: vi.fn(),
+        ensureFresh: vi.fn(async () => ({ id: "embedding", state: "configured", code: "not_checked" } as const))
+      }
     });
     resources.push({ app, database, root });
 

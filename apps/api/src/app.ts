@@ -42,9 +42,10 @@ export async function createApp(dependencies: CreateAppDependencies) {
     limits: { files: 1, fields: 0, parts: 1, fileSize: MAX_PDF_BYTES },
     throwFileSizeLimit: true
   });
-  if (dependencies.close) {
-    app.addHook("onClose", async () => dependencies.close?.());
-  }
+  app.addHook("onClose", async () => {
+    adapterHealth.close();
+    await dependencies.close?.();
+  });
   app.setErrorHandler((error, _request, reply) => {
     const statusCode = error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500 ? 400 : 500;
     return sendError(reply, statusCode, statusCode === 400 ? "Invalid request" : "Internal server error");

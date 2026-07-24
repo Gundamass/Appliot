@@ -31,7 +31,8 @@ export function registerRagRoutes(
     ...(dependencies.embeddingSearch === undefined ? {} : {
       embeddingSearch: {
         async search(input) {
-          if (dependencies.adapterHealth.getState("embedding") !== "ready") {
+          const readiness = await dependencies.adapterHealth.ensureFresh("embedding");
+          if (readiness.state !== "ready") {
             throw new EmbeddingSearchUnavailableError();
           }
           return dependencies.embeddingSearch!.search(input);

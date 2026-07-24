@@ -43,4 +43,29 @@ describe("adapter health route", () => {
     expect(deepseekFetch).not.toHaveBeenCalled();
     expect(JSON.stringify(payload)).not.toMatch(/test-token|127\.0\.0\.1|url|error|header|gpu|path/iu);
   });
+
+  it("closes adapter health through app shutdown exactly once", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const closeHealth = vi.fn();
+    const closeDependencies = vi.fn();
+    const app = await createApp({
+      database,
+      profileRepository: createProfileRepository(database),
+      originalDocumentStore: { retain: vi.fn(), discardCreated: vi.fn() },
+      extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }),
+      extractFacts: async () => [],
+      adapterHealth: {
+        getStatuses: vi.fn(async () => []), getState: () => "unconfigured",
+        setDeepSeekState: vi.fn(), ensureFresh: vi.fn(), close: closeHealth
+      },
+      close: closeDependencies
+    });
+
+    await app.close();
+    await app.close();
+
+    expect(closeHealth).toHaveBeenCalledTimes(1);
+    expect(closeDependencies).toHaveBeenCalledTimes(1);
+  });
 });

@@ -101,7 +101,7 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
 .upload-progress { background: #dce2e5; height: 3px; margin-top: 14px; overflow: hidden; position: relative; }
 .upload-progress span { animation: upload-progress 1.3s ease-in-out infinite; background: #238558; height: 100%; left: 0; position: absolute; width: 35%; }
 @keyframes upload-progress { from { transform: translateX(-100%); } to { transform: translateX(390%); } }
-@media (prefers-reduced-motion: reduce) { .upload-progress span, .spinner { animation: none !important; } }
+@media (prefers-reduced-motion: reduce) { .upload-progress span, .spinner, .service-state.checking svg { animation: none !important; } }
 .upload-message { align-items: center; display: flex; flex-wrap: wrap; font-size: 13px; gap: 8px; margin: 10px 0 0; }
 .upload-message.success { color: #166a43; }
 .upload-message.error, .upload-message.accepted_refresh_error { color: #a52720; }

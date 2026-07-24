@@ -70,6 +70,7 @@ describe("adapter health registry", () => {
   it.each([
     ["wrong model", { status: "ready", model: "wrong", modelRevision: embedding.modelRevision, dimensions: 4096 }],
     ["wrong revision", { status: "ready", model: embedding.model, modelRevision: "wrong", dimensions: 4096 }],
+    ["missing dimensions", { status: "ready", model: embedding.model, modelRevision: embedding.modelRevision }],
     ["wrong dimensions", { status: "ready", model: embedding.model, modelRevision: embedding.modelRevision, dimensions: 1024 }]
   ])("marks embedding invalid for a %s readiness contract", async (_name, payload) => {
     const registry = createAdapterHealthRegistry({ embedding }, { fetch: vi.fn(async () => Response.json(payload)) });
@@ -110,6 +111,51 @@ describe("adapter health registry", () => {
       modelRevision: embedding.modelRevision, code: "offline"
     });
     expect(fetch.mock.calls[0]?.[1]?.signal?.aborted).toBe(true);
+  });
+
+  it("coalesces and caches readiness independently for each worker", async () => {
+    let now = 1_000;
+    const fetch = vi.fn(async (input: string | URL | Request) => Response.json(String(input).includes("18080")
+      ? { status: "ready", model: embedding.model, modelRevision: embedding.modelRevision, dimensions: embedding.dimensions }
+      : { status: "ready", model: ocr.model, modelRevision: ocr.modelRevision }));
+    const registry = createAdapterHealthRegistry({ embedding, ocr }, { fetch, now: () => now });
+
+    await Promise.all([registry.ensureFresh("embedding"), registry.ensureFresh("embedding")]);
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual(["http://127.0.0.1:18080/readyz"]);
+
+    now += 4_000;
+    await registry.ensureFresh("ocr");
+    now += 2_000;
+    await registry.getStatuses();
+
+    expect(fetch.mock.calls.map(([input]) => String(input))).toEqual([
+      "http://127.0.0.1:18080/readyz",
+      "http://127.0.0.1:43121/readyz",
+      "http://127.0.0.1:18080/readyz"
+    ]);
+  });
+
+  it("aborts active probes on close and ignores late results", async () => {
+    let release: ((response: Response) => void) | undefined;
+    let signal: AbortSignal | undefined;
+    const fetch = vi.fn((_input: string | URL | Request, init?: RequestInit) => {
+      signal = init?.signal ?? undefined;
+      return new Promise<Response>((resolve) => { release = resolve; });
+    });
+    const registry = createAdapterHealthRegistry({ embedding }, { fetch, probeTimeoutMs: 10_000 });
+
+    const pending = registry.ensureFresh("embedding");
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    registry.close();
+    expect(signal?.aborted).toBe(true);
+    release?.(Response.json({
+      status: "ready", model: embedding.model, modelRevision: embedding.modelRevision, dimensions: embedding.dimensions
+    }));
+    await pending;
+
+    expect(registry.getState("embedding")).not.toBe("ready");
+    await registry.ensureFresh("embedding");
+    expect(fetch).toHaveBeenCalledTimes(1);
   });
 });
 

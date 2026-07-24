@@ -89,6 +89,9 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi }: ProfilePagePr
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string>();
   const [adapterStatuses, setAdapterStatuses] = useState<AdapterStatus[]>([]);
+  const healthRequestGeneration = useRef(0);
+  const healthAbortController = useRef<AbortController | undefined>(undefined);
+  const healthMounted = useRef(true);
   const modifyButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const evidenceButtonRefs = useRef(new Map<string, HTMLButtonElement>());
 
@@ -96,11 +99,34 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi }: ProfilePagePr
   const adapterStatus = (id: AdapterId) => adapterStatuses.find((status) => status.id === id);
   const refreshAdapterStatuses = useCallback(async () => {
     if (!healthApi) return;
-    try { setAdapterStatuses(await healthApi.getStatuses()); }
-    catch { setAdapterStatuses([]); }
+    healthAbortController.current?.abort();
+    const controller = new AbortController();
+    const request = ++healthRequestGeneration.current;
+    healthAbortController.current = controller;
+    try {
+      const statuses = await healthApi.getStatuses(controller.signal);
+      if (healthMounted.current && !controller.signal.aborted && healthRequestGeneration.current === request) {
+        setAdapterStatuses(statuses);
+      }
+    } catch {
+      if (healthMounted.current && !controller.signal.aborted && healthRequestGeneration.current === request) {
+        setAdapterStatuses([]);
+      }
+    } finally {
+      if (healthRequestGeneration.current === request) healthAbortController.current = undefined;
+    }
   }, [healthApi]);
 
   useEffect(() => { void refreshAdapterStatuses(); }, [refreshAdapterStatuses]);
+  useEffect(() => {
+    healthMounted.current = true;
+    return () => {
+      healthMounted.current = false;
+      healthRequestGeneration.current += 1;
+      healthAbortController.current?.abort();
+      healthAbortController.current = undefined;
+    };
+  }, []);
 
   const acceptReview = (candidate: unknown, expectedTaskId: string): SelfEvaluationReviewModel => {
     const parsed = SelfEvaluationReviewSchema.parse(candidate);
@@ -463,7 +489,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi }: ProfilePagePr
             </div>
             <div className="section-operations">
               {ocr && <ServiceStatus statuses={[ocr]} />}
-              <button className="icon-button" type="button" aria-label="刷新资料" title="刷新资料" disabled={loading || controlsLocked} onClick={() => void loadFacts()}>
+              <button className="icon-button" type="button" aria-label="刷新资料" title="刷新资料" disabled={loading || controlsLocked} onClick={() => { void loadFacts(); void refreshAdapterStatuses(); }}>
                 <RefreshCw aria-hidden="true" size={18} />
               </button>
             </div>

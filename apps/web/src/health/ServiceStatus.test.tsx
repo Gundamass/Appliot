@@ -17,6 +17,12 @@ const profileApi: ProfileApi = {
   upload: vi.fn(), listFacts: vi.fn(async () => []), confirm: vi.fn(), correct: vi.fn()
 };
 
+function deferred<T>() {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => { resolve = resolvePromise; });
+  return { promise, resolve };
+}
+
 describe("ServiceStatus", () => {
   it("renders compact safe operational states", () => {
     render(<ServiceStatus statuses={statuses} />);
@@ -70,5 +76,45 @@ describe("ServiceStatus", () => {
     await user.type(screen.getByLabelText("Job description"), "React role");
 
     expect(screen.getByRole("button", { name: "Create review" })).toBeDisabled();
+  });
+
+  it("keeps the newest health refresh when responses resolve out of order", async () => {
+    const first = deferred<AdapterStatus[]>();
+    const second = deferred<AdapterStatus[]>();
+    const healthApi: HealthApi = {
+      getStatuses: vi.fn().mockReturnValueOnce(first.promise).mockReturnValueOnce(second.promise)
+    };
+    const user = userEvent.setup();
+    render(<ProfilePage api={profileApi} healthApi={healthApi} />);
+
+    await waitFor(() => expect(healthApi.getStatuses).toHaveBeenCalledOnce());
+    await user.click(await screen.findByRole("button", { name: "刷新资料" }));
+    expect(healthApi.getStatuses).toHaveBeenCalledTimes(2);
+
+    second.resolve(statuses.map((status) => status.id === "ocr"
+      ? { id: "ocr", state: "ready", model: "ocr", modelRevision: "revision" }
+      : status));
+    expect(await screen.findByText("OCR 可用")).toBeVisible();
+    first.resolve(statuses);
+    await waitFor(() => expect(screen.getByText("OCR 可用")).toBeVisible());
+    expect(screen.queryByText("OCR 离线")).not.toBeInTheDocument();
+  });
+
+  it("aborts health refresh and ignores its late response after unmount", async () => {
+    const pending = deferred<AdapterStatus[]>();
+    let signal: AbortSignal | undefined;
+    const healthApi: HealthApi = {
+      getStatuses: vi.fn((requestSignal?: AbortSignal) => {
+        signal = requestSignal;
+        return pending.promise;
+      })
+    };
+    const { unmount } = render(<ProfilePage api={profileApi} healthApi={healthApi} />);
+
+    await waitFor(() => expect(healthApi.getStatuses).toHaveBeenCalledOnce());
+    expect(signal?.aborted).toBe(false);
+    unmount();
+    expect(signal?.aborted).toBe(true);
+    await expect(Promise.resolve().then(() => pending.resolve(statuses))).resolves.toBeUndefined();
   });
 });

@@ -77,6 +77,38 @@ describe("self-evaluation review routes", () => {
 
     expect(response.statusCode).toBe(503);
   });
+
+  it("keeps a successful generation successful when another concurrent call fails", async () => {
+    let resolveSuccess: ((value: unknown) => void) | undefined;
+    let rejectFailure: ((reason: unknown) => void) | undefined;
+    const provider: StructuredModelProvider = {
+      generateStructured<T>(input: StructuredGenerationInput<T>): Promise<T> {
+        return new Promise<unknown>((resolve, reject) => {
+          if (input.user.includes("success role")) resolveSuccess = resolve;
+          else rejectFailure = reject;
+        }).then((value) => value as T);
+      }
+    };
+    const { app } = await testApp(provider);
+
+    const successful = app.inject({
+      method: "POST", url: "/api/reviews/self-evaluations/task-success",
+      payload: { jobDescription: "success role" }
+    });
+    const failed = app.inject({
+      method: "POST", url: "/api/reviews/self-evaluations/task-failure",
+      payload: { jobDescription: "failure role" }
+    });
+    await vi.waitFor(() => {
+      expect(resolveSuccess).toBeTypeOf("function");
+      expect(rejectFailure).toBeTypeOf("function");
+    });
+    resolveSuccess?.(generatedDraft);
+    rejectFailure?.(new Error("provider offline"));
+
+    expect((await successful).statusCode).toBe(201);
+    expect((await failed).statusCode).toBe(503);
+  });
   it("uses the persisted job description and only same-task answers in server-side tailoring", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

@@ -27,8 +27,23 @@ interface AdapterHealthDependencies {
 
 export interface AdapterHealthRegistry {
   getStatuses(): Promise<AdapterStatus[]>;
+  ensureFresh(id: AdapterId): Promise<AdapterStatus>;
   getState(id: AdapterId): AdapterState;
   setDeepSeekState(state: "ready" | "unavailable"): void;
+  close(): void;
+}
+
+type WorkerId = "embedding" | "ocr";
+
+interface WorkerLifecycle {
+  id: WorkerId;
+  configuration?: RemoteEmbeddingAdapterConfig | RemoteOcrAdapterConfig;
+  status: AdapterStatus;
+  cachedAt: number | undefined;
+  activeProbe: Promise<AdapterStatus> | undefined;
+  controller: AbortController | undefined;
+  timeout: ReturnType<typeof setTimeout> | undefined;
+  generation: number;
 }
 
 export function createAdapterHealthRegistry(
@@ -41,41 +56,56 @@ export function createAdapterHealthRegistry(
   let deepseek = configuration.deepseek
     ? status("deepseek", "configured", configuration.deepseek.model, undefined, "not_checked")
     : status("deepseek", "unconfigured", undefined, undefined, "not_configured");
-  let workers = initialWorkerStatuses(configuration);
-  let cachedAt: number | undefined;
-  let activeProbe: Promise<void> | undefined;
+  const workers = createWorkerLifecycles(configuration);
+  let closed = false;
 
-  const probeWorkers = async () => {
-    workers = workers.map((worker) => worker.state === "unconfigured" ? worker : { ...worker, state: "checking", code: undefined });
-    const probes: Array<Promise<AdapterStatus>> = [];
-    if (configuration.embedding) {
-      probes.push(probeWorker("embedding", configuration.embedding, fetch, probeTimeoutMs));
-    }
-    if (configuration.ocr) {
-      probes.push(probeWorker("ocr", configuration.ocr, fetch, probeTimeoutMs));
-    }
-    const results = await Promise.all(probes);
-    workers = (["embedding", "ocr"] as const).map((id) =>
-      results.find((result) => result.id === id)
-      ?? status(id, "unconfigured", undefined, undefined, "not_configured")
-    );
-    cachedAt = now();
+  const ensureFresh = async (id: AdapterId): Promise<AdapterStatus> => {
+    if (id === "deepseek") return deepseek;
+    const worker = workers[id];
+    if (closed || worker.configuration === undefined) return worker.status;
+    if (worker.cachedAt !== undefined && now() - worker.cachedAt <= CACHE_MS) return worker.status;
+    if (worker.activeProbe) return worker.activeProbe;
+
+    worker.status = { ...worker.status, state: "checking", code: undefined };
+    const generation = worker.generation;
+    const controller = new AbortController();
+    worker.controller = controller;
+    worker.timeout = setTimeout(() => controller.abort(), probeTimeoutMs);
+    const activeProbe = probeWorker(id, worker.configuration, fetch, controller.signal)
+      .then((result) => {
+        if (!closed && worker.generation === generation) {
+          worker.status = result;
+          worker.cachedAt = now();
+        }
+        return worker.status;
+      })
+      .finally(() => {
+        if (worker.activeProbe === activeProbe) worker.activeProbe = undefined;
+        if (worker.controller === controller) worker.controller = undefined;
+        if (worker.timeout !== undefined) {
+          clearTimeout(worker.timeout);
+          worker.timeout = undefined;
+        }
+      });
+    worker.activeProbe = activeProbe;
+    return activeProbe;
   };
 
   return {
     async getStatuses() {
-      if (cachedAt === undefined || now() - cachedAt > CACHE_MS) {
-        activeProbe ??= probeWorkers().finally(() => { activeProbe = undefined; });
-        await activeProbe;
-      }
-      return AdapterHealthResponseSchema.parse([deepseek, ...workers]);
+      const workerStatuses = await Promise.all([
+        ensureFresh("embedding"),
+        ensureFresh("ocr")
+      ]);
+      return AdapterHealthResponseSchema.parse([deepseek, ...workerStatuses]);
     },
+    ensureFresh,
     getState(id) {
       if (id === "deepseek") return deepseek.state;
-      return workers.find((worker) => worker.id === id)?.state ?? "unconfigured";
+      return workers[id].status.state;
     },
     setDeepSeekState(state) {
-      if (!configuration.deepseek) return;
+      if (closed || !configuration.deepseek) return;
       deepseek = status(
         "deepseek",
         state,
@@ -83,6 +113,25 @@ export function createAdapterHealthRegistry(
         undefined,
         state === "unavailable" ? "offline" : undefined
       );
+    },
+    close() {
+      if (closed) return;
+      closed = true;
+      if (configuration.deepseek) {
+        deepseek = status("deepseek", "unavailable", configuration.deepseek.model, undefined, "offline");
+      }
+      for (const worker of Object.values(workers)) {
+        worker.generation += 1;
+        worker.controller?.abort();
+        if (worker.timeout !== undefined) clearTimeout(worker.timeout);
+        worker.controller = undefined;
+        worker.timeout = undefined;
+        worker.activeProbe = undefined;
+        worker.cachedAt = undefined;
+        if (worker.configuration) {
+          worker.status = status(worker.id, "unavailable", worker.configuration.model, worker.configuration.modelRevision, "offline");
+        }
+      }
     }
   };
 }
@@ -105,29 +154,36 @@ export class ObservedStructuredModelProvider implements StructuredModelProvider 
   }
 }
 
-function initialWorkerStatuses(configuration: AdapterConfiguration): AdapterStatus[] {
-  return (["embedding", "ocr"] as const).map((id) => {
+function createWorkerLifecycles(configuration: AdapterConfiguration): Record<WorkerId, WorkerLifecycle> {
+  return Object.fromEntries((["embedding", "ocr"] as const).map((id) => {
     const worker = configuration[id];
-    return worker
-      ? status(id, "configured", worker.model, worker.modelRevision, "not_checked")
-      : status(id, "unconfigured", undefined, undefined, "not_configured");
-  });
+    return [id, {
+      id,
+      ...(worker === undefined ? {} : { configuration: worker }),
+      status: worker
+        ? status(id, "configured", worker.model, worker.modelRevision, "not_checked")
+        : status(id, "unconfigured", undefined, undefined, "not_configured"),
+      cachedAt: undefined,
+      activeProbe: undefined,
+      controller: undefined,
+      timeout: undefined,
+      generation: 0
+    } satisfies WorkerLifecycle];
+  })) as unknown as Record<WorkerId, WorkerLifecycle>;
 }
 
 async function probeWorker(
   id: "embedding" | "ocr",
   configuration: RemoteEmbeddingAdapterConfig | RemoteOcrAdapterConfig,
   fetch: typeof globalThis.fetch,
-  timeoutMs: number
+  signal: AbortSignal
 ): Promise<AdapterStatus> {
-  const controller = new AbortController();
-  const timeout = setTimeout(() => controller.abort(), timeoutMs);
   const base = status(id, "configured", configuration.model, configuration.modelRevision, "not_checked");
   try {
     const response = await fetch(`${configuration.baseUrl.replace(/\/+$/u, "")}/readyz`, {
       method: "GET",
       headers: { Authorization: `Bearer ${configuration.apiToken}` },
-      signal: controller.signal
+      signal
     });
     let payload: unknown;
     try {
@@ -141,15 +197,12 @@ async function probeWorker(
       || readiness.data.model !== configuration.model
       || readiness.data.modelRevision !== configuration.modelRevision
       || id === "embedding" && "dimensions" in configuration
-        && readiness.data.dimensions !== undefined
         && readiness.data.dimensions !== configuration.dimensions) {
       return { ...base, state: "invalid", code: "contract_mismatch" };
     }
     return status(id, "ready", configuration.model, configuration.modelRevision);
   } catch {
     return { ...base, state: "unavailable", code: "offline" };
-  } finally {
-    clearTimeout(timeout);
   }
 }
 
