@@ -2,7 +2,7 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import { afterEach, describe, expect, it } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { EmbeddingSearchUnavailableError, type EmbeddingSearchPort } from "@resume/rag";
 import { migrateDatabase } from "../db/migrate.js";
 import { createApp } from "../app.js";
@@ -105,21 +105,21 @@ describe("RAG routes", () => {
     migrateDatabase(database);
     const profileRepository = createProfileRepository(database);
     const embeddingSearch: EmbeddingSearchPort = {
-      async search() {
+      search: vi.fn(async () => {
         return [{
           score: 0.99,
           fact: {
             id: "summary",
             fieldPath: "application.coverLetter",
             value: "Supported long text.",
-            status: "user_confirmed",
+            status: "user_confirmed" as const,
             confidence: 1,
-            scope: "profile",
-            evidence: [{ documentId: "resume", page: 1, text: "Supported long text.", extraction: "pdf_text" }],
+            scope: "profile" as const,
+            evidence: [{ documentId: "resume", page: 1, text: "Supported long text.", extraction: "pdf_text" as const }],
             revision: 1
           }
         }];
-      }
+      })
     };
     const root = await mkdtemp(join(tmpdir(), "resume-rag-routes-"));
     const app = await createApp({
@@ -128,7 +128,8 @@ describe("RAG routes", () => {
       originalDocumentStore: createLocalOriginalDocumentStore(root),
       extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }),
       extractFacts: async () => [],
-      embeddingSearch
+      embeddingSearch,
+      adapterHealth: { getStatuses: vi.fn(), getState: () => "ready", setDeepSeekState: vi.fn() }
     });
     resources.push({ app, database, root });
 
@@ -140,6 +141,35 @@ describe("RAG routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ decision: { status: "needs_review", value: "Supported long text." } });
+  });
+
+  it("omits semantic search until embedding is ready while preserving keyword results", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const profileRepository = createProfileRepository(database);
+    profileRepository.createExtracted({
+      id: "summary", fieldPath: "application.coverLetter", value: "Keyword fallback.", status: "extracted",
+      confidence: 0.8, scope: "profile",
+      evidence: [{ documentId: "resume", page: 1, text: "Keyword fallback.", extraction: "pdf_text" }], revision: 1
+    });
+    const embeddingSearch: EmbeddingSearchPort = { search: vi.fn(async () => []) };
+    const root = await mkdtemp(join(tmpdir(), "resume-rag-routes-"));
+    const app = await createApp({
+      database, profileRepository, originalDocumentStore: createLocalOriginalDocumentStore(root),
+      extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }), extractFacts: async () => [],
+      embeddingSearch,
+      adapterHealth: { getStatuses: vi.fn(), getState: () => "configured", setDeepSeekState: vi.fn() }
+    });
+    resources.push({ app, database, root });
+
+    const response = await app.inject({
+      method: "POST", url: "/api/rag/fields/resolve",
+      payload: { ...request, semantic: "application.coverLetter", fieldId: "cover", label: "Cover letter", type: "textarea" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ decision: { status: "needs_review", value: "Keyword fallback." } });
+    expect(embeddingSearch.search).not.toHaveBeenCalled();
   });
 
   it("preserves keyword fallback and follow-up behavior without semantic search", async () => {

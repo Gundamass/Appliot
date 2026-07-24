@@ -1,11 +1,13 @@
-import { SelfEvaluationReviewSchema, type FactStatus, type JsonValue, type ProfileFact, type SelfEvaluationReview as SelfEvaluationReviewModel } from "@resume/contracts";
+import { SelfEvaluationReviewSchema, type AdapterId, type AdapterStatus, type FactStatus, type JsonValue, type ProfileFact, type SelfEvaluationReview as SelfEvaluationReviewModel } from "@resume/contracts";
 import { FileText, RefreshCw, ShieldCheck, Upload } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ProfileApi, RagApi, SelfEvaluationReviewApi } from "../api/client.js";
+import type { HealthApi } from "../api/health-client.js";
 import { EvidenceDrawer } from "./EvidenceDrawer.js";
 import { FactEditor } from "./FactEditor.js";
 import { SelfEvaluationReview } from "../reviews/SelfEvaluationReview.js";
 import { RagWorkspace } from "../rag/RagWorkspace.js";
+import { ServiceStatus } from "../health/ServiceStatus.js";
 
 type ReviewStatus = Exclude<FactStatus, "superseded">;
 type Filter = "all" | ReviewStatus;
@@ -48,11 +50,12 @@ const FILTERS: { value: Filter; label: string }[] = [
 
 interface ProfilePageProps {
   api: ProfileApi;
+  healthApi?: HealthApi;
   reviewApi?: SelfEvaluationReviewApi;
   ragApi?: RagApi;
 }
 
-export function ProfilePage({ api, reviewApi, ragApi }: ProfilePageProps) {
+export function ProfilePage({ api, healthApi, reviewApi, ragApi }: ProfilePageProps) {
   const [facts, setFacts] = useState<ProfileFact[]>([]);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
@@ -85,10 +88,19 @@ export function ProfilePage({ api, reviewApi, ragApi }: ProfilePageProps) {
   const [reviewActionBusy, setReviewActionBusy] = useState(false);
   const [reviewLoading, setReviewLoading] = useState(false);
   const [reviewError, setReviewError] = useState<string>();
+  const [adapterStatuses, setAdapterStatuses] = useState<AdapterStatus[]>([]);
   const modifyButtonRefs = useRef(new Map<string, HTMLButtonElement>());
   const evidenceButtonRefs = useRef(new Map<string, HTMLButtonElement>());
 
   const isCurrentContext = useCallback((context: number) => contextGeneration.current === context, []);
+  const adapterStatus = (id: AdapterId) => adapterStatuses.find((status) => status.id === id);
+  const refreshAdapterStatuses = useCallback(async () => {
+    if (!healthApi) return;
+    try { setAdapterStatuses(await healthApi.getStatuses()); }
+    catch { setAdapterStatuses([]); }
+  }, [healthApi]);
+
+  useEffect(() => { void refreshAdapterStatuses(); }, [refreshAdapterStatuses]);
 
   const acceptReview = (candidate: unknown, expectedTaskId: string): SelfEvaluationReviewModel => {
     const parsed = SelfEvaluationReviewSchema.parse(candidate);
@@ -150,6 +162,7 @@ export function ProfilePage({ api, reviewApi, ragApi }: ProfilePageProps) {
       setSelfEvaluationReview(next); setLoadedReviewTaskId(requestedTaskId);
     } catch {
       if (reviewActionOwner.current === owner) setReviewError("Review creation failed");
+      void refreshAdapterStatuses();
     } finally {
       if (reviewActionOwner.current === owner) { reviewActionOwner.current = null; setReviewActionBusy(false); }
     }
@@ -408,6 +421,10 @@ export function ProfilePage({ api, reviewApi, ragApi }: ProfilePageProps) {
   const acceptedRefreshing = uploadState === "accepted_refreshing";
   const mutationBusy = busy !== undefined;
   const controlsLocked = uploading || acceptedRefreshing || mutationBusy;
+  const deepseek = adapterStatus("deepseek");
+  const deepseekAvailable = healthApi === undefined || deepseek?.state === "configured" || deepseek?.state === "ready";
+  const ocr = adapterStatus("ocr");
+  const embedding = adapterStatus("embedding");
 
   return (
     <div className="app-shell">
@@ -425,13 +442,13 @@ export function ProfilePage({ api, reviewApi, ragApi }: ProfilePageProps) {
           <button type="button" aria-pressed={view === "self-evaluation"} onClick={() => setView("self-evaluation")}>自我评价审核</button>
           <button type="button" aria-pressed={view === "rag"} onClick={() => setView("rag")}>Field evidence</button>
         </nav>
-        {view === "rag" && ragApi ? <RagWorkspace api={ragApi} /> : view === "rag" ? (
+        {view === "rag" && ragApi ? <RagWorkspace api={ragApi} {...(embedding ? { embeddingStatus: embedding } : {})} /> : view === "rag" ? (
           <section className="review-band"><p className="inline-error" role="alert">RAG service unavailable</p></section>
         ) : view === "self-evaluation" && reviewApi ? (
           <section className="review-band" aria-labelledby="self-evaluation-title">
-            <div className="review-heading"><div><h2 id="self-evaluation-title" tabIndex={-1}>自我评价审核</h2><p>任务范围内的版本确认</p></div></div>
+            <div className="review-heading"><div><h2 id="self-evaluation-title" tabIndex={-1}>自我评价审核</h2><p>任务范围内的版本确认</p></div>{deepseek && <ServiceStatus statuses={[deepseek]} />}</div>
             <div className="review-load-controls"><label>任务 ID<input aria-label="任务 ID" value={taskId} disabled={reviewActionBusy} onChange={(event) => changeReviewTaskId(event.target.value)} /></label><button className="button secondary" type="button" disabled={reviewActionBusy || taskId.trim() === "" || loadingReviewTaskId === taskId.trim()} onClick={() => void loadSelfEvaluationReview(taskId.trim())}>{loadingReviewTaskId === taskId.trim() ? "加载中" : "加载审核"}</button><button className="icon-button" type="button" aria-label="刷新审核" title="刷新审核" disabled={reviewActionBusy || !loadedReviewTaskId || loadingReviewTaskId === loadedReviewTaskId} onClick={() => { if (loadedReviewTaskId) void loadSelfEvaluationReview(loadedReviewTaskId); }}><RefreshCw aria-hidden="true" size={18} /></button></div>
-            <div className="review-create-controls"><label>Job description<textarea aria-label="Job description" value={jobDescription} disabled={reviewActionBusy} onChange={(event) => setJobDescription(event.target.value)} /></label><button className="button primary" type="button" disabled={reviewActionBusy || taskId.trim() === "" || jobDescription.trim() === ""} onClick={() => void createSelfEvaluationReview()}>Create review</button></div>
+            <div className="review-create-controls"><label>Job description<textarea aria-label="Job description" value={jobDescription} disabled={reviewActionBusy} onChange={(event) => setJobDescription(event.target.value)} /></label><button className="button primary" type="button" disabled={!deepseekAvailable || reviewActionBusy || taskId.trim() === "" || jobDescription.trim() === ""} onClick={() => void createSelfEvaluationReview()}>Create review</button></div>
             {reviewError && <p className="inline-error" role="alert">{reviewError}</p>}
             {selfEvaluationReview && <SelfEvaluationReview draft={selfEvaluationReview} onApprove={(value) => actOnLoadedReview("approve", value)} onKeepOriginal={() => actOnLoadedReview("keep")} {...(selfEvaluationReview.status === "approved" ? { onPromote: promoteLoadedReview } : {})} />}
           </section>
@@ -444,9 +461,12 @@ export function ProfilePage({ api, reviewApi, ragApi }: ProfilePageProps) {
               <h2 id="upload-title">简历资料</h2>
               <p>{facts.length} 条资料</p>
             </div>
-            <button className="icon-button" type="button" aria-label="刷新资料" title="刷新资料" disabled={loading || controlsLocked} onClick={() => void loadFacts()}>
-              <RefreshCw aria-hidden="true" size={18} />
-            </button>
+            <div className="section-operations">
+              {ocr && <ServiceStatus statuses={[ocr]} />}
+              <button className="icon-button" type="button" aria-label="刷新资料" title="刷新资料" disabled={loading || controlsLocked} onClick={() => void loadFacts()}>
+                <RefreshCw aria-hidden="true" size={18} />
+              </button>
+            </div>
           </div>
           <div className="upload-controls">
             <label className={`file-picker${controlsLocked ? " disabled" : ""}`}>

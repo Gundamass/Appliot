@@ -13,12 +13,11 @@ import { migrateDatabase } from "./db/migrate.js";
 import { createLocalOriginalDocumentStore } from "./profile/original-document-store.js";
 import { createProductionExtraction } from "./profile/production-extraction.js";
 import { createProfileRepository } from "./profile/profile-repository.js";
+import { createAdapterHealthRegistry, ObservedStructuredModelProvider } from "./health/adapter-health.js";
 
 export interface ProductionAdapterDependencies {
   fetch?: typeof globalThis.fetch;
 }
-
-const unprobedAdapterHealth: AdapterHealthRegistry = {};
 
 export function createProductionDependencies(
   config: ApiConfig,
@@ -34,9 +33,17 @@ export function createProductionDependencies(
   try {
     migrateDatabase(database);
     const profileRepository = createProfileRepository(database);
-    const structuredProvider = config.deepseek === undefined
+    const adapterHealth: AdapterHealthRegistry = createAdapterHealthRegistry({
+      ...(config.deepseek === undefined ? {} : { deepseek: { model: config.deepseek.defaultModel } }),
+      ...(config.embedding === undefined ? {} : { embedding: config.embedding }),
+      ...(config.ocr === undefined ? {} : { ocr: config.ocr })
+    }, adapters);
+    const baseStructuredProvider = config.deepseek === undefined
       ? undefined
       : new DeepSeekStructuredModelProvider(config.deepseek, adapters);
+    const structuredProvider = baseStructuredProvider === undefined
+      ? undefined
+      : new ObservedStructuredModelProvider(baseStructuredProvider, adapterHealth);
     const ocrEngine = config.ocr === undefined
       ? undefined
       : new RemoteOcrEngine(config.ocr, adapters);
@@ -63,7 +70,7 @@ export function createProductionDependencies(
           instructionVersion: EMBEDDING_INSTRUCTION_VERSION
         })
       }),
-      adapterHealth: unprobedAdapterHealth,
+      adapterHealth,
       close
     };
   } catch (error) {

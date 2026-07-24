@@ -35,4 +35,12 @@ describe("RagWorkspace", () => {
     expect(api.answer).toHaveBeenCalledWith(expect.objectContaining({ taskId: "task-1", value: "Shenzhen" }));
     expect(await screen.findByText("verified_auto")).toBeVisible();
   });
+
+  it("shows embedding degradation while keeping keyword field resolution available", async () => {
+    const api: RagApi = { resolve: vi.fn(), answer: vi.fn() };
+    render(<RagWorkspace api={api} embeddingStatus={{ id: "embedding", state: "unavailable", code: "offline" }} />);
+
+    expect(screen.getByText("语义检索 离线")).toBeVisible();
+    expect(screen.getByRole("button", { name: "Resolve field" })).toBeEnabled();
+  });
 });

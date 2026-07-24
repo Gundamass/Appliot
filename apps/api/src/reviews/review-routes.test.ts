@@ -6,6 +6,7 @@ import { createApp, type AppDependencies } from "../app.js";
 import type { OriginalDocumentStore } from "../profile/original-document-store.js";
 import { createProfileRepository } from "../profile/profile-repository.js";
 import { createSelfEvaluationReviewRepository } from "./review-repository.js";
+import { createAdapterHealthRegistry, ObservedStructuredModelProvider } from "../health/adapter-health.js";
 
 const resources: Array<{ app: Awaited<ReturnType<typeof createApp>>; database: InstanceType<typeof Database> }> = [];
 const originalDocumentStore = {
@@ -32,7 +33,7 @@ afterEach(async () => {
   }
 });
 
-async function testApp() {
+async function testApp(provider: StructuredModelProvider = providerReturning()) {
   const database = new Database(":memory:");
   migrateDatabase(database);
   const profileRepository = createProfileRepository(database);
@@ -46,10 +47,11 @@ async function testApp() {
     scope: "profile", evidence: [{ documentId: "user", page: 1, text: "Confirmed React", extraction: "user" }], revision: 1
   });
   profileRepository.confirm("react");
+  const adapterHealth = createAdapterHealthRegistry({ deepseek: { model: "test-model" } });
   const dependencies: AppDependencies = {
-    database, adapterHealth: {}, profileRepository,
+    database, adapterHealth, profileRepository,
     originalDocumentStore,
-    selfEvaluationModelProvider: providerReturning(),
+    selfEvaluationModelProvider: new ObservedStructuredModelProvider(provider, adapterHealth),
     extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }),
     extractFacts: async () => []
   };
@@ -68,6 +70,13 @@ const submission = {
 };
 
 describe("self-evaluation review routes", () => {
+  it("returns 503 when a configured provider fails during real generation", async () => {
+    const { app } = await testApp({ async generateStructured<T>(): Promise<T> { throw new Error("provider offline"); } });
+
+    const response = await app.inject({ method: "POST", url: "/api/reviews/self-evaluations/task-1", payload: submission });
+
+    expect(response.statusCode).toBe(503);
+  });
   it("uses the persisted job description and only same-task answers in server-side tailoring", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

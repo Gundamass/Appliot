@@ -5,14 +5,15 @@ import {
   RagFieldRequestSchema,
   type RagFieldRequest
 } from "@resume/contracts";
-import { createRagService, planField, type EmbeddingSearchPort, type FieldRequest, type KeywordSearchInput } from "@resume/rag";
+import { createRagService, EmbeddingSearchUnavailableError, planField, type EmbeddingSearchPort, type FieldRequest, type KeywordSearchInput } from "@resume/rag";
 import type { FastifyInstance } from "fastify";
 import { sendError } from "../http-response.js";
 import type { ProfileRepository } from "../profile/profile-repository.js";
+import type { AdapterHealthRegistry } from "../health/adapter-health.js";
 
 export function registerRagRoutes(
   app: FastifyInstance,
-  dependencies: { profileRepository: ProfileRepository; embeddingSearch?: EmbeddingSearchPort }
+  dependencies: { profileRepository: ProfileRepository; adapterHealth: AdapterHealthRegistry; embeddingSearch?: EmbeddingSearchPort }
 ): void {
   const service = createRagService({
     repository: dependencies.profileRepository,
@@ -27,7 +28,16 @@ export function registerRagRoutes(
           .slice(0, input.limit);
       }
     },
-    ...(dependencies.embeddingSearch === undefined ? {} : { embeddingSearch: dependencies.embeddingSearch })
+    ...(dependencies.embeddingSearch === undefined ? {} : {
+      embeddingSearch: {
+        async search(input) {
+          if (dependencies.adapterHealth.getState("embedding") !== "ready") {
+            throw new EmbeddingSearchUnavailableError();
+          }
+          return dependencies.embeddingSearch!.search(input);
+        }
+      } satisfies EmbeddingSearchPort
+    })
   });
 
   app.post("/api/rag/fields/resolve", async (request, reply) => {

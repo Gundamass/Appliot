@@ -14,6 +14,7 @@ import { createLocalOriginalDocumentStore } from "./original-document-store.js";
 import { extractPdf as parsePdf } from "@resume/profile-domain/src/pdf/extract-pdf.js";
 import { createScannedPdf } from "../../../../tests/fixtures/create-pdf.js";
 import { createProductionExtraction } from "./production-extraction.js";
+import { createAdapterHealthRegistry } from "../health/adapter-health.js";
 
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
 
@@ -87,7 +88,7 @@ async function buildTestContext(overrides: Partial<AppDependencies> = {}) {
   testStorageRoots.push(storageRoot);
   const dependencies: AppDependencies = {
     database,
-    adapterHealth: {},
+    adapterHealth: createAdapterHealthRegistry(),
     profileRepository: createProfileRepository(database),
     originalDocumentStore: createLocalOriginalDocumentStore(storageRoot),
     extractPdf: async (bytes) => ({

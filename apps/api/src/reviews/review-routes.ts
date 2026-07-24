@@ -13,12 +13,14 @@ import { z } from "zod";
 import { sendError } from "../http-response.js";
 import type { ProfileRepository } from "../profile/profile-repository.js";
 import type { SelfEvaluationReviewRepository } from "./review-repository.js";
+import type { AdapterHealthRegistry } from "../health/adapter-health.js";
 
 const ParamsSchema = z.object({ taskId: z.string().min(1).max(128) }).strict();
 const SelfEvaluationFieldPath = "selfEvaluation";
 export interface ReviewRouteDependencies {
   reviewRepository: SelfEvaluationReviewRepository;
   profileRepository: ProfileRepository;
+  adapterHealth: AdapterHealthRegistry;
   selfEvaluationModelProvider?: StructuredModelProvider;
 }
 
@@ -35,14 +37,25 @@ export function registerReviewRoutes(app: FastifyInstance, dependencies: ReviewR
     if (!params.success || !body.success) return sendError(reply, 400, "Invalid request");
     const base = selectBase(dependencies.profileRepository.listActive());
     if (!base) return sendError(reply, 409, "No reviewed self-evaluation is available");
-    if (!dependencies.selfEvaluationModelProvider) return sendError(reply, 503, "Self-evaluation tailoring is temporarily unavailable");
+    if (!dependencies.selfEvaluationModelProvider
+      || !["configured", "ready"].includes(dependencies.adapterHealth.getState("deepseek"))) {
+      return sendError(reply, 503, "Self-evaluation tailoring is temporarily unavailable");
+    }
     const facts = eligibleFacts(dependencies.profileRepository.listForTask(params.data.taskId), params.data.taskId);
-    const draft = await tailorSelfEvaluation({
-      taskId: params.data.taskId,
-      original: base.value as string,
-      jobDescription: body.data.jobDescription,
-      facts
-    }, dependencies.selfEvaluationModelProvider);
+    let draft;
+    try {
+      draft = await tailorSelfEvaluation({
+        taskId: params.data.taskId,
+        original: base.value as string,
+        jobDescription: body.data.jobDescription,
+        facts
+      }, dependencies.selfEvaluationModelProvider);
+    } catch {
+      return sendError(reply, 503, "Self-evaluation tailoring is temporarily unavailable");
+    }
+    if (dependencies.adapterHealth.getState("deepseek") === "unavailable") {
+      return sendError(reply, 503, "Self-evaluation tailoring is temporarily unavailable");
+    }
     if (draft.status !== "needs_review") return sendError(reply, 400, "Draft contains unsupported claims");
     const review = SelfEvaluationReviewSchema.parse({
       ...draft,

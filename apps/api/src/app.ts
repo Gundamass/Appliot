@@ -13,8 +13,10 @@ import type { OriginalDocumentStore } from "./profile/original-document-store.js
 import { createSelfEvaluationReviewRepository, type SelfEvaluationReviewRepository } from "./reviews/review-repository.js";
 import { registerReviewRoutes } from "./reviews/review-routes.js";
 import { registerRagRoutes } from "./rag/rag-routes.js";
+import { createAdapterHealthRegistry, type AdapterHealthRegistry } from "./health/adapter-health.js";
+import { registerHealthRoutes } from "./health/health-routes.js";
 
-export interface AdapterHealthRegistry {}
+export type { AdapterHealthRegistry } from "./health/adapter-health.js";
 
 export interface AppDependencies {
   database: SqliteDatabase;
@@ -32,6 +34,9 @@ export interface AppDependencies {
 type CreateAppDependencies = Omit<AppDependencies, "adapterHealth"> & Partial<Pick<AppDependencies, "adapterHealth">>;
 
 export async function createApp(dependencies: CreateAppDependencies) {
+  const adapterHealth = dependencies.adapterHealth ?? createAdapterHealthRegistry(
+    dependencies.selfEvaluationModelProvider === undefined ? {} : { deepseek: {} }
+  );
   const app = Fastify({ logger: false, bodyLimit: MAX_PDF_BYTES + 64 * 1024 });
   await app.register(multipart, {
     limits: { files: 1, fields: 0, parts: 1, fileSize: MAX_PDF_BYTES },
@@ -45,13 +50,16 @@ export async function createApp(dependencies: CreateAppDependencies) {
     return sendError(reply, statusCode, statusCode === 400 ? "Invalid request" : "Internal server error");
   });
   registerProfileRoutes(app, dependencies);
+  registerHealthRoutes(app, adapterHealth);
   registerRagRoutes(app, {
     profileRepository: dependencies.profileRepository,
+    adapterHealth,
     ...(dependencies.embeddingSearch === undefined ? {} : { embeddingSearch: dependencies.embeddingSearch })
   });
   registerReviewRoutes(app, {
     profileRepository: dependencies.profileRepository,
     reviewRepository: dependencies.reviewRepository ?? createSelfEvaluationReviewRepository(dependencies.database),
+    adapterHealth,
     ...(dependencies.selfEvaluationModelProvider === undefined
       ? {}
       : { selfEvaluationModelProvider: dependencies.selfEvaluationModelProvider })

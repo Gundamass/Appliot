@@ -1,6 +1,7 @@
-import type { RagFieldInspection, RagFieldRequest } from "@resume/contracts";
+import type { AdapterStatus, RagFieldInspection, RagFieldRequest } from "@resume/contracts";
 import { useState } from "react";
 import type { RagApi } from "../api/client.js";
+import { ServiceStatus } from "../health/ServiceStatus.js";
 
 const initialRequest: RagFieldRequest = {
   taskId: "task-1",
@@ -10,7 +11,7 @@ const initialRequest: RagFieldRequest = {
   type: "text"
 };
 
-export function RagWorkspace({ api }: { api: RagApi }) {
+export function RagWorkspace({ api, embeddingStatus }: { api: RagApi; embeddingStatus?: AdapterStatus }) {
   const [request, setRequest] = useState(initialRequest);
   const [correction, setCorrection] = useState("");
   const [inspection, setInspection] = useState<RagFieldInspection>();
@@ -46,7 +47,10 @@ export function RagWorkspace({ api }: { api: RagApi }) {
 
   return (
     <section className="rag-workspace" aria-labelledby="rag-title">
-      <div className="review-heading"><div><h2 id="rag-title">Field evidence workspace</h2><p>Local task resolution and correction</p></div></div>
+      <div className="review-heading">
+        <div><h2 id="rag-title">Field evidence workspace</h2><p>Local task resolution and correction</p></div>
+        {embeddingStatus && <ServiceStatus statuses={[embeddingStatus]} />}
+      </div>
       <div className="rag-form-grid">
         <label>Task ID<input value={request.taskId} onChange={(event) => update("taskId", event.target.value)} /></label>
         <label>Field ID<input value={request.fieldId} onChange={(event) => update("fieldId", event.target.value)} /></label>
