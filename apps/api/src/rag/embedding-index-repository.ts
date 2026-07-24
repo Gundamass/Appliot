@@ -10,11 +10,24 @@ const indexConfigSchema = z.object({
   instructionVersion: z.string().min(1)
 }).strict();
 
-const indexSchema = indexConfigSchema.extend({
-  status: z.enum(["building", "active", "retired"]),
-  createdAt: z.string().min(1),
-  activatedAt: z.string().min(1).nullable()
+const persistedIndexSchema = indexConfigSchema.extend({
+  createdAt: z.string().min(1)
 }).strict();
+
+const indexSchema = z.discriminatedUnion("status", [
+  persistedIndexSchema.extend({
+    status: z.literal("building"),
+    activatedAt: z.null()
+  }).strict(),
+  persistedIndexSchema.extend({
+    status: z.literal("active"),
+    activatedAt: z.string().min(1)
+  }).strict(),
+  persistedIndexSchema.extend({
+    status: z.literal("retired"),
+    activatedAt: z.string().min(1).nullable()
+  }).strict()
+]);
 
 export type EmbeddingIndexConfig = z.infer<typeof indexConfigSchema>;
 export type EmbeddingIndex = z.infer<typeof indexSchema>;
@@ -146,11 +159,22 @@ export function createEmbeddingIndexRepository(database: SqliteDatabase): Embedd
     },
 
     activate(indexId) {
-      requireBuilding(indexId);
       const activatedAt = now();
+      const reserveActivation = database.prepare(`UPDATE embedding_indexes
+        SET activated_at = ?
+        WHERE id = ? AND status = 'building' AND activated_at IS NULL`);
+      const retireActive = database.prepare("UPDATE embedding_indexes SET status = 'retired' WHERE status = 'active'");
+      const activateReservedIndex = database.prepare(`UPDATE embedding_indexes
+        SET status = 'active'
+        WHERE id = ? AND status = 'building' AND activated_at = ?`);
       database.transaction(() => {
-        database.prepare("UPDATE embedding_indexes SET status = 'retired' WHERE status = 'active'").run();
-        database.prepare("UPDATE embedding_indexes SET status = 'active', activated_at = ? WHERE id = ? AND status = 'building'").run(activatedAt, indexId);
+        const reservation = reserveActivation.run(activatedAt, indexId);
+        if (reservation.changes !== 1) throw new Error(`embedding index is not building: ${indexId}`);
+
+        retireActive.run();
+
+        const activation = activateReservedIndex.run(indexId, activatedAt);
+        if (activation.changes !== 1) throw new Error(`embedding index activation lost its building state: ${indexId}`);
       })();
       return requireIndex(indexId);
     },

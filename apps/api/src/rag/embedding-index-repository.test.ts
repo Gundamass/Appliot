@@ -40,6 +40,26 @@ describe("EmbeddingIndexRepository", () => {
     database.close();
   });
 
+  it("rolls back a stale activation without retiring the current active index", () => {
+    const { database, repository } = createRepository();
+    const first = repository.beginBuild(config("index-v1"));
+    repository.activate(first.id);
+    const second = repository.beginBuild(config("index-v2"));
+    database.exec(`
+      CREATE TRIGGER make_candidate_stale_when_retiring_active
+      BEFORE UPDATE OF status ON embedding_indexes
+      WHEN OLD.id = 'index-v1' AND OLD.status = 'active' AND NEW.status = 'retired'
+      BEGIN
+        UPDATE embedding_indexes SET status = 'retired' WHERE id = 'index-v2';
+      END;
+    `);
+
+    expect(() => repository.activate(second.id)).toThrow();
+    expect(repository.getActive()?.id).toBe(first.id);
+    expect(repository.getById(second.id)?.status).toBe("building");
+    database.close();
+  });
+
   it("does not expose an interrupted building index as active", () => {
     const { database, repository } = createRepository();
     seedFact(database, "fact-1");
@@ -71,6 +91,27 @@ describe("EmbeddingIndexRepository", () => {
 
     expect(() => repository.listVectors(index.id)).toThrow();
     database.close();
+  });
+
+  it("rejects malformed persisted index metadata", () => {
+    const corruptions = [
+      "model = ''",
+      "model_revision = ''",
+      "dimensions = 0",
+      "normalization = 'none'",
+      "status = 'invalid'",
+      "activated_at = 'now'"
+    ];
+
+    for (const assignment of corruptions) {
+      const { database, repository } = createRepository();
+      const index = repository.beginBuild(config(`index-${assignment}`));
+      database.pragma("ignore_check_constraints = ON");
+      database.prepare(`UPDATE embedding_indexes SET ${assignment} WHERE id = ?`).run(index.id);
+
+      expect(() => repository.getById(index.id)).toThrow();
+      database.close();
+    }
   });
 
   it("replaces a fact vector and deletes stale facts", () => {
