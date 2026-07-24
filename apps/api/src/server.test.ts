@@ -1,5 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import type { AppDependencies } from "./app.js";
+import type { ApiConfig } from "./config.js";
 
 const fakes = vi.hoisted(() => {
   const database = { close: vi.fn() };
@@ -22,11 +23,7 @@ vi.mock("./profile/profile-repository.js", () => ({ createProfileRepository: fak
 vi.mock("./app.js", () => ({ createApp: fakes.createApp }));
 
 interface ServerModule {
-  createProductionDependencies(
-    extraction?: Pick<AppDependencies, "extractPdf" | "extractFacts">,
-    databaseFilename?: string
-  ): AppDependencies;
-  startServer(dependencies: AppDependencies): Promise<unknown>;
+  startServer(dependencies: AppDependencies, config: ApiConfig): Promise<unknown>;
 }
 
 const server = await import("./server.js") as unknown as ServerModule;
@@ -38,43 +35,9 @@ describe("production server composition", () => {
     fakes.app.listen.mockResolvedValue("http://127.0.0.1:43120");
   });
 
-  it("fails clearly before listening when extraction is not configured", () => {
-    expect(() => server.createProductionDependencies()).toThrow(
-      "Local PDF and fact extraction dependencies must be configured before starting the API"
-    );
-    expect(fakes.createApp).not.toHaveBeenCalled();
-    expect(fakes.app.listen).not.toHaveBeenCalled();
-  });
-
-  it("composes configured extraction with an owned SQLite close callback", async () => {
-    const extraction = {
-      extractPdf: vi.fn(async () => ({ fingerprint: "a".repeat(64), pages: [] })),
-      extractFacts: vi.fn(async () => [])
-    };
-
-    const dependencies = server.createProductionDependencies(extraction, "profile.sqlite");
-    expect(dependencies.extractPdf).toBe(extraction.extractPdf);
-    expect(dependencies.extractFacts).toBe(extraction.extractFacts);
-
-    await dependencies.close?.();
-    expect(fakes.database.close).toHaveBeenCalledOnce();
-  });
-
-  it("closes the owned database when production composition fails", () => {
-    const migrationFailure = new Error("migration failed");
-    fakes.migrateDatabase.mockImplementationOnce(() => { throw migrationFailure; });
-    const extraction = {
-      extractPdf: vi.fn(async () => ({ fingerprint: "a".repeat(64), pages: [] })),
-      extractFacts: vi.fn(async () => [])
-    };
-
-    expect(() => server.createProductionDependencies(extraction)).toThrow(migrationFailure);
-    expect(fakes.database.close).toHaveBeenCalledOnce();
-  });
-
-  it("binds configured dependencies to the fixed loopback address", async () => {
+  it("binds configured dependencies to the validated loopback address and port", async () => {
     const dependencies = {} as AppDependencies;
-    await server.startServer(dependencies);
+    await server.startServer(dependencies, { databaseFile: ":memory:", host: "127.0.0.1", port: 43120 });
 
     expect(fakes.createApp).toHaveBeenCalledWith(dependencies);
     expect(fakes.app.listen).toHaveBeenCalledWith({ host: "127.0.0.1", port: 43120 });
@@ -84,7 +47,7 @@ describe("production server composition", () => {
     const listenFailure = new Error("address already in use");
     fakes.app.listen.mockRejectedValueOnce(listenFailure);
 
-    await expect(server.startServer({} as AppDependencies)).rejects.toBe(listenFailure);
+    await expect(server.startServer({} as AppDependencies, { databaseFile: ":memory:", host: "127.0.0.1", port: 43120 })).rejects.toBe(listenFailure);
     expect(fakes.app.close).toHaveBeenCalledOnce();
   });
 
@@ -93,7 +56,7 @@ describe("production server composition", () => {
     const close = vi.fn();
     fakes.createApp.mockRejectedValueOnce(startupFailure);
 
-    await expect(server.startServer({ close } as unknown as AppDependencies)).rejects.toBe(startupFailure);
+    await expect(server.startServer({ close } as unknown as AppDependencies, { databaseFile: ":memory:", host: "127.0.0.1", port: 43120 })).rejects.toBe(startupFailure);
     expect(close).toHaveBeenCalledOnce();
     expect(fakes.app.close).not.toHaveBeenCalled();
   });

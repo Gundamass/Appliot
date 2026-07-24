@@ -1,47 +1,16 @@
-import { dirname, resolve } from "node:path";
+import { resolve } from "node:path";
 import { pathToFileURL } from "node:url";
-import { createSqliteDatabase } from "./db/client.js";
-import { migrateDatabase } from "./db/migrate.js";
-import { createProfileRepository } from "./profile/profile-repository.js";
-import { createLocalOriginalDocumentStore } from "./profile/original-document-store.js";
 import { createApp, type AppDependencies } from "./app.js";
+import { loadConfig, type ApiConfig } from "./config.js";
+import { createProductionDependencies } from "./production-dependencies.js";
 
-type ExtractionDependencies = Pick<AppDependencies, "extractPdf" | "extractFacts">;
+export { createProductionDependencies } from "./production-dependencies.js";
 
-const missingExtractionMessage =
-  "Local PDF and fact extraction dependencies must be configured before starting the API";
-
-export function createProductionDependencies(
-  extraction?: ExtractionDependencies,
-  databaseFilename = "resume-assistant.sqlite"
-): AppDependencies {
-  if (!extraction) {
-    throw new Error(missingExtractionMessage);
-  }
-
-  const database = createSqliteDatabase(databaseFilename);
-  try {
-    migrateDatabase(database);
-    return {
-      database,
-      profileRepository: createProfileRepository(database),
-      originalDocumentStore: createLocalOriginalDocumentStore(resolve(dirname(resolve(databaseFilename)), "originals")),
-      ...extraction,
-      close: () => {
-        database.close();
-      }
-    };
-  } catch (error) {
-    database.close();
-    throw error;
-  }
-}
-
-export async function startServer(dependencies: AppDependencies) {
+export async function startServer(dependencies: AppDependencies, config: ApiConfig) {
   let app: Awaited<ReturnType<typeof createApp>> | undefined;
   try {
     app = await createApp(dependencies);
-    await app.listen({ host: "127.0.0.1", port: 43120 });
+    await app.listen({ host: config.host, port: config.port });
     return app;
   } catch (error) {
     if (app) {
@@ -55,5 +24,6 @@ export async function startServer(dependencies: AppDependencies) {
 
 const entrypoint = process.argv[1];
 if (entrypoint && import.meta.url === pathToFileURL(resolve(entrypoint)).href) {
-  await startServer(createProductionDependencies());
+  const config = loadConfig(process.env);
+  await startServer(createProductionDependencies(config), config);
 }

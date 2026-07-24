@@ -14,6 +14,8 @@ import { createSelfEvaluationReviewRepository, type SelfEvaluationReviewReposito
 import { registerReviewRoutes } from "./reviews/review-routes.js";
 import { registerRagRoutes } from "./rag/rag-routes.js";
 
+export interface AdapterHealthRegistry {}
+
 export interface AppDependencies {
   database: SqliteDatabase;
   profileRepository: ProfileRepository;
@@ -23,10 +25,13 @@ export interface AppDependencies {
   extractFacts(document: ExtractedDocument): Promise<ProfileFact[]>;
   selfEvaluationModelProvider?: StructuredModelProvider;
   embeddingSearch?: EmbeddingSearchPort;
+  adapterHealth: AdapterHealthRegistry;
   close?(): void | Promise<void>;
 }
 
-export async function createApp(dependencies: AppDependencies) {
+type CreateAppDependencies = Omit<AppDependencies, "adapterHealth"> & Partial<Pick<AppDependencies, "adapterHealth">>;
+
+export async function createApp(dependencies: CreateAppDependencies) {
   const app = Fastify({ logger: false, bodyLimit: MAX_PDF_BYTES + 64 * 1024 });
   await app.register(multipart, {
     limits: { files: 1, fields: 0, parts: 1, fileSize: MAX_PDF_BYTES },

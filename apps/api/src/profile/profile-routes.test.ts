@@ -87,6 +87,7 @@ async function buildTestContext(overrides: Partial<AppDependencies> = {}) {
   testStorageRoots.push(storageRoot);
   const dependencies: AppDependencies = {
     database,
+    adapterHealth: {},
     profileRepository: createProfileRepository(database),
     originalDocumentStore: createLocalOriginalDocumentStore(storageRoot),
     extractPdf: async (bytes) => ({

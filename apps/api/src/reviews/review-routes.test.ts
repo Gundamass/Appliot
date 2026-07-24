@@ -47,7 +47,7 @@ async function testApp() {
   });
   profileRepository.confirm("react");
   const dependencies: AppDependencies = {
-    database, profileRepository,
+    database, adapterHealth: {}, profileRepository,
     originalDocumentStore,
     selfEvaluationModelProvider: providerReturning(),
     extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }),

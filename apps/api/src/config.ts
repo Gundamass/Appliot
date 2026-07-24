@@ -10,11 +10,30 @@ export interface DeepSeekAdapterConfig {
   maxRetries: number;
 }
 
+export interface RemoteEmbeddingAdapterConfig {
+  apiToken: string;
+  baseUrl: string;
+  model: string;
+  modelRevision: string;
+  dimensions: number;
+  timeoutMs: number;
+}
+
+export interface RemoteOcrAdapterConfig {
+  apiToken: string;
+  baseUrl: string;
+  model: string;
+  modelRevision: string;
+  timeoutMs: number;
+}
+
 export interface ApiConfig {
   databaseFile: string;
   host: "127.0.0.1";
   port: number;
   deepseek?: DeepSeekAdapterConfig;
+  embedding?: RemoteEmbeddingAdapterConfig;
+  ocr?: RemoteOcrAdapterConfig;
 }
 
 export class ConfigurationError extends Error {
@@ -39,6 +58,14 @@ const url = nonEmptyString.url().refine((value) => {
   const protocol = new URL(value).protocol;
   return protocol === "http:" || protocol === "https:";
 });
+const loopbackTunnelUrl = (port: number) => nonEmptyString.url().refine((value) => {
+  const parsed = new URL(value);
+  return parsed.protocol === "http:"
+    && (parsed.hostname === "127.0.0.1" || parsed.hostname === "localhost")
+    && parsed.port === String(port)
+    && parsed.username === ""
+    && parsed.password === "";
+});
 
 const deepSeekSchema = z.object({
   apiKey: nonEmptyString,
@@ -48,6 +75,23 @@ const deepSeekSchema = z.object({
   thinking: z.literal("disabled"),
   timeoutMs: positiveInteger,
   maxRetries: nonNegativeInteger
+});
+
+const embeddingSchema = z.object({
+  apiToken: nonEmptyString,
+  baseUrl: loopbackTunnelUrl(18080),
+  model: z.literal("Qwen/Qwen3-Embedding-8B"),
+  modelRevision: z.literal("1d8ad4ca9b3dd8059ad90a75d4983776a23d44af"),
+  dimensions: positiveInteger.refine((value) => value === 4096),
+  timeoutMs: positiveInteger
+});
+
+const ocrSchema = z.object({
+  apiToken: nonEmptyString,
+  baseUrl: loopbackTunnelUrl(43121),
+  model: z.literal("deepseek-ai/DeepSeek-OCR-2"),
+  modelRevision: z.literal("aaa02f3811945a91062062994c5c4a3f4c0af2b0"),
+  timeoutMs: positiveInteger
 });
 
 function invalidVariables(result: z.SafeParseError<unknown>, variables: Record<string, string>): string[] {
@@ -93,6 +137,61 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     }
   }
 
+  const hasEmbedding = Object.keys(env).some((name) => name.startsWith("EMBEDDING_"));
+  let embedding: RemoteEmbeddingAdapterConfig | undefined;
+  if (hasEmbedding) {
+    const result = embeddingSchema.safeParse({
+      apiToken: env.EMBEDDING_API_TOKEN,
+      baseUrl: env.EMBEDDING_BASE_URL,
+      model: env.EMBEDDING_MODEL,
+      modelRevision: env.EMBEDDING_MODEL_REVISION,
+      dimensions: env.EMBEDDING_DIMENSIONS,
+      timeoutMs: env.EMBEDDING_TIMEOUT_MS ?? "60000"
+    });
+    if (!result.success) {
+      coreErrors.push(...invalidVariables(result, {
+        apiToken: "EMBEDDING_API_TOKEN",
+        baseUrl: "EMBEDDING_BASE_URL",
+        model: "EMBEDDING_MODEL",
+        modelRevision: "EMBEDDING_MODEL_REVISION",
+        dimensions: "EMBEDDING_DIMENSIONS",
+        timeoutMs: "EMBEDDING_TIMEOUT_MS"
+      }));
+    } else {
+      embedding = result.data;
+    }
+  }
+
+  const hasOcr = Object.keys(env).some((name) => name.startsWith("OCR_"));
+  let ocr: RemoteOcrAdapterConfig | undefined;
+  if (hasOcr) {
+    const result = ocrSchema.safeParse({
+      apiToken: env.OCR_API_TOKEN,
+      baseUrl: env.OCR_BASE_URL,
+      model: env.OCR_MODEL,
+      modelRevision: env.OCR_MODEL_REVISION,
+      timeoutMs: env.OCR_TIMEOUT_MS ?? "180000"
+    });
+    if (!result.success) {
+      coreErrors.push(...invalidVariables(result, {
+        apiToken: "OCR_API_TOKEN",
+        baseUrl: "OCR_BASE_URL",
+        model: "OCR_MODEL",
+        modelRevision: "OCR_MODEL_REVISION",
+        timeoutMs: "OCR_TIMEOUT_MS"
+      }));
+    } else {
+      ocr = result.data;
+    }
+  }
+
   if (coreErrors.length > 0) throw new ConfigurationError([...new Set(coreErrors)]);
-  return { databaseFile, host: "127.0.0.1", port, ...(deepseek ? { deepseek } : {}) };
+  return {
+    databaseFile,
+    host: "127.0.0.1",
+    port,
+    ...(deepseek ? { deepseek } : {}),
+    ...(embedding ? { embedding } : {}),
+    ...(ocr ? { ocr } : {})
+  };
 }
