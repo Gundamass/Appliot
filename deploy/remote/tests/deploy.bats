@@ -8,6 +8,7 @@ setup() {
   mkdir -p "$STUB_BIN"
   export PATH="$STUB_BIN:/usr/bin:/bin"
   export HOME="$BATS_TEST_TMPDIR/home"
+  export RESUME_AI_MIN_FREE_KIB=1
   mkdir -p "$HOME"
 }
 
@@ -47,7 +48,7 @@ setup() {
   run "$REPO_ROOT/deploy/remote/install.sh" --root "$TEST_ROOT" --bundle "$BUNDLE"
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"unsafe managed directory"* ]]
+  [[ "$output" == *"managed directory"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/conda-create-called" ]
   [ -z "$(find "$outside" -mindepth 1 -print -quit)" ]
 }
@@ -64,32 +65,67 @@ setup() {
   [[ "$output" != *"not-a-real-secret"* ]]
 }
 
-@test "start-all falls back to supervisor without putting tokens in argv" {
-  mkdir -p "$TEST_ROOT/envs/embedding/bin" "$TEST_ROOT/services"
-  cp "$REPO_ROOT/deploy/remote/supervisord.conf" "$TEST_ROOT/services/supervisord.conf"
-  cat > "$TEST_ROOT/envs/embedding/bin/supervisord" <<'SH'
-#!/usr/bin/env bash
-printf '%s\n' "$@" > "$SUPERVISOR_ARGS"
-SH
-  chmod +x "$TEST_ROOT/envs/embedding/bin/supervisord"
-  cat > "$STUB_BIN/systemctl" <<'SH'
-#!/usr/bin/env bash
-exit 1
-SH
-  chmod +x "$STUB_BIN/systemctl"
-  export SUPERVISOR_ARGS="$BATS_TEST_TMPDIR/supervisor-args"
-
-  run env RESUME_AI_ROOT="$TEST_ROOT" "$REPO_ROOT/deploy/remote/bin/start-all.sh"
-
+@test "successful first install starts and verifies both workers without an old stop" {
+  run_lifecycle_test test_first_install_does_not_stop_nonexistent_systemd_units
   [ "$status" -eq 0 ]
-  grep -Fx -- '-c' "$SUPERVISOR_ARGS"
-  ! grep -E 'token|secret|Bearer' "$SUPERVISOR_ARGS"
 }
 
-@test "control scripts do not trust stale supervisor pid files" {
-  run grep -E 'kill -(0|TERM|KILL)' "$REPO_ROOT/deploy/remote/bin/start-all.sh" \
-    "$REPO_ROOT/deploy/remote/bin/stop-all.sh"
-  [ "$status" -ne 0 ]
+@test "repeat upgrade stops old workers and restarts and verifies both new workers" {
+  run_lifecycle_test test_upgrade_stops_switches_starts_and_verifies_both_workers
+  [ "$status" -eq 0 ]
+}
+
+@test "startup failure rolls back and verifies both previous workers" {
+  run_lifecycle_test test_startup_failure_restores_and_verifies_previous_release
+  [ "$status" -eq 0 ]
+}
+
+@test "rollback failure preserves new and previous release artifacts" {
+  run_lifecycle_test test_rollback_failure_preserves_both_releases_and_reports_loudly
+  [ "$status" -eq 0 ]
+}
+
+@test "systemd and Supervisor fake-command branches control both workers" {
+  run_lifecycle_test \
+    test_systemd_start_installs_both_units_and_uses_fake_commands \
+    test_systemd_stop_failure_is_propagated \
+    test_supervisor_start_uses_only_owned_state_and_fake_command
+  [ "$status" -eq 0 ]
+}
+
+@test "custom root isolation and persisted controller transitions never probe fixed systemd units" {
+  run_lifecycle_test \
+    test_controller_selection_is_persisted_and_custom_root_never_probes_systemd \
+    test_persisted_supervisor_transition_on_canonical_root_does_not_reprobe
+  [ "$status" -eq 0 ]
+}
+
+@test "stale Supervisor socket and pid cleanup never deletes live owned state" {
+  run_lifecycle_test \
+    test_supervisor_stale_owned_socket_and_pid_are_cleaned \
+    test_live_owned_supervisor_state_is_never_deleted
+  [ "$status" -eq 0 ]
+}
+
+@test "preflight failures leave no managed filesystem mutation" {
+  run_lifecycle_test \
+    test_preflight_rejects_invalid_current_without_mutation \
+    test_preflight_rejects_managed_log_directory_without_mutation \
+    test_preflight_validates_existing_candidate_release_marker
+  [ "$status" -eq 0 ]
+}
+
+@test "current and manual rollback targets require strict validated releases" {
+  run_lifecycle_test \
+    test_release_validation_is_exact_and_rejects_symlinks \
+    test_current_target_must_be_exact_managed_release \
+    test_rollback_command_and_runbook_use_validated_helper
+  [ "$status" -eq 0 ]
+}
+
+@test "bundle TOCTOU is rejected from the staged verification closure" {
+  run_lifecycle_test test_verified_staging_rejects_bundle_toctou
+  [ "$status" -eq 0 ]
 }
 
 @test "installer rejects traversal in the installation root" {
@@ -100,7 +136,7 @@ SH
     --root "$BATS_TEST_TMPDIR/root/../escape" --bundle "$BUNDLE"
 
   [ "$status" -ne 0 ]
-  [[ "$output" == *"must not contain traversal"* ]]
+  [[ "$output" == *"unsupported or unsafe"* ]]
   [ ! -e "$BATS_TEST_TMPDIR/conda-create-called" ]
 }
 
@@ -189,6 +225,10 @@ printf 'Filesystem 1024-blocks Used Available Capacity Mounted on\nfixture 30000
 SH
   cat > "$STUB_BIN/conda" <<SH
 #!/usr/bin/env bash
+if [[ "\${1:-}" == info ]]; then
+  printf '{"envs_dirs": ["$BATS_TEST_TMPDIR/conda/envs"], "pkgs_dirs": ["$BATS_TEST_TMPDIR/conda/pkgs"]}\n'
+  exit 0
+fi
 if [[ "\${1:-}" == search ]]; then
   printf '{"python": [{"version": "fixture"}]}\n'
   exit 0
@@ -201,4 +241,14 @@ SH
   chmod +x "$STUB_BIN"/*
   export RESUME_AI_OS_RELEASE="$BATS_TEST_TMPDIR/os-release"
   printf 'ID=ubuntu\nVERSION_ID="20.04"\n' > "$RESUME_AI_OS_RELEASE"
+}
+
+run_lifecycle_test() {
+  local tests=()
+  local name
+  for name in "$@"; do
+    tests+=("deploy.remote.tests.test_deployment_lifecycle.DeploymentLifecycleTests.$name")
+  done
+  cd "$REPO_ROOT"
+  run python3 -m unittest -v "${tests[@]}"
 }

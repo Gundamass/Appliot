@@ -116,10 +116,22 @@ bash deploy/remote/install.sh \
   --bundle "$PWD/bundle"
 ```
 
-Installation uses an inactive content-addressed release. Both Conda environments
-and both model snapshots must complete before the single `current` link changes.
-An existing complete release is reused. A start failure restores the previous
-`current` target. Incomplete releases are never activated.
+Installation verifies the uploaded bundle before host preflight or Conda search,
+then takes an install lock and copies it to a private staging snapshot. The
+snapshot is verified again and is the only source used for Conda and model
+installation. All managed paths, destination parents, controller metadata,
+runtime paths, and effective Conda env/package/cache directories are inspected
+before the first directory, permission, token, or environment mutation.
+
+Both Conda environments and model snapshots complete in an inactive
+content-addressed release before activation. During an upgrade the persisted
+controller stops both old Workers, changes the single `current` link atomically,
+starts both new Workers, and verifies both `/readyz` responses and pinned model
+identities. A failed startup stops partial new processes, strictly validates the
+previous release, restores it, and starts and verifies both old Workers. If that
+rollback fails, the installer reports `ROLLBACK FAILED` and preserves every
+release artifact for recovery; it never removes files that may back a running
+process.
 
 The installer creates the token files with umask `077`, sets mode `0600`, and
 prints only these paths:
@@ -146,10 +158,15 @@ Do not commit `.env.local`.
 
 ## Supervision
 
-`start-all.sh` uses user systemd only when `systemctl --user` is usable and
-`loginctl` reports linger enabled. Otherwise it starts the checked-in Supervisor
-configuration from the embedding environment. No secret appears in a unit,
-Supervisor command, process argument, or service log configuration.
+The installer persists root and controller ownership metadata. User systemd is
+eligible only for the canonical `/home/heqing/resume-ai` root when
+`systemctl --user` is usable and `loginctl` reports linger enabled. Custom roots
+always use Supervisor and never inspect or stop the fixed systemd units. Every
+start, stop, status, upgrade, and rollback uses the same persisted controller.
+Systemd failures are returned as failures. Supervisor accepts only its owned
+pid/socket/config state and cleans stale owned state before launch. No secret
+appears in a unit, Supervisor command, process argument, or service log
+configuration.
 
 ```bash
 /home/heqing/resume-ai/services/bin/start-all.sh
@@ -205,18 +222,17 @@ readlink /home/heqing/resume-ai/current
 find /home/heqing/resume-ai/releases -mindepth 1 -maxdepth 1 -type d -printf '%f\n'
 ```
 
-The installer automatically restores the previous release when startup fails.
-For an operator-directed rollback, stop the Workers, verify the selected release
-has `.complete`, replace `current` atomically, and start again:
+The installer automatically restores and verifies the previous release when a
+new release fails startup. For an operator-directed rollback, use the checked-in
+transactional command. It accepts only a lowercase 64-hex release ID whose
+direct, non-symlink release directory has a regular `.complete` file exactly
+matching that ID. It stops both Workers, activates once, restarts both, and
+verifies their identities; on failure it applies the same safe rollback rules as
+installation:
 
 ```bash
-root=/home/heqing/resume-ai
 release_id=REVIEWED_64_HEX_RELEASE_ID
-test -f "$root/releases/$release_id/.complete"
-"$root/services/bin/stop-all.sh"
-ln -s "releases/$release_id" "$root/.current.rollback"
-mv -Tf "$root/.current.rollback" "$root/current"
-"$root/services/bin/start-all.sh"
+/home/heqing/resume-ai/services/bin/rollback.sh --release "$release_id"
 ```
 
 For disk cleanup, retain the active release and at least one known-good rollback
