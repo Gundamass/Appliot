@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
+import { monitorMalformedLaunch, terminateChild, waitForChildExit, type ExitResult } from "./server-launch-monitor.js";
 
 const packageRoot = resolve(import.meta.dirname, "..");
 const workspaceRoot = resolve(packageRoot, "../..");
@@ -14,11 +15,6 @@ const timeoutMs = 10_000;
 interface LaunchedServer {
   child: ChildProcessWithoutNullStreams;
   output(): string;
-}
-
-interface ExitResult {
-  code: number | null;
-  signal: NodeJS.Signals | null;
 }
 
 function buildApi(): void {
@@ -59,23 +55,6 @@ function launchServer(cwd: string, script: string, env: NodeJS.ProcessEnv): Laun
   return { child, output: () => output };
 }
 
-async function waitForExit(child: ChildProcessWithoutNullStreams, timeout = timeoutMs): Promise<ExitResult> {
-  if (child.exitCode !== null || child.signalCode !== null) {
-    return { code: child.exitCode, signal: child.signalCode };
-  }
-  return await new Promise<ExitResult>((resolvePromise, reject) => {
-    const timer = setTimeout(() => reject(new Error("Server process did not exit in time")), timeout);
-    child.once("exit", (code, signal) => {
-      clearTimeout(timer);
-      resolvePromise({ code, signal });
-    });
-    child.once("error", (error) => {
-      clearTimeout(timer);
-      reject(error);
-    });
-  });
-}
-
 async function waitForHttp(url: string, launched: LaunchedServer): Promise<Response> {
   const deadline = Date.now() + timeoutMs;
   let lastError: unknown;
@@ -95,35 +74,11 @@ async function waitForHttp(url: string, launched: LaunchedServer): Promise<Respo
   throw new Error(`Timed out waiting for ${url}: ${String(lastError)}\n${launched.output()}`);
 }
 
-async function isPortOpen(port: number): Promise<boolean> {
-  const socket = new (await import("node:net")).Socket();
-  return await new Promise<boolean>((resolvePromise) => {
-    const finish = (open: boolean) => {
-      socket.removeAllListeners();
-      socket.destroy();
-      resolvePromise(open);
-    };
-    socket.setTimeout(100);
-    socket.once("connect", () => finish(true));
-    socket.once("error", () => finish(false));
-    socket.once("timeout", () => finish(false));
-    socket.connect(port, "127.0.0.1");
-  });
-}
-
-async function assertPortStaysClosedUntilExit(launched: LaunchedServer, port: number): Promise<ExitResult> {
-  while (launched.child.exitCode === null && launched.child.signalCode === null) {
-    if (await isPortOpen(port)) throw new Error(`Server opened port ${port} with malformed configuration`);
-    await delay(20);
-  }
-  return await waitForExit(launched.child);
-}
-
 async function terminate(launched: LaunchedServer): Promise<ExitResult> {
   if (launched.child.exitCode === null && launched.child.signalCode === null) {
     launched.child.kill("SIGTERM");
   }
-  return await waitForExit(launched.child);
+  return await waitForChildExit(launched.child, timeoutMs);
 }
 
 describe("production API artifact", () => {
@@ -146,8 +101,7 @@ describe("production API artifact", () => {
         : { code: 0, signal: null });
     } finally {
       if (launched.child.exitCode === null && launched.child.signalCode === null) {
-        launched.child.kill("SIGKILL");
-        await waitForExit(launched.child, 2_000).catch(() => undefined);
+        await terminateChild(launched.child).catch(() => undefined);
       }
       await rm(directory, { recursive: true, force: true });
     }
@@ -165,13 +119,12 @@ describe("production API artifact", () => {
     });
 
     try {
-      const exit = await assertPortStaysClosedUntilExit(launched, port);
+      const exit = await monitorMalformedLaunch(launched.child, port, timeoutMs);
       expect(exit.code).not.toBe(0);
       expect(exit.signal).toBeNull();
     } finally {
       if (launched.child.exitCode === null && launched.child.signalCode === null) {
-        launched.child.kill("SIGKILL");
-        await waitForExit(launched.child, 2_000).catch(() => undefined);
+        await terminateChild(launched.child).catch(() => undefined);
       }
       await rm(directory, { recursive: true, force: true });
     }

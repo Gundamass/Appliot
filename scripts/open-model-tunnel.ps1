@@ -13,6 +13,8 @@ param(
 
 Set-StrictMode -Version Latest
 $ErrorActionPreference = "Stop"
+Import-Module (Join-Path $PSScriptRoot "local-launch.psm1") -Force
 
-& ssh -N -L 18080:127.0.0.1:18080 -L 43121:127.0.0.1:43121 "$User@$HostName" -p $Port
+$sshArguments = @(Get-ModelTunnelSshArguments -HostName $HostName -User $User -Port $Port)
+& ssh @sshArguments
 exit $LASTEXITCODE
