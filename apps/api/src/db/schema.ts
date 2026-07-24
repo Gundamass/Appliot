@@ -51,7 +51,7 @@ export const profileFacts = sqliteTable("profile_facts", {
 
 export const factRevisions = sqliteTable("fact_revisions", {
   id: text("id").primaryKey(),
-  factId: text("fact_id").notNull().references(() => profileFacts.id),
+  factId: text("fact_id").notNull().references(() => profileFacts.id, { onDelete: "cascade" }),
   fieldPath: text("field_path").notNull(),
   valueJson: text("value_json").notNull(),
   status: text("status").notNull(),
@@ -116,7 +116,7 @@ export const embeddingIndexes = sqliteTable("embedding_indexes", {
 
 export const factEmbeddings = sqliteTable("fact_embeddings", {
   indexId: text("index_id").notNull().references(() => embeddingIndexes.id),
-  factId: text("fact_id").notNull().references(() => profileFacts.id),
+  factId: text("fact_id").notNull().references(() => profileFacts.id, { onDelete: "cascade" }),
   factRevision: integer("fact_revision").notNull(),
   contentHash: text("content_hash").notNull(),
   vectorJson: text("vector_json").notNull(),

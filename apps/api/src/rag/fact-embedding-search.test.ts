@@ -59,9 +59,9 @@ describe("FactEmbeddingSearch", () => {
     await harness.service.search(searchInput("first"));
     harness.repository.createExtracted({ ...confirmedFact("replacement", 1, "replacement", "experience.summary.old"), status: "extracted" });
     harness.repository.confirm("replacement");
-    harness.database.prepare("DELETE FROM fact_embeddings WHERE fact_id = 'keep'").run();
-    harness.database.prepare("DELETE FROM fact_revisions WHERE fact_id = 'keep'").run();
     harness.database.prepare("DELETE FROM profile_facts WHERE id = 'keep'").run();
+    expect(harness.database.prepare("SELECT fact_id FROM fact_embeddings WHERE fact_id = 'keep'").all()).toEqual([]);
+    expect(harness.database.prepare("SELECT fact_id FROM fact_revisions WHERE fact_id = 'keep'").all()).toEqual([]);
     harness.provider.embedDocuments.mockClear();
 
     const results = await harness.service.search(searchInput("second"));

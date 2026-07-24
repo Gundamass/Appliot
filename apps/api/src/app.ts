@@ -3,6 +3,7 @@ import multipart from "@fastify/multipart";
 import type { ProfileFact } from "@resume/contracts";
 import type { ExtractedDocument } from "@resume/profile-domain/src/pdf/types.js";
 import type { StructuredModelProvider } from "@resume/model-provider";
+import type { EmbeddingSearchPort } from "@resume/rag";
 import type { SqliteDatabase } from "./db/client.js";
 import { sendError } from "./http-response.js";
 import { MAX_PDF_BYTES } from "./profile/import-service.js";
@@ -21,6 +22,7 @@ export interface AppDependencies {
   extractPdf(bytes: Uint8Array): Promise<ExtractedDocument>;
   extractFacts(document: ExtractedDocument): Promise<ProfileFact[]>;
   selfEvaluationModelProvider?: StructuredModelProvider;
+  embeddingSearch?: EmbeddingSearchPort;
   close?(): void | Promise<void>;
 }
 
@@ -38,7 +40,10 @@ export async function createApp(dependencies: AppDependencies) {
     return sendError(reply, statusCode, statusCode === 400 ? "Invalid request" : "Internal server error");
   });
   registerProfileRoutes(app, dependencies);
-  registerRagRoutes(app, dependencies);
+  registerRagRoutes(app, {
+    profileRepository: dependencies.profileRepository,
+    ...(dependencies.embeddingSearch === undefined ? {} : { embeddingSearch: dependencies.embeddingSearch })
+  });
   registerReviewRoutes(app, {
     profileRepository: dependencies.profileRepository,
     reviewRepository: dependencies.reviewRepository ?? createSelfEvaluationReviewRepository(dependencies.database),

@@ -62,7 +62,7 @@ export async function retrieveCandidates(
 
   const embeddings: RetrievedCandidate[] = [];
   for (const result of embeddingResults) {
-    if (!result || typeof result !== "object" || !Number.isFinite(result.score)) {
+    if (!result || typeof result !== "object" || !Number.isFinite(result.score) || result.score < -1 || result.score > 1) {
       return { candidates: [], invalidReason: "embedding search returned a malformed response" };
     }
     const parsed = parseCandidate(result.fact);

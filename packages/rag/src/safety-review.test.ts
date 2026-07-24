@@ -382,7 +382,7 @@ describe("review fix: numerically stable embeddings", () => {
     expect(retrieval.candidates[0]?.score).toBe(retrieval.candidates[1]?.score);
   });
 
-  it.each([Number.NaN, Number.POSITIVE_INFINITY])("rejects malformed embedding score %s", async (score) => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY, -1.01, 1.01])("rejects malformed embedding score %s", async (score) => {
     const first = fact({ id: "first", fieldPath: request.semantic, value: "First summary", evidence: [pdfEvidence("First summary")] });
     const second = fact({ id: "second", fieldPath: request.semantic, value: "Second summary", evidence: [pdfEvidence("Second summary")] });
 

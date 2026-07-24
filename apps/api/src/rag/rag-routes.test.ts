@@ -2,14 +2,12 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
-import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
 import type { EmbeddingSearchPort } from "@resume/rag";
 import { migrateDatabase } from "../db/migrate.js";
 import { createApp } from "../app.js";
 import { createProfileRepository } from "../profile/profile-repository.js";
 import { createLocalOriginalDocumentStore } from "../profile/original-document-store.js";
-import { registerRagRoutes } from "./rag-routes.js";
 
 const resources: Array<{ app: Awaited<ReturnType<typeof createApp>>; database: InstanceType<typeof Database>; root: string }> = [];
 
@@ -102,7 +100,7 @@ describe("RAG routes", () => {
     expect(profileRepository.getById("email")).toMatchObject({ value: "new@example.com", status: "user_corrected", scope: "profile" });
   });
 
-  it("keeps semantic search candidates in needs_review through the route", async () => {
+  it("uses injected semantic search through normal app composition", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
     const profileRepository = createProfileRepository(database);
@@ -123,8 +121,16 @@ describe("RAG routes", () => {
         }];
       }
     };
-    const app = Fastify();
-    registerRagRoutes(app, { profileRepository, embeddingSearch });
+    const root = await mkdtemp(join(tmpdir(), "resume-rag-routes-"));
+    const app = await createApp({
+      database,
+      profileRepository,
+      originalDocumentStore: createLocalOriginalDocumentStore(root),
+      extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }),
+      extractFacts: async () => [],
+      embeddingSearch
+    });
+    resources.push({ app, database, root });
 
     const response = await app.inject({
       method: "POST",
@@ -134,7 +140,5 @@ describe("RAG routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({ decision: { status: "needs_review", value: "Supported long text." } });
-    await app.close();
-    database.close();
   });
 });

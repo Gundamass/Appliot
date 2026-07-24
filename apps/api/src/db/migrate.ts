@@ -42,7 +42,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
 
     CREATE TABLE IF NOT EXISTS fact_revisions (
       id TEXT PRIMARY KEY,
-      fact_id TEXT NOT NULL REFERENCES profile_facts(id),
+      fact_id TEXT NOT NULL REFERENCES profile_facts(id) ON DELETE CASCADE,
       field_path TEXT NOT NULL,
       value_json TEXT NOT NULL,
       status TEXT NOT NULL CHECK (status IN ('extracted', 'user_confirmed', 'user_corrected', 'superseded')),
@@ -107,7 +107,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
 
     CREATE TABLE IF NOT EXISTS fact_embeddings (
       index_id TEXT NOT NULL REFERENCES embedding_indexes(id),
-      fact_id TEXT NOT NULL REFERENCES profile_facts(id),
+      fact_id TEXT NOT NULL REFERENCES profile_facts(id) ON DELETE CASCADE,
       fact_revision INTEGER NOT NULL CHECK (fact_revision > 0),
       content_hash TEXT NOT NULL,
       vector_json TEXT NOT NULL CHECK (json_valid(vector_json)),
@@ -115,6 +115,8 @@ export function migrateDatabase(database: SqliteDatabase): void {
       PRIMARY KEY (index_id, fact_id)
     );
   `);
+
+  upgradeFactForeignKeys(database);
 
   const documentColumns = database.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;
   if (!documentColumns.some((column) => column.name === "source_path")) {
@@ -143,4 +145,67 @@ export function migrateDatabase(database: SqliteDatabase): void {
     WHEN NOT ((NEW.scope = 'profile' AND NEW.task_id IS NULL) OR (NEW.scope = 'application' AND NEW.task_id IS NOT NULL))
     BEGIN SELECT RAISE(ABORT, 'fact revision scope and task mismatch'); END;
   `);
+}
+
+function upgradeFactForeignKeys(database: SqliteDatabase): void {
+  const factRevisionForeignKeys = database.prepare("PRAGMA foreign_key_list(fact_revisions)").all() as ForeignKeyRow[];
+  if (!hasCascadeDelete(factRevisionForeignKeys, "fact_id", "profile_facts")) {
+    database.exec(`
+      BEGIN;
+      ALTER TABLE fact_revisions RENAME TO fact_revisions_legacy;
+      CREATE TABLE fact_revisions (
+        id TEXT PRIMARY KEY,
+        fact_id TEXT NOT NULL REFERENCES profile_facts(id) ON DELETE CASCADE,
+        field_path TEXT NOT NULL,
+        value_json TEXT NOT NULL,
+        status TEXT NOT NULL CHECK (status IN ('extracted', 'user_confirmed', 'user_corrected', 'superseded')),
+        confidence REAL NOT NULL CHECK (confidence >= 0 AND confidence <= 1),
+        scope TEXT NOT NULL CHECK (scope IN ('profile', 'application')),
+        task_id TEXT,
+        evidence_json TEXT NOT NULL,
+        revision INTEGER NOT NULL CHECK (revision > 0),
+        created_at TEXT NOT NULL,
+        CHECK ((scope = 'profile' AND task_id IS NULL) OR (scope = 'application' AND task_id IS NOT NULL)),
+        CHECK (json_valid(value_json)),
+        CHECK (json_valid(evidence_json) AND json_type(evidence_json) = 'array' AND json_array_length(evidence_json) > 0),
+        UNIQUE (fact_id, revision)
+      );
+      INSERT INTO fact_revisions SELECT * FROM fact_revisions_legacy;
+      DROP TABLE fact_revisions_legacy;
+      CREATE INDEX fact_revisions_fact_id_revision_idx ON fact_revisions(fact_id, revision);
+      COMMIT;
+    `);
+  }
+
+  const factEmbeddingForeignKeys = database.prepare("PRAGMA foreign_key_list(fact_embeddings)").all() as ForeignKeyRow[];
+  if (!hasCascadeDelete(factEmbeddingForeignKeys, "fact_id", "profile_facts")) {
+    database.exec(`
+      BEGIN;
+      ALTER TABLE fact_embeddings RENAME TO fact_embeddings_legacy;
+      CREATE TABLE fact_embeddings (
+        index_id TEXT NOT NULL REFERENCES embedding_indexes(id),
+        fact_id TEXT NOT NULL REFERENCES profile_facts(id) ON DELETE CASCADE,
+        fact_revision INTEGER NOT NULL CHECK (fact_revision > 0),
+        content_hash TEXT NOT NULL,
+        vector_json TEXT NOT NULL CHECK (json_valid(vector_json)),
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (index_id, fact_id)
+      );
+      INSERT INTO fact_embeddings SELECT * FROM fact_embeddings_legacy;
+      DROP TABLE fact_embeddings_legacy;
+      COMMIT;
+    `);
+  }
+}
+
+interface ForeignKeyRow {
+  table: string;
+  from: string;
+  on_delete: string;
+}
+
+function hasCascadeDelete(foreignKeys: ForeignKeyRow[], column: string, table: string): boolean {
+  return foreignKeys.some((foreignKey) =>
+    foreignKey.from === column && foreignKey.table === table && foreignKey.on_delete === "CASCADE"
+  );
 }
