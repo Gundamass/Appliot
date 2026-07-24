@@ -5,14 +5,14 @@ import {
   RagFieldRequestSchema,
   type RagFieldRequest
 } from "@resume/contracts";
-import { createRagService, planField, type FieldRequest, type KeywordSearchInput } from "@resume/rag";
+import { createRagService, planField, type EmbeddingSearchPort, type FieldRequest, type KeywordSearchInput } from "@resume/rag";
 import type { FastifyInstance } from "fastify";
 import { sendError } from "../http-response.js";
 import type { ProfileRepository } from "../profile/profile-repository.js";
 
 export function registerRagRoutes(
   app: FastifyInstance,
-  dependencies: { profileRepository: ProfileRepository }
+  dependencies: { profileRepository: ProfileRepository; embeddingSearch?: EmbeddingSearchPort }
 ): void {
   const service = createRagService({
     repository: dependencies.profileRepository,
@@ -26,7 +26,8 @@ export function registerRagRoutes(
           })
           .slice(0, input.limit);
       }
-    }
+    },
+    ...(dependencies.embeddingSearch === undefined ? {} : { embeddingSearch: dependencies.embeddingSearch })
   });
 
   app.post("/api/rag/fields/resolve", async (request, reply) => {

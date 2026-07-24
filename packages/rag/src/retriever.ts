@@ -1,5 +1,6 @@
 import { ProfileFactSchema, type ProfileFact } from "@resume/contracts";
 import type {
+  EmbeddingSearchResult,
   FieldRequest,
   RagDependencies,
   RetrievalPlan,
@@ -35,8 +36,49 @@ export async function retrieveCandidates(
     return { candidates: [{ fact: parsed.fact, source: "exact", score: 1 }] };
   }
 
-  if (!dependencies.search) return { candidates: [] };
+  const keyword = await retrieveKeyword(request, plan, dependencies);
+  if (keyword.invalidReason) return keyword;
 
+  if (!plan.strategy.includes("embedding")) return finalizeCandidates(keyword.candidates, request.taskId);
+  if (!dependencies.embeddingSearch) return { candidates: [], invalidReason: "embedding search unavailable" };
+
+  let embeddingResults: EmbeddingSearchResult[];
+  try {
+    embeddingResults = await dependencies.embeddingSearch.search({
+      query: embeddingQuery(request, plan),
+      taskId: request.taskId,
+      limit: SEARCH_LIMIT,
+      ...(plan.needsJobDescription && request.jobDescription?.trim()
+        ? { jobDescription: request.jobDescription.trim() }
+        : {})
+    });
+  } catch {
+    return { candidates: [], invalidReason: "embedding search unavailable" };
+  }
+
+  if (!Array.isArray(embeddingResults)) {
+    return { candidates: [], invalidReason: "embedding search returned a malformed response" };
+  }
+
+  const embeddings: RetrievedCandidate[] = [];
+  for (const result of embeddingResults) {
+    if (!result || typeof result !== "object" || !Number.isFinite(result.score)) {
+      return { candidates: [], invalidReason: "embedding search returned a malformed response" };
+    }
+    const parsed = parseCandidate(result.fact);
+    if (!parsed.success) return { candidates: [], invalidReason: parsed.reason };
+    embeddings.push({ fact: parsed.fact, source: "embedding", score: result.score });
+  }
+
+  return finalizeCandidates([...keyword.candidates, ...embeddings], request.taskId);
+}
+
+async function retrieveKeyword(
+  request: FieldRequest,
+  plan: RetrievalPlan,
+  dependencies: RagDependencies
+): Promise<RetrievalResult> {
+  if (!dependencies.search) return { candidates: [] };
   let searchResults: ProfileFact[];
   try {
     searchResults = await dependencies.search.search({
@@ -51,66 +93,36 @@ export async function retrieveCandidates(
   } catch {
     return { candidates: [], invalidReason: "keyword search failed" };
   }
+  if (!Array.isArray(searchResults)) return { candidates: [], invalidReason: "keyword search returned a malformed response" };
 
-  if (!Array.isArray(searchResults)) {
-    return { candidates: [], invalidReason: "keyword search returned a malformed response" };
-  }
-
-  const parsedResults: ProfileFact[] = [];
-  const seen = new Map<string, string>();
+  const candidates: RetrievedCandidate[] = [];
   for (const result of searchResults) {
     const parsed = parseCandidate(result);
     if (!parsed.success) return { candidates: [], invalidReason: parsed.reason };
-    const payload = canonicalJson(parsed.fact);
-    const previous = seen.get(parsed.fact.id);
-    if (previous !== undefined && previous !== payload) {
-      return { candidates: [], invalidReason: "keyword search returned conflicting duplicate fact IDs" };
+    candidates.push({ fact: parsed.fact, source: "keyword", score: 0 });
+  }
+  return { candidates };
+}
+
+function finalizeCandidates(candidates: RetrievedCandidate[], taskId: string): RetrievalResult {
+  const byId = new Map<string, RetrievedCandidate>();
+  for (const candidate of candidates) {
+    if (candidate.fact.scope === "profile" && candidate.fact.taskId !== undefined) {
+      return { candidates: [], invalidReason: "retrieval returned a malformed profile scope" };
     }
-    if (previous !== undefined) continue;
-    seen.set(parsed.fact.id, payload);
-    parsedResults.push(parsed.fact);
+    const previous = byId.get(candidate.fact.id);
+    if (previous && canonicalJson(previous.fact) !== canonicalJson(candidate.fact)) {
+      return { candidates: [], invalidReason: "retrieval returned conflicting duplicate fact IDs" };
+    }
+    if (!previous || candidate.score > previous.score || (candidate.score === previous.score && candidate.source === "embedding")) {
+      byId.set(candidate.fact.id, candidate);
+    }
   }
-
-  if (parsedResults.some((fact) => fact.scope === "profile" && fact.taskId !== undefined)) {
-    return { candidates: [], invalidReason: "keyword search returned a malformed profile scope" };
-  }
-
-  const visible = parsedResults.filter((fact) => isVisibleToTask(fact, request.taskId) && fact.status !== "superseded");
-  const candidates = retainLifecyclePrecedence(visible, request.taskId)
-    .map((fact): RetrievedCandidate => ({ fact, source: "keyword", score: 0 }));
-
-  if (!plan.strategy.includes("embedding") || candidates.length === 0 || !dependencies.embeddingProvider) {
-    return { candidates };
-  }
-  if (candidates.some(({ fact }) => typeof fact.value !== "string")) return { candidates };
-
-  let vectors: number[][];
-  try {
-    const queryVector = await dependencies.embeddingProvider.embedQuery(embeddingQuery(request, plan));
-    const documentVectors = await dependencies.embeddingProvider.embedDocuments(candidates.map(({ fact }) => fact.value as string));
-    vectors = [queryVector, ...documentVectors];
-  } catch {
-    return { candidates: [], invalidReason: "embedding provider failed" };
-  }
-
-  const invalidReason = validateEmbeddings(vectors, candidates.length + 1);
-  if (invalidReason) return { candidates: [], invalidReason };
-
-  const queryVector = vectors[0]!;
-  const scored = candidates
-    .map((candidate, index) => ({
-      ...candidate,
-      score: cosineSimilarity(queryVector, vectors[index + 1]!),
-      originalIndex: index
-    }));
-  if (scored.some(({ score }) => !Number.isFinite(score) || score < -1 || score > 1)) {
-    return { candidates: [], invalidReason: "embedding similarity score is invalid" };
-  }
-  const ranked = scored
-    .sort((left, right) => right.score - left.score || left.originalIndex - right.originalIndex || left.fact.id.localeCompare(right.fact.id))
-    .map(({ originalIndex: _originalIndex, ...candidate }) => candidate);
-
-  return { candidates: ranked };
+  const visible = [...byId.values()].filter(({ fact }) => isVisibleToTask(fact, taskId) && fact.status !== "superseded");
+  return {
+    candidates: retainLifecyclePrecedence(visible, taskId)
+      .sort((left, right) => right.score - left.score || left.fact.id.localeCompare(right.fact.id))
+  };
 }
 
 function keywordQuery(request: FieldRequest, plan: RetrievalPlan): string {
@@ -134,19 +146,17 @@ function parseCandidate(candidate: unknown):
 }
 
 function isVisibleToTask(fact: ProfileFact, taskId: string): boolean {
-  return fact.scope === "profile"
-    ? fact.taskId === undefined
-    : fact.taskId === taskId;
+  return fact.scope === "profile" ? fact.taskId === undefined : fact.taskId === taskId;
 }
 
-function retainLifecyclePrecedence(facts: ProfileFact[], taskId: string): ProfileFact[] {
+function retainLifecyclePrecedence(candidates: RetrievedCandidate[], taskId: string): RetrievedCandidate[] {
   const bestBySemantic = new Map<string, number>();
-  for (const fact of facts) {
+  for (const { fact } of candidates) {
     const priority = lifecyclePriority(fact, taskId);
     const current = bestBySemantic.get(fact.fieldPath);
     if (current === undefined || priority < current) bestBySemantic.set(fact.fieldPath, priority);
   }
-  return facts.filter((fact) => lifecyclePriority(fact, taskId) === bestBySemantic.get(fact.fieldPath));
+  return candidates.filter(({ fact }) => lifecyclePriority(fact, taskId) === bestBySemantic.get(fact.fieldPath));
 }
 
 function lifecyclePriority(fact: ProfileFact, taskId: string): number {
@@ -161,40 +171,4 @@ function canonicalJson(value: unknown): string {
   if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
   const record = value as Record<string, unknown>;
   return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
-}
-
-function validateEmbeddings(vectors: unknown, expectedCount: number): string | undefined {
-  if (!Array.isArray(vectors) || vectors.length !== expectedCount) return "embedding response count mismatch";
-  const dimensions = Array.isArray(vectors[0]) ? vectors[0].length : 0;
-  if (dimensions === 0) return "embedding vectors must have nonzero dimensions";
-  for (const vector of vectors) {
-    if (!Array.isArray(vector) || vector.length !== dimensions) return "embedding vector dimensions mismatch";
-    if (vector.some((value) => typeof value !== "number" || !Number.isFinite(value))) {
-      return "embedding vectors must contain finite numbers";
-    }
-    if (vector.every((value) => value === 0)) return "embedding vectors must have nonzero magnitude";
-  }
-  return undefined;
-}
-
-function cosineSimilarity(left: number[], right: number[]): number {
-  const leftScale = maxAbsolute(left);
-  const rightScale = maxAbsolute(right);
-  let dot = 0;
-  let leftMagnitude = 0;
-  let rightMagnitude = 0;
-  for (let index = 0; index < left.length; index += 1) {
-    const leftValue = left[index]! / leftScale;
-    const rightValue = right[index]! / rightScale;
-    dot += leftValue * rightValue;
-    leftMagnitude += leftValue * leftValue;
-    rightMagnitude += rightValue * rightValue;
-  }
-  return Math.max(-1, Math.min(1, dot / (Math.sqrt(leftMagnitude) * Math.sqrt(rightMagnitude))));
-}
-
-function maxAbsolute(vector: number[]): number {
-  let maximum = 0;
-  for (const value of vector) maximum = Math.max(maximum, Math.abs(value));
-  return maximum;
 }

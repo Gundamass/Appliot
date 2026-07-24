@@ -2,11 +2,14 @@ import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
+import Fastify from "fastify";
 import { afterEach, describe, expect, it } from "vitest";
+import type { EmbeddingSearchPort } from "@resume/rag";
 import { migrateDatabase } from "../db/migrate.js";
 import { createApp } from "../app.js";
 import { createProfileRepository } from "../profile/profile-repository.js";
 import { createLocalOriginalDocumentStore } from "../profile/original-document-store.js";
+import { registerRagRoutes } from "./rag-routes.js";
 
 const resources: Array<{ app: Awaited<ReturnType<typeof createApp>>; database: InstanceType<typeof Database>; root: string }> = [];
 
@@ -97,5 +100,41 @@ describe("RAG routes", () => {
     expect(forged.statusCode).toBe(400);
     expect(promoted.statusCode).toBe(200);
     expect(profileRepository.getById("email")).toMatchObject({ value: "new@example.com", status: "user_corrected", scope: "profile" });
+  });
+
+  it("keeps semantic search candidates in needs_review through the route", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const profileRepository = createProfileRepository(database);
+    const embeddingSearch: EmbeddingSearchPort = {
+      async search() {
+        return [{
+          score: 0.99,
+          fact: {
+            id: "summary",
+            fieldPath: "application.coverLetter",
+            value: "Supported long text.",
+            status: "user_confirmed",
+            confidence: 1,
+            scope: "profile",
+            evidence: [{ documentId: "resume", page: 1, text: "Supported long text.", extraction: "pdf_text" }],
+            revision: 1
+          }
+        }];
+      }
+    };
+    const app = Fastify();
+    registerRagRoutes(app, { profileRepository, embeddingSearch });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/rag/fields/resolve",
+      payload: { ...request, semantic: "application.coverLetter", fieldId: "cover", label: "Cover letter", type: "textarea" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ decision: { status: "needs_review", value: "Supported long text." } });
+    await app.close();
+    database.close();
   });
 });

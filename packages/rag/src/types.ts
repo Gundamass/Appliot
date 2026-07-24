@@ -1,8 +1,7 @@
 import type { DecisionStatus, Evidence, JsonValue, ProfileFact } from "@resume/contracts";
-import type { EmbeddingProvider } from "@resume/model-provider";
 
 export type FieldType = "text" | "textarea" | "select" | "boolean" | "date";
-export type RetrievalSource = "exact" | "keyword";
+export type RetrievalSource = "exact" | "keyword" | "embedding";
 export type RetrievalStrategy = "exact" | "keyword" | "embedding";
 export type PlanningRisk = "none" | "sensitive_commitment" | "unknown_semantic";
 
@@ -73,10 +72,24 @@ export interface KeywordSearchPort {
   search(input: KeywordSearchInput): Promise<ProfileFact[]>;
 }
 
+export interface EmbeddingSearchResult {
+  fact: ProfileFact;
+  score: number;
+}
+
+export interface EmbeddingSearchPort {
+  search(input: {
+    query: string;
+    taskId: string;
+    limit: number;
+    jobDescription?: string;
+  }): Promise<EmbeddingSearchResult[]>;
+}
+
 export interface RagDependencies {
   repository: ProfileRepositoryPort;
   search?: KeywordSearchPort;
-  embeddingProvider?: EmbeddingProvider;
+  embeddingSearch?: EmbeddingSearchPort;
 }
 
 export interface RetrievedCandidate {

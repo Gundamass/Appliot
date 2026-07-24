@@ -32,6 +32,8 @@ export type {
   FieldDecision,
   FieldRequest,
   FieldType,
+  EmbeddingSearchPort,
+  EmbeddingSearchResult,
   KeywordSearchInput,
   KeywordSearchPort,
   PlanningRisk,

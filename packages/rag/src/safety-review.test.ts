@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Evidence, JsonValue, ProfileFact } from "@resume/contracts";
-import type { EmbeddingProvider } from "@resume/model-provider";
 import {
   applyAnswer,
   createRagService,
@@ -9,6 +8,7 @@ import {
   retrieveCandidates,
   type FieldAnswer,
   type FieldRequest,
+  type EmbeddingSearchPort,
   type KeywordSearchPort,
   type ProfileRepositoryPort
 } from "./index.js";
@@ -294,7 +294,7 @@ describe("review fix: retrieval visibility and precedence", () => {
     const decision = await createRagService({
       repository: emptyRepository(),
       search: fakeSearch([first, second]),
-      embeddingProvider: fakeProvider([[1, 0], [1, 0], [0, 1]])
+      embeddingSearch: fakeEmbeddingSearch([{ fact: first, score: 1 }, { fact: second, score: 0 }])
     }).resolveField(request);
 
     expect(decision.status).toBe("needs_question");
@@ -349,21 +349,18 @@ describe("review fix: numerically stable embeddings", () => {
     type: "textarea"
   };
 
-  it.each([
-    ["huge", [[1e308, 1e308], [1e308, 1e308], [1e308, -1e308]]],
-    ["tiny", [[1e-308, 1e-308], [1e-308, 1e-308], [1e-308, -1e-308]]]
-  ])("returns finite in-range scores for %s finite components", async (_name, vectors) => {
+  it.each([["positive", 1], ["negative", -1]])("preserves finite semantic scores for %s results", async (_name, score) => {
     const first = fact({ id: "first", fieldPath: request.semantic, value: "First summary", evidence: [pdfEvidence("First summary")] });
     const second = fact({ id: "second", fieldPath: request.semantic, value: "Second summary", evidence: [pdfEvidence("Second summary")] });
 
     const retrieval = await retrieveCandidates(request, planField(request), {
       repository: emptyRepository(),
       search: fakeSearch([first, second]),
-      embeddingProvider: fakeProvider(vectors)
+      embeddingSearch: fakeEmbeddingSearch([{ fact: first, score }, { fact: second, score: -score }])
     });
 
     expect(retrieval.invalidReason).toBeUndefined();
-    expect(retrieval.candidates.map(({ fact }) => fact.id)).toEqual(["first", "second"]);
+    expect(retrieval.candidates.map(({ fact }) => fact.id)).toEqual(score > 0 ? ["first", "second"] : ["second", "first"]);
     for (const candidate of retrieval.candidates) {
       expect(Number.isFinite(candidate.score)).toBe(true);
       expect(candidate.score).toBeGreaterThanOrEqual(-1);
@@ -378,24 +375,21 @@ describe("review fix: numerically stable embeddings", () => {
     const retrieval = await retrieveCandidates(request, planField(request), {
       repository: emptyRepository(),
       search: fakeSearch([first, second]),
-      embeddingProvider: fakeProvider([[1, 0], [2, 0], [3, 0]])
+      embeddingSearch: fakeEmbeddingSearch([{ fact: first, score: 1 }, { fact: second, score: 1 }])
     });
 
-    expect(retrieval.candidates.map(({ fact }) => fact.id)).toEqual(["z-first", "a-second"]);
+    expect(retrieval.candidates.map(({ fact }) => fact.id)).toEqual(["a-second", "z-first"]);
     expect(retrieval.candidates[0]?.score).toBe(retrieval.candidates[1]?.score);
   });
 
-  it.each([
-    ["dimensions", [[1, 0], [1], [1, 0]]],
-    ["nonfinite", [[1, 0], [Number.POSITIVE_INFINITY, 0], [1, 0]]]
-  ])("rejects malformed embedding %s", async (_name, vectors) => {
+  it.each([Number.NaN, Number.POSITIVE_INFINITY])("rejects malformed embedding score %s", async (score) => {
     const first = fact({ id: "first", fieldPath: request.semantic, value: "First summary", evidence: [pdfEvidence("First summary")] });
     const second = fact({ id: "second", fieldPath: request.semantic, value: "Second summary", evidence: [pdfEvidence("Second summary")] });
 
     const retrieval = await retrieveCandidates(request, planField(request), {
       repository: emptyRepository(),
       search: fakeSearch([first, second]),
-      embeddingProvider: fakeProvider(vectors)
+      embeddingSearch: fakeEmbeddingSearch([{ fact: first, score }, { fact: second, score: 0 }])
     });
 
     expect(retrieval.candidates).toEqual([]);
@@ -468,10 +462,8 @@ function fakeSearch(results: ProfileFact[]): KeywordSearchPort {
   return { search: vi.fn(async () => structuredClone(results)) };
 }
 
-function fakeProvider(vectors: number[][]): EmbeddingProvider {
-  const [queryVector = [], ...documentVectors] = vectors;
+function fakeEmbeddingSearch(results: unknown): EmbeddingSearchPort {
   return {
-    embedDocuments: vi.fn(async () => structuredClone(documentVectors)),
-    embedQuery: vi.fn(async () => structuredClone(queryVector))
-  };
+    search: vi.fn(async () => structuredClone(results))
+  } as unknown as EmbeddingSearchPort;
 }

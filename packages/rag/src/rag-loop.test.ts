@@ -1,6 +1,5 @@
 import { describe, expect, it, vi } from "vitest";
 import type { Evidence, JsonValue, ProfileFact } from "@resume/contracts";
-import type { EmbeddingProvider } from "@resume/model-provider";
 import {
   applyAnswer,
   createRagService,
@@ -10,6 +9,7 @@ import {
   buildQuestion,
   type FieldAnswer,
   type FieldRequest,
+  type EmbeddingSearchPort,
   type KeywordSearchInput,
   type KeywordSearchPort,
   type ProfileRepositoryPort
@@ -224,6 +224,24 @@ describe("RAG field resolution", () => {
 });
 
 describe("planning and layered retrieval", () => {
+  it("invalidates an embedding-planned retrieval when semantic search is unavailable", async () => {
+    const request: FieldRequest = {
+      taskId: "task-1",
+      fieldId: "cover-letter",
+      semantic: "application.coverLetter",
+      label: "Cover letter",
+      type: "textarea"
+    };
+    const keyword = fact({ fieldPath: request.semantic, value: "Supported long text.", evidence: [evidence("Supported long text.")] });
+
+    const retrieval = await retrieveCandidates(request, planField(request), {
+      repository: fakeRepository(),
+      search: fakeSearch([keyword])
+    });
+
+    expect(retrieval).toMatchObject({ candidates: [], invalidReason: "embedding search unavailable" });
+  });
+
   it("emits a normalized retrieval plan with safety metadata", () => {
     expect(planField({
       taskId: "task-1",
@@ -286,7 +304,7 @@ describe("planning and layered retrieval", () => {
       status: "user_confirmed",
       evidence: [evidence("I operate distributed storage services.")]
     });
-    const provider = fakeProvider([[1, 0], [0.2, 0.8], [1, 0]]);
+    const embeddingSearch = fakeEmbeddingSearch([{ fact: first, score: 0.2 }, { fact: second, score: 1 }]);
     const request: FieldRequest = {
       taskId: "task-1",
       fieldId: "cover-letter",
@@ -300,34 +318,30 @@ describe("planning and layered retrieval", () => {
     const retrieval = await retrieveCandidates(request, plan, {
       repository: fakeRepository(),
       search: fakeSearch([first, second]),
-      embeddingProvider: provider
+      embeddingSearch
     });
 
-    expect(provider.embedQuery).toHaveBeenCalledTimes(1);
-    expect(provider.embedQuery).toHaveBeenCalledWith("Cover letter application.coverLetter\nDistributed storage");
-    expect(provider.embedDocuments).toHaveBeenCalledTimes(1);
-    expect(provider.embedDocuments).toHaveBeenCalledWith([first.value, second.value]);
+    expect(embeddingSearch.search).toHaveBeenCalledWith({
+      query: "Cover letter application.coverLetter\nDistributed storage",
+      taskId: "task-1",
+      limit: 20,
+      jobDescription: "Distributed storage"
+    });
     expect(retrieval.candidates.map(({ fact }) => fact.id)).toEqual(["second", "first"]);
   });
 
   it("never invokes embeddings for an exact scalar field", async () => {
-    const provider = fakeProvider([]);
+    const embeddingSearch = fakeEmbeddingSearch([]);
     const repository = fakeRepository([
       fact({ value: "me@example.com", status: "user_confirmed" })
     ]);
 
-    await createRagService({ repository, embeddingProvider: provider }).resolveField(emailRequest);
+    await createRagService({ repository, embeddingSearch }).resolveField(emailRequest);
 
-    expect(provider.embedQuery).not.toHaveBeenCalled();
-    expect(provider.embedDocuments).not.toHaveBeenCalled();
+    expect(embeddingSearch.search).not.toHaveBeenCalled();
   });
 
-  it.each([
-    { name: "response count", vectors: [[1, 0], [1, 0]] },
-    { name: "dimensions", vectors: [[1, 0], [1], [1, 0]] },
-    { name: "finite numbers", vectors: [[1, 0], [Number.NaN, 0], [1, 0]] },
-    { name: "nonzero dimensions", vectors: [[], [], []] }
-  ])("blocks malformed embedding $name", async ({ vectors }) => {
+  it.each(["non-array", "missing score", "nonfinite score"])("blocks malformed embedding search %s", async (kind) => {
     const candidates = [
       fact({ id: "first", fieldPath: "experience.summary", value: "First supported summary." }),
       fact({ id: "second", fieldPath: "experience.summary", value: "Second supported summary." })
@@ -335,7 +349,7 @@ describe("planning and layered retrieval", () => {
     const decision = await createRagService({
       repository: fakeRepository(),
       search: fakeSearch(candidates),
-      embeddingProvider: fakeProvider(vectors)
+      embeddingSearch: fakeEmbeddingSearch(kind === "non-array" ? {} : [kind === "missing score" ? { fact: candidates[0] } : { fact: candidates[0], score: Number.NaN }])
     }).resolveField({
       taskId: "task-1",
       fieldId: "summary",
@@ -359,10 +373,10 @@ describe("planning and layered retrieval", () => {
     const result = await retrieveCandidates(request, plan, {
       repository: fakeRepository(),
       search: fakeSearch([fact({ value: "Supported long text." })]),
-      embeddingProvider: fakeProvider([[1, 0]])
+      embeddingSearch: fakeEmbeddingSearch([{ fact: fact({ value: "Supported long text." }), score: Number.NaN }])
     });
 
-    expect(result).toMatchObject({ candidates: [], invalidReason: "embedding response count mismatch" });
+    expect(result).toMatchObject({ candidates: [], invalidReason: "embedding search returned a malformed response" });
   });
 });
 
@@ -689,13 +703,8 @@ function fakeSearch(results: ProfileFact[]): KeywordSearchPort & { search: Retur
   };
 }
 
-function fakeProvider(vectors: number[][]): EmbeddingProvider & {
-  embedDocuments: ReturnType<typeof vi.fn>;
-  embedQuery: ReturnType<typeof vi.fn>;
-} {
-  const [queryVector = [], ...documentVectors] = vectors;
+function fakeEmbeddingSearch(results: unknown): EmbeddingSearchPort & { search: ReturnType<typeof vi.fn> } {
   return {
-    embedDocuments: vi.fn(async () => structuredClone(documentVectors)),
-    embedQuery: vi.fn(async () => structuredClone(queryVector))
-  };
+    search: vi.fn(async () => structuredClone(results))
+  } as unknown as EmbeddingSearchPort & { search: ReturnType<typeof vi.fn> };
 }
