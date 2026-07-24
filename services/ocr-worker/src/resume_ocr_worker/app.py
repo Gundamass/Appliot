@@ -40,7 +40,7 @@ class OcrRequestBodyLimitMiddleware:
         try:
             require_bearer_token(headers.get("authorization"), self.api_token)
         except HTTPException as error:
-            await _error_response(error.status_code, "Unauthorized.", headers=error.headers)(scope, receive, send)
+            await _unauthorized_response(scope, error)(scope, receive, send)
             return
 
         content_length = headers.get("content-length")
@@ -229,6 +229,13 @@ def _log_rejected_request(request_id: str, status_code: int, error_class: str) -
 def _bounded_body_error_response(scope: Scope) -> JSONResponse:
     headers = {"Connection": "close"} if scope.get("http_version") == "1.1" else None
     return _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.", headers=headers)
+
+
+def _unauthorized_response(scope: Scope, error: HTTPException) -> JSONResponse:
+    headers = dict(error.headers or {})
+    if scope.get("http_version") == "1.1":
+        headers["Connection"] = "close"
+    return _error_response(status.HTTP_401_UNAUTHORIZED, "Unauthorized.", headers=headers)
 
 
 def _error_response(

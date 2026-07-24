@@ -283,6 +283,57 @@ def test_ocr_authentication_precedes_malformed_and_oversized_body_rejection(
     assert backend.calls == []
 
 
+def test_ocr_unauthenticated_chunked_request_does_not_read_trailing_frames_and_closes_http11(token: str):
+    app = create_app(FakeBackend(), WorkerSettings(api_token=token))
+
+    async def call_app():
+        receive_count = 0
+        response_messages = []
+        request_messages = [
+            {"type": "http.request", "body": b"first chunk", "more_body": True},
+            {"type": "http.request", "body": b"unread trailing chunk", "more_body": False},
+        ]
+
+        async def receive():
+            nonlocal receive_count
+            if receive_count >= len(request_messages):
+                raise AssertionError("unauthorized request body was read")
+            message = request_messages[receive_count]
+            receive_count += 1
+            return message
+
+        async def send(message):
+            response_messages.append(message)
+
+        await app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/v1/ocr",
+                "raw_path": b"/v1/ocr",
+                "query_string": b"",
+                "headers": [(b"content-type", b"image/png")],
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+            },
+            receive,
+            send,
+        )
+        return response_messages, receive_count
+
+    response_messages, receive_count = asyncio.run(call_app())
+
+    response_start = next(message for message in response_messages if message["type"] == "http.response.start")
+    response_headers = dict(response_start["headers"])
+    assert response_start["status"] == 401
+    assert response_headers[b"www-authenticate"] == b"Bearer"
+    assert response_headers[b"connection"] == b"close"
+    assert receive_count == 0
+
+
 def test_ocr_rejects_wrong_media_type_and_caller_url_json(client: TestClient, backend: FakeBackend, token: str):
     caller_url = "https://example.test/private-resume.png"
     response = client.post(
