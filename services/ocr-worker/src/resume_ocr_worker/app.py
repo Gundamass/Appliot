@@ -25,8 +25,9 @@ class InvalidBackendOutput(Exception):
 
 
 class OcrRequestBodyLimitMiddleware:
-    def __init__(self, app: ASGIApp, max_request_bytes: int, max_empty_frames: int) -> None:
+    def __init__(self, app: ASGIApp, api_token: str, max_request_bytes: int, max_empty_frames: int) -> None:
         self.app = app
+        self.api_token = api_token
         self.max_request_bytes = max_request_bytes
         self.max_empty_frames = max_empty_frames
 
@@ -35,7 +36,14 @@ class OcrRequestBodyLimitMiddleware:
             await self.app(scope, receive, send)
             return
 
-        content_length = Headers(scope=scope).get("content-length")
+        headers = Headers(scope=scope)
+        try:
+            require_bearer_token(headers.get("authorization"), self.api_token)
+        except HTTPException as error:
+            await _error_response(error.status_code, "Unauthorized.", headers=error.headers)(scope, receive, send)
+            return
+
+        content_length = headers.get("content-length")
         if content_length is not None:
             try:
                 declared_size = int(content_length)
@@ -46,9 +54,7 @@ class OcrRequestBodyLimitMiddleware:
                 await _error_response(status.HTTP_400_BAD_REQUEST, "Invalid Content-Length.")(scope, receive, send)
                 return
             if declared_size > self.max_request_bytes:
-                await _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.")(
-                    scope, receive, send
-                )
+                await _bounded_body_error_response(scope)(scope, receive, send)
                 return
 
         buffered_body = bytearray()
@@ -64,9 +70,7 @@ class OcrRequestBodyLimitMiddleware:
             body = message.get("body", b"")
             received_bytes += len(body)
             if received_bytes > self.max_request_bytes:
-                await _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.")(
-                    scope, receive, send
-                )
+                await _bounded_body_error_response(scope)(scope, receive, send)
                 return
 
             if body:
@@ -74,9 +78,7 @@ class OcrRequestBodyLimitMiddleware:
             else:
                 empty_frames += 1
                 if empty_frames > self.max_empty_frames:
-                    await _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.")(
-                        scope, receive, send
-                    )
+                    await _bounded_body_error_response(scope)(scope, receive, send)
                     return
 
             if not message.get("more_body", False):
@@ -100,6 +102,7 @@ def create_app(backend: OcrBackend, settings: WorkerSettings) -> FastAPI:
     app = FastAPI()
     app.add_middleware(
         OcrRequestBodyLimitMiddleware,
+        api_token=settings.api_token,
         max_request_bytes=settings.max_request_bytes,
         max_empty_frames=settings.max_empty_request_body_frames,
     )
@@ -187,6 +190,8 @@ def _is_valid_image(image_bytes: bytes, settings: WorkerSettings) -> bool:
             warnings.simplefilter("error", Image.DecompressionBombWarning)
             with Image.open(io.BytesIO(image_bytes)) as image:
                 width, height = image.size
+                if image.n_frames != 1:
+                    return False
                 image.verify()
     except (Image.DecompressionBombError, Image.DecompressionBombWarning, OSError, SyntaxError, UnidentifiedImageError):
         return False
@@ -221,8 +226,18 @@ def _log_rejected_request(request_id: str, status_code: int, error_class: str) -
     )
 
 
-def _error_response(status_code: int, detail: str, request_id: str | None = None) -> JSONResponse:
+def _bounded_body_error_response(scope: Scope) -> JSONResponse:
+    headers = {"Connection": "close"} if scope.get("http_version") == "1.1" else None
+    return _error_response(status.HTTP_413_REQUEST_ENTITY_TOO_LARGE, "Request body is too large.", headers=headers)
+
+
+def _error_response(
+    status_code: int,
+    detail: str,
+    request_id: str | None = None,
+    headers: dict[str, str] | None = None,
+) -> JSONResponse:
     body: dict[str, str] = {"detail": detail}
     if request_id is not None:
         body["requestId"] = request_id
-    return JSONResponse(status_code=status_code, content=body)
+    return JSONResponse(status_code=status_code, content=body, headers=headers)

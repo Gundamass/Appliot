@@ -16,6 +16,7 @@ from resume_ocr_worker.app import create_app
 from resume_ocr_worker.types import (
     DEFAULT_HOST,
     DEFAULT_PORT,
+    MAX_EMPTY_REQUEST_BODY_FRAMES,
     MAX_IMAGE_AREA,
     MAX_IMAGE_DIMENSION,
     MAX_REQUEST_BYTES,
@@ -49,7 +50,16 @@ def declared_png_bytes(width: int, height: int) -> bytes:
     )
 
 
+def apng_bytes() -> bytes:
+    first_frame = Image.new("RGB", (1, 1), color="white")
+    second_frame = Image.new("RGB", (1, 1), color="black")
+    buffer = io.BytesIO()
+    first_frame.save(buffer, format="PNG", save_all=True, append_images=[second_frame], duration=100, loop=0)
+    return buffer.getvalue()
+
+
 PNG_BYTES = png_bytes()
+APNG_BYTES = apng_bytes()
 
 
 class FakeBackend:
@@ -136,6 +146,51 @@ def asgi_response_without_content_length(app, chunks: list[bytes], token: str):
     return asyncio.run(call_app())
 
 
+def asgi_response_with_receive_count(app, request_messages: list[dict[str, object]], token: str, content_length: str | None):
+    async def call_app():
+        receive_count = 0
+        response_messages = []
+
+        async def receive():
+            nonlocal receive_count
+            if receive_count >= len(request_messages):
+                raise AssertionError("request body was read after the bounded rejection")
+            message = request_messages[receive_count]
+            receive_count += 1
+            return message
+
+        async def send(message):
+            response_messages.append(message)
+
+        headers = [
+            (b"authorization", f"Bearer {token}".encode()),
+            (b"content-type", b"image/png"),
+        ]
+        if content_length is not None:
+            headers.append((b"content-length", content_length.encode()))
+
+        await app(
+            {
+                "type": "http",
+                "asgi": {"version": "3.0"},
+                "http_version": "1.1",
+                "method": "POST",
+                "scheme": "http",
+                "path": "/v1/ocr",
+                "raw_path": b"/v1/ocr",
+                "query_string": b"",
+                "headers": headers,
+                "client": ("testclient", 50000),
+                "server": ("testserver", 80),
+            },
+            receive,
+            send,
+        )
+        return response_messages, receive_count
+
+    return asyncio.run(call_app())
+
+
 def test_worker_defaults_pin_the_deployment_contract():
     settings = WorkerSettings(api_token=TOKEN)
 
@@ -188,6 +243,7 @@ def test_ocr_accepts_png_bytes_and_returns_markdown(client: TestClient, backend:
     )
 
     assert response.status_code == 200
+    assert set(response.json()) == {"text", "model", "modelRevision", "mode", "elapsedMs"}
     assert response.json()["text"] == "# Resume\nAda Lovelace"
     assert response.json()["model"] == MODEL
     assert response.json()["modelRevision"] == REVISION
@@ -207,6 +263,24 @@ def test_ocr_rejects_invalid_authorization(client: TestClient, header: str | Non
 
     assert response.status_code == 401
     assert response.headers["www-authenticate"] == "Bearer"
+
+
+@pytest.mark.parametrize("authorization", [None, "Bearer wrong-token"])
+@pytest.mark.parametrize("content_length", ["not-an-integer", str(MAX_REQUEST_BYTES + 1)])
+def test_ocr_authentication_precedes_malformed_and_oversized_body_rejection(
+    client: TestClient, backend: FakeBackend, authorization: str | None, content_length: str
+):
+    headers = {"Content-Type": "image/png", "Content-Length": content_length}
+    if authorization is not None:
+        headers["Authorization"] = authorization
+
+    response = client.post("/v1/ocr", headers=headers, content=b"x")
+
+    assert response.status_code == 401
+    assert response.json() == {"detail": "Unauthorized."}
+    assert response.headers["www-authenticate"] == "Bearer"
+    assert authorization is None or authorization not in response.text
+    assert backend.calls == []
 
 
 def test_ocr_rejects_wrong_media_type_and_caller_url_json(client: TestClient, backend: FakeBackend, token: str):
@@ -234,6 +308,21 @@ def test_ocr_rejects_invalid_image_bytes(client: TestClient, backend: FakeBacken
     assert response.status_code == 422
     assert response.json() == {"detail": "Invalid OCR image."}
     assert invalid_bytes.decode() not in response.text
+    assert backend.calls == []
+
+
+def test_ocr_rejects_multiframe_apng_before_backend_inference(client: TestClient, backend: FakeBackend, token: str):
+    with Image.open(io.BytesIO(APNG_BYTES)) as image:
+        assert image.n_frames == 2
+
+    response = client.post(
+        "/v1/ocr",
+        headers={**authorized(token), "Content-Type": "image/png"},
+        content=APNG_BYTES,
+    )
+
+    assert response.status_code == 422
+    assert response.json() == {"detail": "Invalid OCR image."}
     assert backend.calls == []
 
 
@@ -284,6 +373,53 @@ def test_ocr_rejects_oversized_headerless_chunked_body_before_validation(token: 
     assert next(message for message in messages if message["type"] == "http.response.start")["status"] == 413
     assert b"".join(message.get("body", b"") for message in messages) == b'{"detail":"Request body is too large."}'
     assert backend.calls == []
+
+
+@pytest.mark.parametrize(
+    ("content_length", "request_messages", "expected_receive_count"),
+    [
+        (
+            str(MAX_REQUEST_BYTES + 1),
+            [{"type": "http.request", "body": b"unread", "more_body": False}],
+            0,
+        ),
+        (
+            None,
+            [
+                {"type": "http.request", "body": b"x" * MAX_REQUEST_BYTES, "more_body": True},
+                {"type": "http.request", "body": b"x", "more_body": True},
+                {"type": "http.request", "body": b"unread", "more_body": False},
+            ],
+            2,
+        ),
+        (
+            None,
+            [{"type": "http.request", "body": b"", "more_body": True}]
+            * (MAX_EMPTY_REQUEST_BODY_FRAMES + 1)
+            + [{"type": "http.request", "body": b"unread", "more_body": False}],
+            MAX_EMPTY_REQUEST_BODY_FRAMES + 1,
+        ),
+    ],
+)
+def test_ocr_bounded_body_rejections_stop_reading_and_close_http11_connection(
+    token: str,
+    content_length: str | None,
+    request_messages: list[dict[str, object]],
+    expected_receive_count: int,
+):
+    app = create_app(FakeBackend(), WorkerSettings(api_token=token))
+
+    response_messages, receive_count = asgi_response_with_receive_count(
+        app,
+        request_messages,
+        token,
+        content_length,
+    )
+
+    response_start = next(message for message in response_messages if message["type"] == "http.response.start")
+    assert response_start["status"] == 413
+    assert dict(response_start["headers"])[b"connection"] == b"close"
+    assert receive_count == expected_receive_count
 
 
 def test_ocr_rejects_unready_backend(token: str):
