@@ -68,6 +68,16 @@ def environment(root: Path, **overrides: str) -> dict[str, str]:
     return values
 
 
+def mark_paths_as_symlinks(monkeypatch, *paths: Path) -> None:
+    original_is_symlink = Path.is_symlink
+    symlink_paths = set(paths)
+
+    def is_symlink(path: Path) -> bool:
+        return path in symlink_paths or original_is_symlink(path)
+
+    monkeypatch.setattr(Path, "is_symlink", is_symlink)
+
+
 def test_settings_pin_gpu_model_and_loopback_before_model_import(tmp_path: Path):
     sys.modules.pop("transformers", None)
 
@@ -141,6 +151,105 @@ def test_settings_reject_unverified_or_empty_manifest_template(tmp_path: Path):
     manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
 
     with pytest.raises(ValueError, match="not verified"):
+        load_settings(environment(tmp_path, OCR_MODEL_PATH=str(model_path)))
+
+
+def test_settings_reject_manifest_covered_python_file_missing_from_custom_code_review(tmp_path: Path):
+    model_path = model_directory(tmp_path)
+    unreviewed_code = model_path / "unreviewed.py"
+    unreviewed_code.write_text("raise RuntimeError('must never be imported')\n", encoding="utf-8")
+    manifest_path = model_path / "model-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"].append(
+        {"path": unreviewed_code.name, "sha256": hashlib.sha256(unreviewed_code.read_bytes()).hexdigest()}
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    sys.modules.pop("transformers", None)
+
+    with pytest.raises(ValueError, match="custom code coverage"):
+        load_settings(environment(tmp_path, OCR_MODEL_PATH=str(model_path)))
+
+    assert "transformers" not in sys.modules
+
+
+def test_settings_reject_symlinked_manifest(tmp_path: Path, monkeypatch):
+    model_path = model_directory(tmp_path)
+    manifest_path = model_path / "model-manifest.json"
+    mark_paths_as_symlinks(monkeypatch, manifest_path)
+
+    with pytest.raises(ValueError, match="symlink"):
+        load_settings(environment(tmp_path, OCR_MODEL_PATH=str(model_path)))
+
+
+def test_settings_reject_symlinked_directory_anywhere_in_snapshot(tmp_path: Path, monkeypatch):
+    model_path = model_directory(tmp_path)
+    linked_directory = model_path / "linked-directory"
+    linked_directory.mkdir()
+    mark_paths_as_symlinks(monkeypatch, linked_directory)
+
+    with pytest.raises(ValueError, match="symlink"):
+        load_settings(environment(tmp_path, OCR_MODEL_PATH=str(model_path)))
+
+
+def test_settings_reject_listed_file_through_symlinked_parent(tmp_path: Path, monkeypatch):
+    model_path = model_directory(tmp_path)
+    linked_parent = model_path / "linked-parent"
+    linked_parent.mkdir()
+    linked_file = linked_parent / "escaped.bin"
+    linked_file.write_bytes(b"outside snapshot")
+    manifest_path = model_path / "model-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"].append(
+        {
+            "path": "linked-parent/escaped.bin",
+            "sha256": hashlib.sha256(linked_file.read_bytes()).hexdigest(),
+        }
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    mark_paths_as_symlinks(monkeypatch, linked_parent)
+
+    with pytest.raises(ValueError, match="symlink"):
+        load_settings(environment(tmp_path, OCR_MODEL_PATH=str(model_path)))
+
+
+def test_settings_reject_listed_file_whose_resolved_path_escapes_snapshot(tmp_path: Path, monkeypatch):
+    model_path = model_directory(tmp_path)
+    nested_dir = model_path / "nested"
+    nested_dir.mkdir()
+    listed_file = nested_dir / "escaped.bin"
+    listed_file.write_bytes(b"same bytes")
+    outside_file = tmp_path / "outside.bin"
+    outside_file.write_bytes(b"same bytes")
+    manifest_path = model_path / "model-manifest.json"
+    manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+    manifest["files"].append(
+        {"path": "nested/escaped.bin", "sha256": hashlib.sha256(listed_file.read_bytes()).hexdigest()}
+    )
+    manifest_path.write_text(json.dumps(manifest), encoding="utf-8")
+    original_resolve = Path.resolve
+
+    def resolve(path: Path, strict: bool = False) -> Path:
+        if path == listed_file:
+            return outside_file
+        return original_resolve(path, strict=strict)
+
+    monkeypatch.setattr(Path, "resolve", resolve)
+
+    with pytest.raises(ValueError, match="outside"):
+        load_settings(environment(tmp_path, OCR_MODEL_PATH=str(model_path)))
+
+
+def test_settings_fail_closed_when_snapshot_traversal_is_incomplete(tmp_path: Path, monkeypatch):
+    model_path = model_directory(tmp_path)
+
+    def denied_walk(top, *, followlinks=False, onerror=None):
+        if onerror is not None:
+            onerror(PermissionError("snapshot subtree denied"))
+        return iter(())
+
+    monkeypatch.setattr(config.os, "walk", denied_walk)
+
+    with pytest.raises(ValueError, match="inspected safely"):
         load_settings(environment(tmp_path, OCR_MODEL_PATH=str(model_path)))
 
 

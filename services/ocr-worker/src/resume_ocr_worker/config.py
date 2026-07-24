@@ -81,6 +81,8 @@ def _required_directory(raw_path: str | None, label: str) -> Path:
     if not raw_path:
         raise ValueError(f"{label} is required.")
     path = Path(raw_path).expanduser()
+    if path.is_symlink():
+        raise ValueError(f"{label} must not be a symlink.")
     if not path.is_dir():
         raise ValueError(f"{label} does not exist.")
     return path.resolve()
@@ -140,10 +142,20 @@ def _has_secure_token_permissions(path: Path) -> bool:
 
 
 def _validate_manifest(manifest_path: Path, model_path: Path, model: str, revision: str) -> None:
+    model_root = model_path.resolve(strict=True)
+    if manifest_path.is_symlink():
+        raise ValueError("model-manifest.json must not be a symlink.")
     if not manifest_path.is_file():
         raise ValueError("model-manifest.json is required.")
     try:
-        manifest = json.loads(manifest_path.read_text(encoding="utf-8"))
+        resolved_manifest_path = manifest_path.resolve(strict=True)
+        resolved_manifest_path.relative_to(model_root)
+    except (OSError, RuntimeError, ValueError) as error:
+        raise ValueError("model-manifest.json resolves outside the model directory.") from error
+
+    snapshot_entries = _snapshot_entries(model_root)
+    try:
+        manifest = json.loads(resolved_manifest_path.read_text(encoding="utf-8"))
     except (OSError, UnicodeError, json.JSONDecodeError) as error:
         raise ValueError("model-manifest.json is invalid.") from error
     if not isinstance(manifest, dict):
@@ -171,25 +183,72 @@ def _validate_manifest(manifest_path: Path, model_path: Path, model: str, revisi
         expected_hash = item.get("sha256")
         if not isinstance(expected_hash, str) or not _SHA256.fullmatch(expected_hash):
             raise ValueError("model-manifest.json contains an invalid hash.")
-        file_path = model_path / relative_path
-        if file_path.is_symlink() or not file_path.is_file():
+        file_path = model_root / relative_path
+        if _has_symlink_component(model_root, relative_path):
+            raise ValueError("model-manifest.json file path contains a symlink.")
+        try:
+            resolved_file_path = file_path.resolve(strict=True)
+            resolved_file_path.relative_to(model_root)
+        except (OSError, RuntimeError) as error:
+            raise ValueError("model-manifest.json references a missing file.") from error
+        except ValueError as error:
+            raise ValueError("model-manifest.json file resolves outside the model directory.") from error
+        if not resolved_file_path.is_file():
             raise ValueError("model-manifest.json references a missing or unsafe file.")
-        actual_hash = hashlib.sha256(file_path.read_bytes()).hexdigest()
+        actual_hash = hashlib.sha256(resolved_file_path.read_bytes()).hexdigest()
         if not hmac.compare_digest(actual_hash, expected_hash.lower()):
             raise ValueError("model-manifest.json file hash does not match.")
 
-    custom_paths = {Path(path) for path in custom_code_files if isinstance(path, str)}
-    if len(custom_paths) != len(custom_code_files) or not custom_paths <= listed_files:
+    actual_files = {
+        path.relative_to(model_root)
+        for path in snapshot_entries
+        if path.is_file() and path != resolved_manifest_path
+    }
+    if listed_files != actual_files:
+        raise ValueError("model-manifest.json does not cover all model files.")
+
+    custom_paths = set()
+    for raw_path in custom_code_files:
+        if not isinstance(raw_path, str):
+            raise ValueError("model-manifest.json custom code coverage is invalid.")
+        custom_path = Path(raw_path)
+        if custom_path.is_absolute() or ".." in custom_path.parts or custom_path in custom_paths:
+            raise ValueError("model-manifest.json custom code coverage is invalid.")
+        custom_paths.add(custom_path)
+    if not custom_paths <= listed_files:
         raise ValueError("model-manifest.json custom code coverage is invalid.")
     if any(path.suffix != ".py" for path in custom_paths):
         raise ValueError("model-manifest.json custom code entries must be Python files.")
+    python_files = {path for path in actual_files if path.suffix == ".py"}
+    if custom_paths != python_files:
+        raise ValueError("model-manifest.json custom code coverage is incomplete.")
 
-    actual_files = set()
-    for file_path in model_path.rglob("*"):
-        if not file_path.is_file() or file_path.resolve() == manifest_path.resolve():
-            continue
-        if file_path.is_symlink():
-            raise ValueError("model directory contains an unsafe symlink.")
-        actual_files.add(file_path.relative_to(model_path))
-    if listed_files != actual_files:
-        raise ValueError("model-manifest.json does not cover all model files.")
+
+def _snapshot_entries(model_root: Path) -> list[Path]:
+    entries: list[Path] = []
+
+    def raise_walk_error(error: OSError) -> None:
+        raise error
+
+    try:
+        for current_root, directory_names, file_names in os.walk(
+            model_root,
+            followlinks=False,
+            onerror=raise_walk_error,
+        ):
+            root = Path(current_root)
+            for name in [*directory_names, *file_names]:
+                entry = root / name
+                if entry.is_symlink():
+                    raise ValueError("model directory contains an unsafe symlink.")
+                entries.append(entry)
+    except OSError as error:
+        raise ValueError("model directory could not be inspected safely.") from error
+    return entries
+
+
+def _has_symlink_component(model_root: Path, relative_path: Path) -> bool:
+    return any(
+        model_root.joinpath(*relative_path.parts[:index]).is_symlink()
+        for index in range(1, len(relative_path.parts) + 1)
+    )

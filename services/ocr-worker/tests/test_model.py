@@ -23,6 +23,7 @@ class FakeModel:
     instances = []
     result = "# Resume\nAda Lovelace"
     error: BaseException | None = None
+    output_files: dict[str, bytes | str] = {}
 
     def __init__(self):
         self.infer_calls = []
@@ -42,6 +43,14 @@ class FakeModel:
         self.infer_calls.append((tokenizer, kwargs))
         if self.error is not None:
             raise self.error
+        output_dir = Path(kwargs["output_path"])
+        for relative_path, contents in self.output_files.items():
+            output_file = output_dir / relative_path
+            output_file.parent.mkdir(parents=True, exist_ok=True)
+            if isinstance(contents, bytes):
+                output_file.write_bytes(contents)
+            else:
+                output_file.write_text(contents, encoding="utf-8")
         return self.result
 
 
@@ -70,6 +79,7 @@ def clear_fakes():
     FakeModel.instances.clear()
     FakeModel.result = "# Resume\nAda Lovelace"
     FakeModel.error = None
+    FakeModel.output_files = {}
 
 
 def backend(tmp_path: Path) -> DeepSeekOcrBackend:
@@ -161,6 +171,28 @@ def test_backend_rejects_blank_result_without_leftover_files(tmp_path: Path):
     FakeModel.result = " \n\t"
 
     with pytest.raises(OcrInferenceError, match="empty"):
+        instance.recognize(b"input")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_backend_rejects_returned_text_together_with_generated_output_file_and_cleans_up(tmp_path: Path):
+    instance = backend(tmp_path)
+    FakeModel.result = "# Returned text"
+    FakeModel.output_files = {"result.md": "# File text"}
+
+    with pytest.raises(OcrInferenceError, match="ambiguous"):
+        instance.recognize(b"input")
+
+    assert list(tmp_path.iterdir()) == []
+
+
+def test_backend_rejects_multiple_generated_output_files_and_cleans_up(tmp_path: Path):
+    instance = backend(tmp_path)
+    FakeModel.result = " "
+    FakeModel.output_files = {"first.md": "# First", "nested/second.md": "# Second"}
+
+    with pytest.raises(OcrInferenceError, match="multiple"):
         instance.recognize(b"input")
 
     assert list(tmp_path.iterdir()) == []

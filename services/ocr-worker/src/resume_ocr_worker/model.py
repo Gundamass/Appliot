@@ -123,11 +123,16 @@ def _image_suffix(image_bytes: bytes) -> str:
 
 
 def _markdown_result(result: object, output_dir: Path) -> str:
-    if isinstance(result, str) and (text := _normalize_markdown(result)):
-        return text
     output_files = [path for path in output_dir.rglob("*") if path.is_file()]
-    if len(output_files) != 1:
-        raise OcrInferenceError("OCR inference returned empty Markdown or no single generated result file.")
+    returned_text = _normalize_markdown(result) if isinstance(result, str) else ""
+    if returned_text and output_files:
+        raise OcrInferenceError("OCR inference produced ambiguous returned text and generated files.")
+    if returned_text:
+        return returned_text
+    if not output_files:
+        raise OcrInferenceError("OCR inference returned empty Markdown and no generated result file.")
+    if len(output_files) > 1:
+        raise OcrInferenceError("OCR inference generated multiple result files.")
     try:
         text = output_files[0].read_text(encoding="utf-8")
     except (OSError, UnicodeError) as error:
