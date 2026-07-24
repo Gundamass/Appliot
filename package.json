@@ -8,7 +8,8 @@
   "scripts": {
     "test": "corepack pnpm -r test",
     "typecheck": "tsc --noEmit",
-    "build": "corepack pnpm -r build"
+    "build": "corepack pnpm -r build",
+    "start:api": "corepack pnpm --filter @resume/api start"
   },
   "devDependencies": {
     "@types/node": "24.0.0",

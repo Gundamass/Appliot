@@ -25,5 +25,17 @@ export async function startServer(dependencies: AppDependencies, config: ApiConf
 const entrypoint = process.argv[1];
 if (entrypoint && import.meta.url === pathToFileURL(resolve(entrypoint)).href) {
   const config = loadConfig(process.env);
-  await startServer(createProductionDependencies(config), config);
+  const app = await startServer(createProductionDependencies(config), config);
+  let shuttingDown = false;
+  const shutdown = async () => {
+    if (shuttingDown) return;
+    shuttingDown = true;
+    try {
+      await app.close();
+    } catch {
+      process.exitCode = 1;
+    }
+  };
+  process.once("SIGINT", shutdown);
+  process.once("SIGTERM", shutdown);
 }
