@@ -5,6 +5,7 @@ from __future__ import print_function
 
 import argparse
 import errno
+import getpass
 import hashlib
 import importlib.util
 import json
@@ -23,6 +24,11 @@ from typing import Any, Callable, Dict, Iterable, List, Optional, Sequence, Tupl
 from urllib.error import HTTPError, URLError
 from urllib.request import Request, urlopen
 
+try:
+    import pwd
+except ImportError:  # pragma: no cover - Windows has no pwd module.
+    pwd = None
+
 
 CANONICAL_ROOT = Path("/home/heqing/resume-ai")
 RELEASE_ID = re.compile(r"^[0-9a-f]{64}$")
@@ -31,6 +37,9 @@ CONTROLLER_VERSION = 1
 CONTROLLER_BACKENDS = ("systemd", "supervisor")
 UNITS = ("resume-embedding.service", "resume-ocr.service")
 MIN_FREE_KIB = 100 * 1024 * 1024
+HEQING_HOME = Path("/home/heqing")
+SUPERVISOR_POLL_INTERVAL = 1.0
+SUPERVISOR_TIMEOUT = 60.0
 EMBEDDING_IDENTITY = {
     "status": "ready",
     "model": "Qwen/Qwen3-Embedding-8B",
@@ -176,11 +185,40 @@ def _lexists(path: Path) -> bool:
     return os.path.lexists(str(path))
 
 
+def current_user_name() -> str:
+    if pwd is not None and hasattr(os, "getuid"):
+        try:
+            return pwd.getpwuid(os.getuid()).pw_name
+        except (KeyError, OSError):
+            pass
+    return getpass.getuser()
+
+
+def _require_heqing() -> None:
+    if current_user_name() != "heqing":
+        raise DeploymentError("deployment lifecycle must run as user heqing")
+
+
+def path_is_owned(path: Path) -> bool:
+    if os.name == "nt":
+        return True
+    if pwd is None or not hasattr(os, "getuid"):
+        return False
+    try:
+        expected_uid = pwd.getpwnam("heqing").pw_uid
+        return path.lstat().st_uid == expected_uid
+    except (KeyError, OSError):
+        return False
+
+
 def _lstat(path: Path) -> os.stat_result:
     try:
-        return path.lstat()
+        value = path.lstat()
     except OSError as error:
         raise DeploymentError("could not inspect managed path: {}".format(path)) from error
+    if not path_is_owned(path):
+        raise DeploymentError("managed path is not owned by heqing: {}".format(path))
+    return value
 
 
 def _require_directory(path: Path, label: str, writable: bool = True) -> None:
@@ -205,6 +243,48 @@ def nearest_existing_parent(path: Path) -> Path:
         candidate = candidate.parent
     _require_directory(candidate, "destination parent")
     return candidate
+
+
+def _fsync_directory(path: Path) -> None:
+    if os.name == "nt":
+        return
+    descriptor = os.open(str(path), os.O_RDONLY)
+    try:
+        os.fsync(descriptor)
+    finally:
+        os.close(descriptor)
+
+
+def _atomic_private_write(path: Path, payload: bytes, mode: int = 0o600) -> None:
+    temporary = path.parent / ("." + path.name + "." + str(os.getpid()))
+    if _lexists(temporary):
+        raise DeploymentError("temporary write path already exists: {}".format(temporary))
+    flags = os.O_WRONLY | os.O_CREAT | os.O_EXCL
+    if hasattr(os, "O_NOFOLLOW"):
+        flags |= os.O_NOFOLLOW
+    descriptor = None
+    created = False
+    try:
+        descriptor = os.open(str(temporary), flags, mode)
+        created = True
+        with os.fdopen(descriptor, "wb") as handle:
+            descriptor = None
+            handle.write(payload)
+            handle.flush()
+            os.fsync(handle.fileno())
+        os.chmod(str(temporary), mode)
+        _fsync_directory(path.parent)
+        os.replace(str(temporary), str(path))
+        _fsync_directory(path.parent)
+    except OSError as error:
+        if descriptor is not None:
+            os.close(descriptor)
+        if created and _lexists(temporary):
+            try:
+                temporary.unlink()
+            except OSError:
+                pass
+        raise DeploymentError("atomic private write failed: {}".format(path)) from error
 
 
 def _inspect_destination(path: Path, label: str, expect_directory: bool = True) -> None:
@@ -458,13 +538,15 @@ def transactional_activate(
     release_id: str,
     controller: Any,
     readiness_check: Callable[[str], None],
+    release_validator: Callable[[Path, str], Path] = validate_release,
 ) -> None:
-    validate_release(root, release_id)
+    release_validator(root, release_id)
     previous = current_release_id(root)
-    if previous is not None:
-        controller.stop()
-    activate_release(root, release_id)
     try:
+        if previous is not None:
+            release_validator(root, previous)
+            controller.stop()
+        activate_release(root, release_id)
         controller.start()
         controller.status()
         readiness_check(release_id)
@@ -483,7 +565,7 @@ def transactional_activate(
             raise DeploymentError("services failed to start; no previous release existed") from startup_error
 
         try:
-            validate_release(root, previous)
+            release_validator(root, previous)
             activate_release(root, previous)
             controller.start()
             controller.status()
@@ -493,7 +575,7 @@ def transactional_activate(
                 "ROLLBACK FAILED: previous release could not be restored and verified; "
                 "all release artifacts were preserved"
             ) from rollback_error
-        raise DeploymentError("services failed to start; previous release restored and verified") from startup_error
+        raise DeploymentError("activation failed; previous release restored and verified") from startup_error
 
 
 def controller_metadata_path(root: Path) -> Path:
@@ -528,14 +610,13 @@ def persist_controller_metadata(root: Path, backend: str) -> None:
         raise DeploymentError("systemd is allowed only for the canonical root")
     directory = root / "controller"
     directory.mkdir(parents=True, exist_ok=True, mode=0o700)
+    _require_directory(directory, "controller metadata directory")
     path = controller_metadata_path(root)
-    temporary = directory / (".owner.{}".format(os.getpid()))
     payload = {"version": CONTROLLER_VERSION, "root": str(root), "backend": backend}
-    with temporary.open("w", encoding="utf-8") as handle:
-        json.dump(payload, handle, sort_keys=True, separators=(",", ":"))
-        handle.write("\n")
-    os.chmod(str(temporary), 0o600)
-    os.replace(str(temporary), str(path))
+    _atomic_private_write(
+        path,
+        (json.dumps(payload, sort_keys=True, separators=(",", ":")) + "\n").encode("utf-8"),
+    )
 
 
 def systemd_available(run: Callable[..., Any] = _run) -> bool:
@@ -582,7 +663,7 @@ class SystemdController:
             raise DeploymentError("systemd is allowed only for the canonical root")
         self.root = root
         self.run = run
-        self.home = home or Path.home()
+        self.home = home or HEQING_HOME
 
     def start(self) -> None:
         unit_directory = self.home / ".config" / "systemd" / "user"
@@ -670,6 +751,11 @@ class SupervisorController:
         root: Path,
         run: Callable[..., Any] = _run,
         process_is_owned: Callable[[int, Path], bool] = _default_process_is_owned,
+        poll_interval: float = SUPERVISOR_POLL_INTERVAL,
+        start_timeout: Optional[float] = None,
+        stop_timeout: Optional[float] = None,
+        clock: Callable[[], float] = time.monotonic,
+        sleep: Callable[[float], None] = time.sleep,
     ) -> None:
         self.root = root
         self.run = run
@@ -677,6 +763,14 @@ class SupervisorController:
         self.config = root / "services" / "supervisord.conf"
         self.supervisord = root / "envs" / "embedding" / "bin" / "supervisord"
         self.supervisorctl = root / "envs" / "embedding" / "bin" / "supervisorctl"
+        self.poll_interval = max(0.0, poll_interval)
+        configured_timeout = float(os.environ.get("RESUME_AI_SUPERVISOR_TIMEOUT", str(SUPERVISOR_TIMEOUT)))
+        self.start_timeout = configured_timeout if start_timeout is None else start_timeout
+        self.stop_timeout = configured_timeout if stop_timeout is None else stop_timeout
+        if self.start_timeout <= 0 or self.stop_timeout <= 0:
+            raise DeploymentError("Supervisor lifecycle timeout must be positive")
+        self.clock = clock
+        self.sleep = sleep
 
     def _environment(self) -> Dict[str, str]:
         environment = os.environ.copy()
@@ -694,14 +788,85 @@ class SupervisorController:
             raise DeploymentError("Supervisor pid file is invalid") from error
         return self.process_is_owned(pid, self.config)
 
+    def _states(self) -> Dict[str, str]:
+        result = self.run(
+            [str(self.supervisorctl), "-c", str(self.config), "status"],
+            env=self._environment(),
+            capture_output=True,
+        )
+        states = {}
+        for line in result.stdout.splitlines():
+            fields = line.split()
+            if len(fields) >= 2:
+                states[fields[0]] = fields[1]
+        expected_names = {"resume-embedding", "resume-ocr"}
+        if set(states) != expected_names:
+            raise DeploymentError("Supervisor status does not contain exactly both owned workers")
+        return states
+
+    def _pause_until(self, deadline: float) -> None:
+        remaining = deadline - self.clock()
+        if remaining <= 0:
+            return
+        self.sleep(min(self.poll_interval, remaining))
+
+    def _configured_startsecs(self) -> float:
+        try:
+            values = self.config.read_text(encoding="utf-8").splitlines()
+        except (OSError, UnicodeError) as error:
+            raise DeploymentError("Supervisor configuration is unavailable") from error
+        seconds = 0.0
+        for line in values:
+            match = re.match(r"^\s*startsecs\s*=\s*(\d+)\s*$", line)
+            if match is not None:
+                seconds = max(seconds, float(match.group(1)))
+        return seconds
+
+    def _wait_started(self) -> None:
+        deadline = self.clock() + max(self.start_timeout, self._configured_startsecs())
+        failure_states = {"BACKOFF", "EXITED", "FATAL", "UNKNOWN"}
+        while True:
+            states = self._states()
+            if any(state in failure_states for state in states.values()):
+                raise DeploymentError("Supervisor worker failed during startup")
+            if all(state == "RUNNING" for state in states.values()):
+                return
+            if any(state not in {"STARTING", "RUNNING"} for state in states.values()):
+                raise DeploymentError("Supervisor reported an invalid worker startup state")
+            if self.clock() >= deadline:
+                raise DeploymentError("Supervisor workers did not reach RUNNING before timeout")
+            self._pause_until(deadline)
+
+    def _wait_stopped(self) -> None:
+        deadline = self.clock() + self.stop_timeout
+        terminal_states = {"STOPPED", "EXITED", "FATAL", "BACKOFF", "UNKNOWN"}
+        while True:
+            try:
+                states = self._states()
+            except CommandError:
+                if not self._owned_running() and not _lexists(self.root / "run" / "supervisor.sock"):
+                    return
+                raise
+            workers_stopped = all(state in terminal_states for state in states.values())
+            supervisor_stopped = not self._owned_running()
+            socket_gone = not _lexists(self.root / "run" / "supervisor.sock")
+            if workers_stopped and supervisor_stopped:
+                cleanup_stale_supervisor_state(self.root, self.process_is_owned)
+                if socket_gone or not _lexists(self.root / "run" / "supervisor.sock"):
+                    return
+            if self.clock() >= deadline:
+                raise DeploymentError("Supervisor workers or daemon did not stop before timeout")
+            self._pause_until(deadline)
+
     def start(self) -> None:
         if self._owned_running():
-            self.status()
+            self._wait_started()
             return
         cleanup_stale_supervisor_state(self.root, self.process_is_owned)
         if not os.access(str(self.supervisord), os.X_OK):
             raise DeploymentError("Supervisor is unavailable in the embedding environment")
         self.run([str(self.supervisord), "-c", str(self.config)], env=self._environment())
+        self._wait_started()
 
     def stop(self) -> None:
         if not self._owned_running():
@@ -713,20 +878,12 @@ class SupervisorController:
             [str(self.supervisorctl), "-c", str(self.config), "shutdown"],
             env=self._environment(),
         )
+        self._wait_stopped()
 
     def status(self) -> None:
         if not self._owned_running():
             raise DeploymentError("owned Supervisor process is not running")
-        result = self.run(
-            [str(self.supervisorctl), "-c", str(self.config), "status"],
-            env=self._environment(),
-            capture_output=True,
-        )
-        states = {}
-        for line in result.stdout.splitlines():
-            fields = line.split()
-            if len(fields) >= 2:
-                states[fields[0]] = fields[1]
+        states = self._states()
         expected = {"resume-embedding": "RUNNING", "resume-ocr": "RUNNING"}
         if states != expected:
             raise DeploymentError("Supervisor does not report both owned workers RUNNING")
@@ -981,10 +1138,16 @@ def _build_release(conda: str, snapshot: Path, asset_root: Path, release: Path, 
                 symlinks=True,
             )
         _copy_services(asset_root, build_root)
+        validate_installed_release(snapshot, asset_root, build_root)
         marker = build_root / ".complete"
         marker.write_bytes((release_id + "\n").encode("ascii"))
         os.chmod(str(marker), 0o600)
-        os.rename(str(build_root), str(release))
+        with marker.open("r+b") as handle:
+            os.fsync(handle.fileno())
+        _fsync_directory(build_root)
+        release.parent.mkdir(parents=True, exist_ok=True, mode=0o700)
+        os.replace(str(build_root), str(release))
+        _fsync_directory(release.parent)
     except Exception:
         shutil.rmtree(str(build_root), ignore_errors=True)
         raise
@@ -1049,6 +1212,58 @@ def validate_installed_release(snapshot: Path, asset_root: Path, release: Path) 
         )
     if not os.access(str(release / "envs" / "embedding" / "bin" / "supervisord"), os.X_OK):
         raise DeploymentError("Supervisor is missing from the embedding environment")
+    _validate_release_tree(release)
+
+
+def _validate_release_tree(release: Path) -> None:
+    _require_directory(release, "published release", writable=False)
+    for current, directory_names, file_names in os.walk(str(release), followlinks=False):
+        current_path = Path(current)
+        for name in directory_names:
+            path = current_path / name
+            value = _lstat(path)
+            if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+                raise DeploymentError("published release contains an unsafe directory")
+            if value.st_mode & 0o022:
+                raise DeploymentError("published release directory has unsafe permissions")
+        for name in file_names:
+            path = current_path / name
+            value = _lstat(path)
+            if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+                raise DeploymentError("published release contains an unsafe file")
+            if value.st_mode & 0o022:
+                raise DeploymentError("published release file has unsafe permissions")
+
+
+def validate_published_release(root: Path, release_id: str) -> Path:
+    release = validate_release(root, release_id)
+    _validate_release_tree(release)
+    for required in (
+        release / "models" / "Qwen3-Embedding-8B",
+        release / "models" / "DeepSeek-OCR-2",
+        release / "services" / "bin",
+        release / "services" / "systemd",
+    ):
+        _require_directory(required, "published release component", writable=False)
+    for name, version, module in (
+        ("embedding", "3.10", "resume_embedding_worker.main"),
+        ("ocr", "3.12", "resume_ocr_worker.main"),
+    ):
+        python = release / "envs" / name / "bin" / "python"
+        if not os.access(str(python), os.X_OK):
+            raise DeploymentError("published {} environment is unavailable".format(name))
+        _run(
+            [
+                str(python),
+                "-c",
+                "import sys; assert sys.version_info[:2] == tuple(map(int, {!r}.split('.'))); import {}".format(
+                    version, module
+                ),
+            ]
+        )
+    if not os.access(str(release / "envs" / "embedding" / "bin" / "supervisord"), os.X_OK):
+        raise DeploymentError("published release is missing Supervisor")
+    return release
 
 
 def _ensure_link(path: Path, target: str) -> None:
@@ -1073,10 +1288,8 @@ def _ensure_token(path: Path) -> None:
     if _lexists(path):
         _read_token(path)
         return
-    temporary = path.parent / (".{}.{}".format(path.name, os.getpid()))
-    temporary.write_text(secrets.token_urlsafe(48) + "\n", encoding="ascii")
-    os.chmod(str(temporary), 0o600)
-    os.replace(str(temporary), str(path))
+    _require_directory(path.parent, "token directory")
+    _atomic_private_write(path, (secrets.token_urlsafe(48) + "\n").encode("ascii"))
     _read_token(path)
 
 
@@ -1087,6 +1300,7 @@ def _install(arguments: argparse.Namespace, asset_root: Path) -> None:
     python_bin = os.environ.get("PYTHON_BIN", "python3")
 
     plan = prepare_install(root_arg, bundle_arg, asset_root)
+    _require_heqing()
     with InstallLock(plan.root):
         _host_preflight()
         conda_paths = _conda_preflight(conda, python_bin)
@@ -1100,7 +1314,7 @@ def _install(arguments: argparse.Namespace, asset_root: Path) -> None:
         )
         existing_metadata = load_controller_metadata(plan.root) if _lexists(plan.root) else None
         backend = select_controller(plan.root, existing_metadata, systemd_available)
-        unit_directory = Path.home() / ".config" / "systemd" / "user" if backend == "systemd" else None
+        unit_directory = HEQING_HOME / ".config" / "systemd" / "user" if backend == "systemd" else None
         if unit_directory is not None:
             _inspect_destination(unit_directory, "systemd unit directory")
             for unit in UNITS:
@@ -1123,6 +1337,7 @@ def _install(arguments: argparse.Namespace, asset_root: Path) -> None:
                 _build_release(conda, snapshot, plan.asset_root, release, plan.deployment_id)
                 validate_release(plan.root, plan.deployment_id)
             validate_installed_release(snapshot, plan.asset_root, release)
+            validate_published_release(plan.root, plan.deployment_id)
             _ensure_runtime_links(plan.root)
             _ensure_token(plan.root / "run" / "embedding.token")
             _ensure_token(plan.root / "run" / "ocr.token")
@@ -1133,6 +1348,7 @@ def _install(arguments: argparse.Namespace, asset_root: Path) -> None:
                 plan.deployment_id,
                 controller,
                 lambda release_id: verify_workers_ready(plan.root, release_id),
+                release_validator=validate_published_release,
             )
         finally:
             shutil.rmtree(str(snapshot.parent), ignore_errors=True)
@@ -1143,8 +1359,11 @@ def _install(arguments: argparse.Namespace, asset_root: Path) -> None:
 
 
 def _load_owned_controller(root: Path) -> Any:
+    _require_heqing()
     validate_root_path(root)
     _require_directory(root, "installation root")
+    active_release = current_release_id(root)
+    preflight_managed_paths(root, active_release or ("0" * 64))
     metadata = load_controller_metadata(root)
     if metadata is None:
         raise DeploymentError("controller ownership metadata is missing")
@@ -1152,6 +1371,7 @@ def _load_owned_controller(root: Path) -> Any:
 
 
 def _control(command: str, root: Path) -> None:
+    _require_heqing()
     controller = _load_owned_controller(root)
     if command == "start":
         release_id = current_release_id(root)
@@ -1172,12 +1392,13 @@ def _control(command: str, root: Path) -> None:
 
 
 def _rollback(root: Path, release_id: str) -> None:
+    _require_heqing()
     validate_root_path(root)
     with InstallLock(root):
         current = current_release_id(root)
         if current is None:
             raise DeploymentError("no active release exists")
-        validate_release(root, release_id)
+        validate_published_release(root, release_id)
         preflight_managed_paths(root, release_id)
         controller = _load_owned_controller(root)
         transactional_activate(
@@ -1185,6 +1406,7 @@ def _rollback(root: Path, release_id: str) -> None:
             release_id,
             controller,
             lambda active_id: verify_workers_ready(root, active_id),
+            release_validator=validate_published_release,
         )
     print("Rollback active at {}".format(root / "current"))
 

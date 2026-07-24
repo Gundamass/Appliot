@@ -71,12 +71,16 @@ setup() {
 }
 
 @test "repeat upgrade stops old workers and restarts and verifies both new workers" {
-  run_lifecycle_test test_upgrade_stops_switches_starts_and_verifies_both_workers
+  run_lifecycle_test \
+    test_upgrade_stops_switches_starts_and_verifies_both_workers \
+    test_install_runs_complete_transaction_with_fake_host_boundaries
   [ "$status" -eq 0 ]
 }
 
 @test "startup failure rolls back and verifies both previous workers" {
-  run_lifecycle_test test_startup_failure_restores_and_verifies_previous_release
+  run_lifecycle_test \
+    test_startup_failure_restores_and_verifies_previous_release \
+    test_install_activation_failure_restores_previous_release_transactionally
   [ "$status" -eq 0 ]
 }
 
@@ -89,7 +93,10 @@ setup() {
   run_lifecycle_test \
     test_systemd_start_installs_both_units_and_uses_fake_commands \
     test_systemd_stop_failure_is_propagated \
-    test_supervisor_start_uses_only_owned_state_and_fake_command
+    test_supervisor_start_uses_only_owned_state_and_fake_command \
+    test_supervisor_start_polls_starting_until_both_workers_run \
+    test_supervisor_start_rejects_fatal_worker_state \
+    test_supervisor_stop_polls_workers_and_supervisord_to_termination
   [ "$status" -eq 0 ]
 }
 
@@ -119,12 +126,25 @@ setup() {
   run_lifecycle_test \
     test_release_validation_is_exact_and_rejects_symlinks \
     test_current_target_must_be_exact_managed_release \
-    test_rollback_command_and_runbook_use_validated_helper
+    test_rollback_command_and_runbook_use_validated_helper \
+    test_manual_rollback_requires_published_release_contents_not_marker_alone
   [ "$status" -eq 0 ]
 }
 
 @test "bundle TOCTOU is rejected from the staged verification closure" {
-  run_lifecycle_test test_verified_staging_rejects_bundle_toctou
+  run_lifecycle_test \
+    test_verified_staging_rejects_bundle_toctou \
+    test_install_detects_bundle_mutation_between_initial_verify_and_staging
+  [ "$status" -eq 0 ]
+}
+
+@test "lifecycle ownership and exclusive temp writes reject unsafe callers and paths" {
+  run_lifecycle_test \
+    test_every_lifecycle_entrypoint_rejects_non_heqing \
+    test_foreign_owned_managed_path_is_rejected \
+    test_controller_metadata_temp_file_is_exclusive \
+    test_token_temp_file_is_exclusive \
+    test_post_build_validation_failure_never_publishes_completion_marker
   [ "$status" -eq 0 ]
 }
 

@@ -157,3 +157,62 @@ Commit message: `fix: make remote deployment transactional`
    wheelhouses (including Supervisor), and end-to-end offline Conda/GPU startup
    remain the external artifact and host acceptance blockers already listed
    above.
+
+## Phase B Follow-up Review Evidence
+
+Commit message: `fix: complete remote deployment transactions`
+
+- RED/GREEN: focused lifecycle tests first failed for missing Supervisor bounded
+  polling, activation-error recovery, pre-marker publication validation, caller
+  and ownership gates, and exclusive metadata/token temporary writes. The final
+  deterministic suite covers delayed `STARTING` to `RUNNING`, `FATAL` startup,
+  delayed shutdown through worker exit and Supervisor pid cleanup, activation
+  failure recovery, and loud artifact-preserving rollback failure behavior.
+- Supervisor startup now polls the exact two owned programs until both are
+  `RUNNING`, with the configured `startsecs` as a lower deadline bound and a
+  positive configurable timeout. `BACKOFF`, `EXITED`, `FATAL`, unexpected
+  states, and deadline expiry fail loudly. Shutdown polls terminal worker states
+  and owned supervisord/socket disappearance; stale state is cleaned only after
+  ownership/liveness checks.
+- Stop, activation, start, controller status, and authenticated readiness now
+  share one recovery boundary. If symlink creation or `os.replace` activation
+  fails after an old stop, the installer validates, reactivates, restarts, and
+  re-verifies the previous release. Recovery failure preserves all artifacts and
+  raises `ROLLBACK FAILED`.
+- Release build validation now occurs in inactive staging before `.complete` is
+  created. The final marker is fsynced and only then is the release atomically
+  moved under `releases/`. Manual rollback calls deep published-release
+  validation, including release-tree safety, required models/services, Python
+  versions/imports, and Supervisor availability; a marker alone is insufficient.
+- Every install, start, stop, status, and rollback path rejects callers other
+  than `heqing`, including root. Existing managed root/release/current/
+  controller/runtime/token/log paths are lstat ownership-checked before lifecycle
+  operations. Systemd uses the fixed `heqing` home rather than `Path.home()`.
+- Controller metadata and service tokens now use same-directory exclusive,
+  no-follow temporary files with mode `0600`, fsync, and atomic replacement. A
+  pre-existing temporary file or symlink is rejected without deletion.
+- `_install` transaction tests use a private bundle and fake host, Conda,
+  controller, readiness, and verifier boundaries. They prove a successful
+  first install flow, bundle mutation between initial verification and staging,
+  activation rollback, no published marker after post-build validation failure,
+  non-`heqing` rejection, foreign ownership rejection, and temporary-path
+  attack rejection. Bats names the focused acceptance tests for Linux runs.
+
+### Fresh Follow-up Verification
+
+- `python -m unittest deploy.remote.tests.test_verify_assets
+  deploy.remote.tests.test_deployment_lifecycle -v`: 73 tests ran successfully;
+  6 skips require Windows symlink privilege or Linux Unix-socket behavior.
+- Python compilation, Python 3.8 AST compatibility, Git for Windows `bash -n`,
+  and whitespace checks are run with the final commit gate below.
+
+### Follow-up External-Only Remainder
+
+1. Bats and ShellCheck remain unavailable locally; run the checked-in Bats
+   acceptance suite and ShellCheck on target-compatible Linux.
+2. Native Linux symlink/socket behavior, actual `heqing` ownership metadata,
+   user-systemd linger, and real Supervisor process ownership require the remote
+   Ubuntu host.
+3. Verified model snapshots/manifests, Linux hash locks, wheelhouses, offline
+   Conda creation, GPU startup, and real systemd/Supervisor readiness remain
+   external asset and host acceptance blockers.
