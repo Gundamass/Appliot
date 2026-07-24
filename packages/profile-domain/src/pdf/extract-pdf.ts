@@ -87,7 +87,7 @@ export async function extractPdf(bytes: Uint8Array, ocr: OcrEngine): Promise<Ext
         } else {
           const image = await renderPageForOcr(page);
           const ocrText = await ocr.recognize(image);
-          if (ocrText.trim() === "") throw new OcrOutputError("OCR returned blank text");
+          if (!hasUsablePdfText(ocrText)) throw new OcrOutputError("OCR returned blank text");
           pages.push({ page: pageNumber, text: ocrText, source: "ocr" });
         }
       } finally {

@@ -145,6 +145,17 @@ describe("extractPdf", () => {
     })).rejects.toBeInstanceOf(OcrOutputError);
   });
 
+  it.each([
+    ["control-only", "\u0000"],
+    ["zero-width-only", "\u200B\u200C\u200D\u2060\uFEFF"]
+  ])("rejects %s OCR output without appending an empty page", async (_caseName, ocrText) => {
+    const pdf = await createScannedPdf();
+
+    await expect(extractPdf(pdf, {
+      async recognize(): Promise<string> { return ocrText; }
+    })).rejects.toBeInstanceOf(OcrOutputError);
+  });
+
   it("propagates malformed PDF errors", async () => {
     await expect(extractPdf(Buffer.from("%PDF-malformed"), unusedOcr)).rejects.toBeInstanceOf(InvalidPdfDocumentError);
   });
