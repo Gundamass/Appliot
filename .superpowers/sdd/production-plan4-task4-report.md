@@ -296,3 +296,36 @@ Commit message: `fix: guard activation cleanup identity`
   passed.
 
 External-only blockers remain unchanged.
+
+## Phase B Non-destructive Activation Failure Evidence
+
+Commit message: `fix: make activation failure non-destructive`
+
+- RED: `python -m unittest -v deploy.remote.tests.test_deployment_lifecycle.DeploymentLifecycleTests.test_activation_cleanup_preserves_attacker_replacement_after_replace_failure deploy.remote.tests.test_deployment_lifecycle.DeploymentLifecycleTests.test_activation_failed_replace_leaves_created_random_temp_untouched`
+  showed that the attacker-replacement case survived the prior identity check but
+  the normal failed-replace case still deleted the exclusively created random
+  temporary entry.
+- GREEN: the same two tests passed after removing failed-replace pathname cleanup,
+  together with collision preservation and both activation rollback tests.
+- After exclusive 128-bit random same-directory symlink creation,
+  `activate_release` now performs only atomic `os.replace`. If replacement fails,
+  it raises `DeploymentError` and leaves the random `.current.<32 lowercase hex>`
+  entry untouched. It performs no `lstat`, `readlink`, or `unlink` in the failure
+  path, so neither a create-to-check race nor a check-to-unlink race exists.
+- The obsolete activation identity and conditional cleanup helpers were removed.
+  Collision retry and successful atomic activation behavior are unchanged.
+
+### Exact Non-destructive Verification
+
+- `python -m unittest deploy.remote.tests.test_verify_assets deploy.remote.tests.test_deployment_lifecycle -v`
+  ran 78 tests successfully with 7 expected platform capability skips.
+- `$env:PYTHONPYCACHEPREFIX=<fresh external temp>; python -m py_compile deploy/remote/verify-assets.py deploy/remote/deployment.py deploy/remote/tests/test_verify_assets.py deploy/remote/tests/test_deployment_lifecycle.py`
+  passed.
+- `python -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding='utf-8'), filename=p, feature_version=(3, 8)) for p in ('deploy/remote/verify-assets.py','deploy/remote/deployment.py')]"`
+  passed.
+- `C:/Program Files/Git/bin/bash.exe -n deploy/remote/install.sh deploy/remote/bin/rollback.sh deploy/remote/bin/run-embedding.sh deploy/remote/bin/run-ocr.sh deploy/remote/bin/start-all.sh deploy/remote/bin/status.sh deploy/remote/bin/stop-all.sh`
+  passed.
+- `git diff --check -- deploy/remote .superpowers/sdd/production-plan4-task4-report.md`
+  passed.
+
+External-only blockers remain unchanged.
