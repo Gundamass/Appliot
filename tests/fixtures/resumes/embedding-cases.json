@@ -1,0 +1,47 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "sanitized-chinese-backend-experience",
+      "query": "候选人是否有 Go 后端服务开发经验？",
+      "facts": [
+        {
+          "id": "relevant-go-service",
+          "text": "测试候选人在合成项目中使用 Go 开发订单服务，并维护 HTTP API。",
+          "relevant": true
+        },
+        {
+          "id": "unrelated-language",
+          "text": "测试候选人的兴趣是城市摄影和中文写作。",
+          "relevant": false
+        },
+        {
+          "id": "unrelated-education",
+          "text": "测试候选人完成了合成视觉设计课程。",
+          "relevant": false
+        }
+      ]
+    },
+    {
+      "id": "sanitized-chinese-data-analysis-skill",
+      "query": "候选人是否具备 Python 数据分析能力？",
+      "facts": [
+        {
+          "id": "relevant-python-analysis",
+          "text": "测试候选人在合成实习中使用 Python 和 SQL 生成数据质量报告。",
+          "relevant": true
+        },
+        {
+          "id": "unrelated-volunteer",
+          "text": "测试候选人参加过合成社区植树活动。",
+          "relevant": false
+        },
+        {
+          "id": "unrelated-language",
+          "text": "测试候选人学习过基础法语会话。",
+          "relevant": false
+        }
+      ]
+    }
+  ]
+}

@@ -1,0 +1,29 @@
+{
+  "schemaVersion": 1,
+  "cases": [
+    {
+      "id": "sanitized-chinese-page",
+      "imagePath": "ocr-pages/sanitized-chinese.png",
+      "contentType": "image/png",
+      "anchors": ["测试候选人", "软件工程师", "合成项目"]
+    },
+    {
+      "id": "sanitized-english-page",
+      "imagePath": "ocr-pages/sanitized-english.png",
+      "contentType": "image/png",
+      "anchors": ["Synthetic Candidate", "Platform Engineer", "Example Systems"]
+    },
+    {
+      "id": "sanitized-scanned-page",
+      "imagePath": "ocr-pages/sanitized-scanned.png",
+      "contentType": "image/png",
+      "anchors": ["Scan Fixture", "Sample Operations", "2024"]
+    },
+    {
+      "id": "sanitized-double-column-page",
+      "imagePath": "ocr-pages/sanitized-double-column.png",
+      "contentType": "image/png",
+      "anchors": ["Left Column", "Right Column", "Synthetic Resume"]
+    }
+  ]
+}
