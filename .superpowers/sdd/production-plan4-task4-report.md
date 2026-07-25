@@ -216,3 +216,47 @@ Commit message: `fix: complete remote deployment transactions`
 3. Verified model snapshots/manifests, Linux hash locks, wheelhouses, offline
    Conda creation, GPU startup, and real systemd/Supervisor readiness remain
    external asset and host acceptance blockers.
+
+## Phase B Lifecycle Race Re-review Evidence
+
+Commit message: `fix: close deployment lifecycle races`
+
+- RED command:
+  `python -m unittest -v deploy.remote.tests.test_deployment_lifecycle.DeploymentLifecycleTests.test_supervisor_stop_retries_transient_status_failure_until_owned_state_disappears deploy.remote.tests.test_deployment_lifecycle.DeploymentLifecycleTests.test_lifecycle_entrypoints_reject_non_heqing_before_prepare_or_filesystem deploy.remote.tests.test_deployment_lifecycle.DeploymentLifecycleTests.test_activation_never_unlinks_preexisting_predictable_temp`
+  failed all three confirmed regressions: transient Supervisor status failure
+  escaped immediately, install invoked `prepare_install` for root, and activation
+  deleted the pre-existing `.current.<pid>` path.
+- GREEN command: the same three focused tests passed after the implementation;
+  activation rollback coverage was also run in the same focused gate and passed.
+- `SupervisorController._wait_stopped` now treats `supervisorctl status` command
+  failure as a transient shutdown observation. It keeps bounded polling while an
+  owned pid or socket remains, succeeds only after both disappear, and raises the
+  existing deadline error when `stop_timeout` expires.
+- `_install` now calls `_require_heqing()` before constructing paths or invoking
+  `prepare_install`, so a non-`heqing` caller cannot read or verify bundle or
+  deployment assets. The entry-order test records zero prepare calls.
+- `activate_release` now generates 128-bit random same-directory temporary names,
+  uses exclusive symlink creation, retries collisions without deleting them,
+  preserves atomic `os.replace`, and cleans only the temporary link it created
+  if replacement fails. Tests preserve a predictable attacker file and a random
+  collision; the native Linux test also covers a pre-existing symlink and real
+  activation.
+
+### Exact Re-review Verification
+
+- `python -m unittest deploy.remote.tests.test_verify_assets deploy.remote.tests.test_deployment_lifecycle -v`
+  ran 76 tests successfully with 7 skips for Windows symlink privilege or native
+  Linux Unix-socket/symlink behavior.
+- `$env:PYTHONPYCACHEPREFIX=<fresh external temp>; python -m py_compile deploy/remote/verify-assets.py deploy/remote/deployment.py deploy/remote/tests/test_verify_assets.py deploy/remote/tests/test_deployment_lifecycle.py`
+  passed. The external cache prefix avoided an access-denied untracked Windows
+  cache file without changing or staging repository caches.
+- `python -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding='utf-8'), filename=p, feature_version=(3, 8)) for p in ('deploy/remote/verify-assets.py','deploy/remote/deployment.py')]"`
+  passed.
+- `C:/Program Files/Git/bin/bash.exe -n deploy/remote/install.sh deploy/remote/bin/rollback.sh deploy/remote/bin/run-embedding.sh deploy/remote/bin/run-ocr.sh deploy/remote/bin/start-all.sh deploy/remote/bin/status.sh deploy/remote/bin/stop-all.sh`
+  passed.
+- `git diff --check -- deploy/remote .superpowers/sdd/production-plan4-task4-report.md`
+  passed.
+
+External-only blockers remain unchanged: Bats/ShellCheck, native Linux ownership
+and socket/symlink acceptance, real model manifests/locks/wheelhouses, and target
+Ubuntu Conda/GPU/systemd/Supervisor acceptance.

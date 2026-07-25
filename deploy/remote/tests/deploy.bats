@@ -140,11 +140,18 @@ setup() {
 
 @test "lifecycle ownership and exclusive temp writes reject unsafe callers and paths" {
   run_lifecycle_test \
-    test_every_lifecycle_entrypoint_rejects_non_heqing \
+    test_lifecycle_entrypoints_reject_non_heqing_before_prepare_or_filesystem \
     test_foreign_owned_managed_path_is_rejected \
     test_controller_metadata_temp_file_is_exclusive \
     test_token_temp_file_is_exclusive \
     test_post_build_validation_failure_never_publishes_completion_marker
+  [ "$status" -eq 0 ]
+}
+
+@test "Supervisor shutdown retries transient status failures and activation temp collisions are preserved" {
+  run_lifecycle_test \
+    test_supervisor_stop_retries_transient_status_failure_until_owned_state_disappears \
+    test_activation_uses_exclusive_random_temp_and_preserves_collisions
   [ "$status" -eq 0 ]
 }
 

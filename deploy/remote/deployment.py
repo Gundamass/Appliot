@@ -520,11 +520,27 @@ def current_release_id(root: Path) -> Optional[str]:
 
 def activate_release(root: Path, release_id: str) -> None:
     validate_release(root, release_id)
-    temporary = root / (".current.{}".format(os.getpid()))
-    if _lexists(temporary):
-        temporary.unlink()
-    temporary.symlink_to(Path("releases") / release_id, target_is_directory=True)
-    os.replace(str(temporary), str(root / "current"))
+    temporary = None
+    for _attempt in range(16):
+        candidate = root / (".current." + secrets.token_hex(16))
+        try:
+            candidate.symlink_to(Path("releases") / release_id, target_is_directory=True)
+        except FileExistsError:
+            continue
+        except OSError as error:
+            raise DeploymentError("release activation temporary link could not be created") from error
+        temporary = candidate
+        break
+    if temporary is None:
+        raise DeploymentError("release activation could not reserve a temporary link")
+    try:
+        os.replace(str(temporary), str(root / "current"))
+    except OSError as error:
+        try:
+            temporary.unlink()
+        except OSError:
+            pass
+        raise DeploymentError("release activation atomic replace failed") from error
 
 
 def _remove_current(root: Path) -> None:
@@ -846,7 +862,10 @@ class SupervisorController:
             except CommandError:
                 if not self._owned_running() and not _lexists(self.root / "run" / "supervisor.sock"):
                     return
-                raise
+                if self.clock() >= deadline:
+                    raise DeploymentError("Supervisor workers or daemon did not stop before timeout")
+                self._pause_until(deadline)
+                continue
             workers_stopped = all(state in terminal_states for state in states.values())
             supervisor_stopped = not self._owned_running()
             socket_gone = not _lexists(self.root / "run" / "supervisor.sock")
@@ -1294,13 +1313,13 @@ def _ensure_token(path: Path) -> None:
 
 
 def _install(arguments: argparse.Namespace, asset_root: Path) -> None:
+    _require_heqing()
     root_arg = Path(arguments.root)
     bundle_arg = Path(arguments.bundle)
     conda = os.environ.get("CONDA_EXE", "conda")
     python_bin = os.environ.get("PYTHON_BIN", "python3")
 
     plan = prepare_install(root_arg, bundle_arg, asset_root)
-    _require_heqing()
     with InstallLock(plan.root):
         _host_preflight()
         conda_paths = _conda_preflight(conda, python_bin)

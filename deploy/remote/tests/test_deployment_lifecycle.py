@@ -337,6 +337,58 @@ class DeploymentLifecycleTests(unittest.TestCase):
             self.assertGreaterEqual(sum("status" in call for call in calls), 2)
             self.assertFalse((root / "run" / "supervisord.pid").exists())
 
+    def test_supervisor_stop_retries_transient_status_failure_until_owned_state_disappears(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "resume-ai"
+            (root / "envs" / "embedding" / "bin").mkdir(parents=True)
+            run_dir = root / "run"
+            run_dir.mkdir()
+            services = root / "services"
+            services.mkdir()
+            supervisorctl = root / "envs" / "embedding" / "bin" / "supervisorctl"
+            supervisorctl.write_text("fixture", encoding="ascii")
+            supervisorctl.chmod(0o700)
+            config = services / "supervisord.conf"
+            config.write_text("fixture", encoding="ascii")
+            pid_path = run_dir / "supervisord.pid"
+            socket_path = run_dir / "supervisor.sock"
+            pid_path.write_text("123\n", encoding="ascii")
+            socket_path.write_text("owned socket placeholder", encoding="ascii")
+            owned = [True]
+            now = [0.0]
+            status_attempts = []
+
+            def run(arguments, **_kwargs):
+                if arguments[-1] == "shutdown":
+                    return type("Result", (), {"stdout": ""})()
+                status_attempts.append(list(arguments))
+                raise deployment.CommandError("Supervisor status temporarily unavailable")
+
+            def sleep(seconds: float) -> None:
+                now[0] += max(seconds, 1.0)
+                if now[0] >= 2.0:
+                    owned[0] = False
+                    if pid_path.exists():
+                        pid_path.unlink()
+                    if socket_path.exists():
+                        socket_path.unlink()
+
+            controller = deployment.SupervisorController(
+                root,
+                run=run,
+                process_is_owned=lambda _pid, _config: owned[0],
+                poll_interval=1,
+                stop_timeout=5,
+                clock=lambda: now[0],
+                sleep=sleep,
+            )
+            controller.stop()
+
+            self.assertEqual(len(status_attempts), 3)
+            self.assertFalse(pid_path.exists())
+            self.assertFalse(socket_path.exists())
+
     def test_supervisor_start_rejects_fatal_worker_state(self) -> None:
         deployment = load_deployment()
         with tempfile.TemporaryDirectory() as temporary:
@@ -522,18 +574,13 @@ class DeploymentLifecycleTests(unittest.TestCase):
         finally:
             deployment.current_user_name = original_user
 
-    def test_every_lifecycle_entrypoint_rejects_non_heqing(self) -> None:
+    def test_lifecycle_entrypoints_reject_non_heqing_before_prepare_or_filesystem(self) -> None:
         deployment = load_deployment()
         original_user = deployment.current_user_name
         original_prepare = deployment.prepare_install
+        prepare_calls = []
         deployment.current_user_name = lambda: "root"
-        deployment.prepare_install = lambda _root, _bundle, _assets: SimpleNamespace(
-            root=Path("relative-root"),
-            bundle=Path("bundle"),
-            asset_root=REMOTE_DIR,
-            bundle_fingerprint="a" * 64,
-            deployment_id="b" * 64,
-        )
+        deployment.prepare_install = lambda *_args: prepare_calls.append(True)
         try:
             for command in ("start", "stop", "status"):
                 with self.subTest(command=command):
@@ -546,9 +593,75 @@ class DeploymentLifecycleTests(unittest.TestCase):
                     SimpleNamespace(root="relative-root", bundle="bundle"),
                     REMOTE_DIR,
                 )
+            self.assertEqual(prepare_calls, [])
         finally:
             deployment.current_user_name = original_user
             deployment.prepare_install = original_prepare
+
+    @unittest.skipIf(os.name == "nt", "real activation symlinks require Linux")
+    def test_activation_uses_exclusive_random_temp_and_preserves_collisions(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "resume-ai"
+            make_release(root, NEW_ID)
+            predictable = root / (".current." + str(os.getpid()))
+            predictable.write_text("attacker-owned", encoding="ascii")
+            outside = Path(temporary) / "outside"
+            outside.mkdir()
+            collision = root / ".current.collision"
+            collision.symlink_to(outside, target_is_directory=True)
+            values = iter(("collision", "fresh"))
+            original_token_hex = deployment.secrets.token_hex
+            deployment.secrets.token_hex = lambda _size: next(values)
+            try:
+                deployment.activate_release(root, NEW_ID)
+            finally:
+                deployment.secrets.token_hex = original_token_hex
+
+            self.assertEqual(predictable.read_text(encoding="ascii"), "attacker-owned")
+            self.assertTrue(collision.is_symlink())
+            self.assertEqual(os.readlink(str(collision)), str(outside))
+            self.assertEqual(os.readlink(str(root / "current")), "releases/" + NEW_ID)
+            self.assertFalse((root / ".current.fresh").exists())
+
+    def test_activation_never_unlinks_preexisting_predictable_temp(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "resume-ai"
+            make_release(root, NEW_ID)
+            predictable = root / (".current." + str(os.getpid()))
+            predictable.write_text("attacker-owned", encoding="ascii")
+            collision = root / ".current.collision"
+            collision.write_text("collision-owned", encoding="ascii")
+            values = iter(("collision", "fresh"))
+            created = []
+            original_token_hex = deployment.secrets.token_hex
+            original_symlink_to = Path.symlink_to
+            original_replace = deployment.os.replace
+
+            def fake_symlink_to(path: Path, target: Path, target_is_directory: bool = False) -> None:
+                if os.path.lexists(str(path)):
+                    raise FileExistsError(str(path))
+                created.append((path, target, target_is_directory))
+                path.write_text(str(target), encoding="ascii")
+
+            def fake_replace(source: str, destination: str) -> None:
+                self.assertEqual(Path(destination), root / "current")
+                Path(source).unlink()
+
+            deployment.secrets.token_hex = lambda _size: next(values)
+            Path.symlink_to = fake_symlink_to
+            deployment.os.replace = fake_replace
+            try:
+                deployment.activate_release(root, NEW_ID)
+            finally:
+                deployment.secrets.token_hex = original_token_hex
+                Path.symlink_to = original_symlink_to
+                deployment.os.replace = original_replace
+
+            self.assertEqual(predictable.read_text(encoding="ascii"), "attacker-owned")
+            self.assertEqual(collision.read_text(encoding="ascii"), "collision-owned")
+            self.assertEqual(created[0][0], root / ".current.fresh")
 
     def test_foreign_owned_managed_path_is_rejected(self) -> None:
         deployment = load_deployment()
