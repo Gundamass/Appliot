@@ -1,53 +1,40 @@
 import assert from "node:assert/strict";
-import { mkdtemp, readFile, writeFile } from "node:fs/promises";
-import { tmpdir } from "node:os";
+import { readFile } from "node:fs/promises";
 import { dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import test from "node:test";
 
-import { verifyRemoteWorkers } from "./verify-remote-workers.mjs";
+import { runRemoteWorkerVerifier, verifyRemoteWorkers } from "./verify-remote-workers.mjs";
 
 const QWEN_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af";
 const OCR_REVISION = "aaa02f3811945a91062062994c5c4a3f4c0af2b0";
-const PNG = Buffer.from("iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR42mNk+M/wHwAF/gL+oN7QAAAAAElFTkSuQmCC", "base64");
+const RAW_RESUME_SECRET = "RAW_RESUME_SECRET";
+const EMBEDDING_TOKEN = "embedding-token-secret";
+const OCR_TOKEN = "ocr-token-secret";
+const EMBEDDING_URL = "http://127.0.0.1:18080";
+const OCR_URL = "http://127.0.0.1:43121";
+const fixturesDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "../tests/fixtures/resumes");
 
-function environment() {
+function environment(overrides = {}) {
   return {
-    EMBEDDING_BASE_URL: "http://127.0.0.1:18080",
-    EMBEDDING_API_TOKEN: "embedding-test-token",
-    OCR_BASE_URL: "http://127.0.0.1:43121",
-    OCR_API_TOKEN: "ocr-test-token"
+    EMBEDDING_BASE_URL: EMBEDDING_URL,
+    EMBEDDING_API_TOKEN: EMBEDDING_TOKEN,
+    OCR_BASE_URL: OCR_URL,
+    OCR_API_TOKEN: OCR_TOKEN,
+    ...overrides
   };
 }
 
-async function fixtures() {
-  const root = await mkdtemp(join(tmpdir(), "remote-worker-verifier-"));
-  const embeddingFixturePath = join(root, "embedding-cases.json");
-  const ocrFixturePath = join(root, "ocr-anchors.json");
-  const imagePath = join(root, "page.png");
-  await writeFile(imagePath, PNG);
-  await writeFile(embeddingFixturePath, JSON.stringify({
-    schemaVersion: 1,
-    cases: [{
-      id: "sanitized-chinese-relevance",
-      query: "候选人是否有 Go 后端经验？",
-      facts: [
-        { id: "relevant", text: "测试候选人使用 Go 构建合成服务。", relevant: true },
-        { id: "unrelated-one", text: "测试候选人喜欢摄影。", relevant: false },
-        { id: "unrelated-two", text: "测试候选人学习法语。", relevant: false }
-      ]
-    }]
-  }));
-  await writeFile(ocrFixturePath, JSON.stringify({
-    schemaVersion: 1,
-    cases: [{
-      id: "sanitized-page",
-      imagePath: "page.png",
-      contentType: "image/png",
-      anchors: ["Synthetic Anchor"]
-    }]
-  }));
-  return { embeddingFixturePath, ocrFixturePath };
+async function checkedInFixtures() {
+  const embeddingFixturePath = join(fixturesDirectory, "embedding-cases.json");
+  const ocrFixturePath = join(fixturesDirectory, "ocr-anchors.json");
+  const embedding = JSON.parse(await readFile(embeddingFixturePath, "utf8"));
+  const ocr = JSON.parse(await readFile(ocrFixturePath, "utf8"));
+  const ocrPages = await Promise.all(ocr.cases.map(async (entry) => ({
+    ...entry,
+    image: await readFile(join(fixturesDirectory, entry.imagePath))
+  })));
+  return { embeddingFixturePath, ocrFixturePath, embedding, ocr, ocrPages };
 }
 
 function unitVector(index) {
@@ -56,105 +43,160 @@ function unitVector(index) {
   return vector;
 }
 
-function workerFetch() {
-  return async (url, options = {}) => {
-    const path = new URL(url).pathname;
-    if (path === "/readyz") {
-      const embedding = new URL(url).port === "18080";
-      return Response.json(embedding
+function sameBytes(left, right) {
+  return left.length === right.length && left.every((value, index) => value === right[index]);
+}
+
+function workerFetch({ embedding, ocrPages, vectorFor = defaultVectorFor, ocrTextFor } = {}) {
+  const calls = [];
+  const relevantTexts = new Set(embedding.cases.flatMap((entry) => entry.facts)
+    .filter((fact) => fact.relevant).map((fact) => fact.text));
+  const fetch = async (url, options = {}) => {
+    const parsed = new URL(url);
+    calls.push({ path: parsed.pathname, body: options.body });
+    if (parsed.pathname === "/readyz") {
+      return Response.json(parsed.port === "18080"
         ? { status: "ready", model: "Qwen/Qwen3-Embedding-8B", modelRevision: QWEN_REVISION, dimensions: 4096 }
         : { status: "ready", model: "deepseek-ai/DeepSeek-OCR-2", modelRevision: OCR_REVISION });
     }
-    if (path === "/v1/embeddings") {
+    if (parsed.pathname === "/v1/embeddings") {
       const { input } = JSON.parse(options.body);
-      const data = input.map((text, index) => ({
-        index,
-        embedding: unitVector(text.includes("Go") || text.startsWith("Instruct:") ? 0 : index + 1)
-      }));
       return Response.json({
-        model: "Qwen/Qwen3-Embedding-8B", modelRevision: QWEN_REVISION, dimensions: 4096, data
+        model: "Qwen/Qwen3-Embedding-8B",
+        modelRevision: QWEN_REVISION,
+        dimensions: 4096,
+        data: input.map((text, index) => ({
+          index,
+          embedding: vectorFor({ text, index, relevant: relevantTexts.has(text), query: text.startsWith("Instruct:") })
+        }))
       });
     }
-    if (path === "/v1/ocr") {
+    if (parsed.pathname === "/v1/ocr") {
+      const image = Buffer.from(options.body);
+      const page = ocrPages.find((entry) => sameBytes(entry.image, image));
+      if (!page) throw new Error("unexpected local test image");
       return Response.json({
-        text: "Synthetic Anchor", model: "deepseek-ai/DeepSeek-OCR-2", modelRevision: OCR_REVISION,
-        mode: "document_to_markdown", elapsedMs: 1
+        text: ocrTextFor?.(page) ?? page.anchors.join("\n"),
+        model: "deepseek-ai/DeepSeek-OCR-2",
+        modelRevision: OCR_REVISION,
+        mode: "document_to_markdown",
+        elapsedMs: 1
       });
     }
-    throw new Error("Unexpected test request.");
+    throw new Error("unexpected local test request");
   };
+  return { calls, fetch };
 }
 
-test("verifies pinned identities, 4096-dimensional unit embeddings, Chinese ranking, and OCR anchors", async () => {
-  const paths = await fixtures();
-  const result = await verifyRemoteWorkers({
-    env: environment(),
-    fetch: workerFetch(),
-    readFile,
-    ...paths
+function defaultVectorFor({ index, relevant, query }) {
+  if (query || relevant) return unitVector(0);
+  return unitVector(index + 1);
+}
+
+function assertCode(error, code) {
+  assert.equal(error?.code, code);
+  assert.equal(error?.message, code);
+  return true;
+}
+
+test("verifies every checked-in OCR page and sends each matching image once", async () => {
+  const fixtures = await checkedInFixtures();
+  const worker = workerFetch(fixtures);
+  const result = await verifyRemoteWorkers({ env: environment(), fetch: worker.fetch, readFile, ...fixtures });
+  assert.deepEqual(result, { embeddingCases: fixtures.embedding.cases.length, ocrCases: 4 });
+  const ocrCalls = worker.calls.filter((call) => call.path === "/v1/ocr");
+  assert.equal(ocrCalls.length, 4);
+  for (const page of fixtures.ocrPages) {
+    assert.equal(ocrCalls.filter((call) => sameBytes(Buffer.from(call.body), page.image)).length, 1);
+  }
+});
+
+test("rejects every omitted mandatory OCR anchor with a fixed safe code", async () => {
+  const fixtures = await checkedInFixtures();
+  for (const page of fixtures.ocrPages) {
+    for (let index = 0; index < page.anchors.length; index += 1) {
+      const worker = workerFetch({
+        ...fixtures,
+        ocrTextFor: (entry) => entry === page ? entry.anchors.filter((_, anchorIndex) => anchorIndex !== index).join("\n") : entry.anchors.join("\n")
+      });
+      await assert.rejects(
+        () => verifyRemoteWorkers({ env: environment(), fetch: worker.fetch, readFile, ...fixtures }),
+        (error) => assertCode(error, "VERIFY_OCR_ANCHORS")
+      );
+    }
+  }
+});
+
+test("rejects a relevance tie instead of selecting fixture order", async () => {
+  const fixtures = await checkedInFixtures();
+  const worker = workerFetch({ ...fixtures, vectorFor: () => unitVector(0) });
+  await assert.rejects(
+    () => verifyRemoteWorkers({ env: environment(), fetch: worker.fetch, readFile, ...fixtures }),
+    (error) => assertCode(error, "VERIFY_EMBEDDING_RANKING")
+  );
+});
+
+test("rejects every invalid remote-worker base URL before fetch", async () => {
+  const fixtures = await checkedInFixtures();
+  const invalidEmbeddingUrls = [
+    "http://localhost:18080", "http://[::1]:18080", "https://127.0.0.1:18080",
+    "http://127.0.0.1:18081", "http://user:pass@127.0.0.1:18080",
+    "http://127.0.0.1:18080?secret", "http://127.0.0.1:18080#secret", "http://example.test:18080"
+  ];
+  const invalidOcrUrls = invalidEmbeddingUrls.map((url) => url.replace(/18080/g, "43121"));
+  for (const url of invalidEmbeddingUrls) {
+    let calls = 0;
+    await assert.rejects(
+      () => verifyRemoteWorkers({ env: environment({ EMBEDDING_BASE_URL: url }), fetch: async () => { calls += 1; }, readFile, ...fixtures }),
+      (error) => assertCode(error, "VERIFY_CONFIG_EMBEDDING_URL")
+    );
+    assert.equal(calls, 0);
+  }
+  for (const url of invalidOcrUrls) {
+    let calls = 0;
+    await assert.rejects(
+      () => verifyRemoteWorkers({ env: environment({ OCR_BASE_URL: url }), fetch: async () => { calls += 1; }, readFile, ...fixtures }),
+      (error) => assertCode(error, "VERIFY_CONFIG_OCR_URL")
+    );
+    assert.equal(calls, 0);
+  }
+});
+
+test("CLI output excludes response data, configured URLs, and tokens", async () => {
+  const fixtures = await checkedInFixtures();
+  const output = [];
+  const worker = workerFetch({ ...fixtures });
+  const exitCode = await runRemoteWorkerVerifier({
+    verify: () => verifyRemoteWorkers({
+      env: environment(),
+      fetch: async (url, options) => {
+        if (new URL(url).pathname !== "/readyz") return worker.fetch(url, options);
+        return Response.json({
+          status: "ready", model: RAW_RESUME_SECRET, modelRevision: RAW_RESUME_SECRET, dimensions: 4096
+        });
+      },
+      readFile,
+      ...fixtures
+    }),
+    writeError: (line) => output.push(line),
+    writeSuccess: (line) => output.push(line)
   });
-  assert.deepEqual(result, { embeddingCases: 1, ocrCases: 1 });
+  const rendered = output.join("\n");
+  assert.equal(exitCode, 1);
+  assert.equal(rendered, "Remote worker verification failed: VERIFY_FAILED");
+  for (const prohibited of [RAW_RESUME_SECRET, EMBEDDING_TOKEN, OCR_TOKEN, EMBEDDING_URL, OCR_URL]) {
+    assert.equal(rendered.includes(prohibited), false);
+  }
 });
 
-test("rejects invalid vectors before reporting success", async () => {
-  const paths = await fixtures();
-  const fetch = workerFetch();
-  await assert.rejects(() => verifyRemoteWorkers({
-    env: environment(),
-    fetch: async (url, options) => {
-      const response = await fetch(url, options);
-      if (new URL(url).pathname !== "/v1/embeddings") return response;
-      const body = await response.json();
-      body.data[0].embedding[0] = Number.NaN;
-      return Response.json(body);
-    },
-    readFile,
-    ...paths
-  }), /embedding vectors/);
-});
-
-test("reports missing variables by name without exposing values", async () => {
-  const paths = await fixtures();
-  const env = environment();
-  env.EMBEDDING_API_TOKEN = "very-secret-token";
-  delete env.OCR_API_TOKEN;
-  await assert.rejects(() => verifyRemoteWorkers({ env, fetch: workerFetch(), readFile, ...paths }), (error) => {
-    assert.match(error.message, /OCR_API_TOKEN/);
-    assert.doesNotMatch(error.message, /very-secret-token/);
-    return true;
-  });
-});
-
-test("rejects a pinned worker that is not ready", async () => {
-  const paths = await fixtures();
-  const fetch = workerFetch();
-  await assert.rejects(() => verifyRemoteWorkers({
-    env: environment(),
-    fetch: async (url, options) => {
-      const response = await fetch(url, options);
-      if (new URL(url).pathname !== "/readyz") return response;
-      const body = await response.json();
-      body.status = "starting";
-      return Response.json(body);
-    },
-    readFile,
-    ...paths
-  }), /readiness state/);
-});
-
-test("checked-in fixtures remain sanitized and contain all required page categories", async () => {
-  const fixturesDirectory = resolve(dirname(fileURLToPath(import.meta.url)), "../tests/fixtures/resumes");
-  const embedding = JSON.parse(await readFile(join(fixturesDirectory, "embedding-cases.json"), "utf8"));
-  const ocr = JSON.parse(await readFile(join(fixturesDirectory, "ocr-anchors.json"), "utf8"));
-  assert.ok(embedding.cases.every((entry) => entry.id.startsWith("sanitized-") && entry.facts.length === 3));
-  assert.deepEqual(ocr.cases.map((entry) => entry.id), [
+test("checked-in fixtures remain sanitized with non-leading relevant facts", async () => {
+  const fixtures = await checkedInFixtures();
+  assert.ok(fixtures.embedding.cases.every((entry) => entry.id.startsWith("sanitized-") && entry.facts.length === 3));
+  assert.ok(fixtures.embedding.cases.every((entry) => entry.facts.findIndex((fact) => fact.relevant) > 0));
+  assert.deepEqual(fixtures.ocr.cases.map((entry) => entry.id), [
     "sanitized-chinese-page",
     "sanitized-english-page",
     "sanitized-scanned-page",
     "sanitized-double-column-page"
   ]);
-  await Promise.all(ocr.cases.map(async (entry) => {
-    const image = await readFile(join(fixturesDirectory, entry.imagePath));
-    assert.deepEqual([...image.subarray(0, 8)], [137, 80, 78, 71, 13, 10, 26, 10]);
-  }));
 });

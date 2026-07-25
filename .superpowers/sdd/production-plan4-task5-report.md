@@ -68,3 +68,50 @@ Implemented Task 5 Step 1 local acceptance artifacts:
 
 No secrets, real resume content, model payloads, or remote results were
 invented or uploaded.
+
+## Review Hardening Follow-up
+
+Commit pending: `fix: harden remote worker acceptance`
+
+### Fixed Review Findings
+
+1. All verifier failures now use fixed `VERIFY_*` codes. `VerificationError`
+   carries only its code, request/response validation never uses Node assertion
+   formatting, and the CLI always prints the fixed line
+   `Remote worker verification failed: VERIFY_FAILED`. It cannot print URLs,
+   tokens, HTTP bodies, OCR text, fixture content, or untrusted response values.
+2. Worker URLs are validated before any fixture read or fetch. The only accepted
+   embedding base URLs are `http://127.0.0.1:18080` and that exact origin with a
+   trailing slash; OCR is identical on port `43121`. Aliases, IPv6, HTTPS,
+   non-loopback hosts, other ports, credentials, queries, fragments, and extra
+   pathnames fail with a fixed configuration code.
+3. Relevance now requires the relevant score to be strictly greater than each
+   unrelated score independently. A tie fails with `VERIFY_EMBEDDING_RANKING`.
+   The checked-in synthetic embedding fixtures put the relevant item last so
+   their ordering cannot conceal a tie.
+4. Focused acceptance tests use all four checked-in OCR images. They assert
+   exactly four OCR requests, byte-match each payload to one source image, and
+   verify every individual mandatory-anchor omission fails with the fixed
+   `VERIFY_OCR_ANCHORS` code.
+
+### Review TDD Evidence
+
+1. RED: the new suite initially failed because the verifier did not export a
+   CLI boundary suitable for safe-output testing.
+2. GREEN: fixed-code failures and `runRemoteWorkerVerifier()` were added. Five
+   adversarial regressions passed; fixture-order validation then remained red.
+3. GREEN: moving each synthetic relevant fact after the two unrelated facts made
+   the final focused suite pass.
+
+### Fresh Follow-up Verification
+
+| Command | Result |
+| --- | --- |
+| `node --test scripts/verify-remote-workers.test.mjs` | PASS: 6 tests, 0 failures. Covers secret-safe CLI output, invalid URLs with zero fetch calls, ranking ties, all four image payloads, and all anchor omissions. |
+| `node --check scripts/verify-remote-workers.mjs` | PASS. |
+| `node scripts/verify-remote-workers.mjs` | Expected fail-safe result: exit 1 and only `Remote worker verification failed: VERIFY_FAILED`; no request was configured or made. |
+| `corepack pnpm test` | PASS: all workspace suites passed. |
+| `corepack pnpm typecheck` | PASS. |
+| `corepack pnpm build` | PASS. |
+
+No live Worker, paid API, GPU, tunnel, upload, token, or `.env.local` was used.
