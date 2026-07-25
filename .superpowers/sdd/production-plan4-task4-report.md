@@ -260,3 +260,39 @@ Commit message: `fix: close deployment lifecycle races`
 External-only blockers remain unchanged: Bats/ShellCheck, native Linux ownership
 and socket/symlink acceptance, real model manifests/locks/wheelhouses, and target
 Ubuntu Conda/GPU/systemd/Supervisor acceptance.
+
+## Phase B Activation Cleanup Identity Evidence
+
+Commit message: `fix: guard activation cleanup identity`
+
+- RED: `python -m unittest -v deploy.remote.tests.test_deployment_lifecycle.DeploymentLifecycleTests.test_activation_cleanup_preserves_attacker_replacement_after_replace_failure`
+  failed because the unconditional error-path `unlink()` deleted the simulated
+  attacker replacement installed after symlink creation and before failed
+  `os.replace` cleanup.
+- GREEN: the same focused regression passed together with
+  `test_activation_never_unlinks_preexisting_predictable_temp`,
+  `test_activation_failure_restores_previous_release_and_restarts_workers`, and
+  `test_install_activation_failure_restores_previous_release_transactionally`.
+- Activation records the created link's no-follow device, inode, file type, and
+  exact relative target. Identity sampling uses `lstat`, `readlink`, and a second
+  `lstat`; an unstable sample is rejected. Failed atomic replacement cleans only
+  when an immediate recheck exactly matches that captured symlink identity.
+  Missing, replaced, retargeted, or non-symlink paths are preserved.
+- Collision retry and same-directory atomic `os.replace` activation remain
+  unchanged. The regression replaces the path during failed replacement and
+  confirms the attacker content remains.
+
+### Exact Activation Cleanup Verification
+
+- `python -m unittest deploy.remote.tests.test_verify_assets deploy.remote.tests.test_deployment_lifecycle -v`
+  ran 77 tests successfully with 7 expected Windows/Linux capability skips.
+- `$env:PYTHONPYCACHEPREFIX=<fresh external temp>; python -m py_compile deploy/remote/verify-assets.py deploy/remote/deployment.py deploy/remote/tests/test_verify_assets.py deploy/remote/tests/test_deployment_lifecycle.py`
+  passed.
+- `python -c "import ast, pathlib; [ast.parse(pathlib.Path(p).read_text(encoding='utf-8'), filename=p, feature_version=(3, 8)) for p in ('deploy/remote/verify-assets.py','deploy/remote/deployment.py')]"`
+  passed.
+- `C:/Program Files/Git/bin/bash.exe -n deploy/remote/install.sh deploy/remote/bin/rollback.sh deploy/remote/bin/run-embedding.sh deploy/remote/bin/run-ocr.sh deploy/remote/bin/start-all.sh deploy/remote/bin/status.sh deploy/remote/bin/stop-all.sh`
+  passed.
+- `git diff --check -- deploy/remote .superpowers/sdd/production-plan4-task4-report.md`
+  passed.
+
+External-only blockers remain unchanged.

@@ -518,6 +518,31 @@ def current_release_id(root: Path) -> Optional[str]:
     return release_id
 
 
+def _activation_link_identity(path: Path) -> Optional[Tuple[int, int, int, str]]:
+    try:
+        before = path.lstat()
+        if not stat.S_ISLNK(before.st_mode):
+            return None
+        target = os.readlink(str(path))
+        after = path.lstat()
+    except OSError:
+        return None
+    before_identity = (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode))
+    after_identity = (after.st_dev, after.st_ino, stat.S_IFMT(after.st_mode))
+    if before_identity != after_identity or not stat.S_ISLNK(after.st_mode):
+        return None
+    return (before.st_dev, before.st_ino, stat.S_IFMT(before.st_mode), target)
+
+
+def _cleanup_activation_link(path: Path, identity: Tuple[int, int, int, str]) -> None:
+    if _activation_link_identity(path) != identity:
+        return
+    try:
+        path.unlink()
+    except OSError:
+        pass
+
+
 def activate_release(root: Path, release_id: str) -> None:
     validate_release(root, release_id)
     temporary = None
@@ -533,13 +558,13 @@ def activate_release(root: Path, release_id: str) -> None:
         break
     if temporary is None:
         raise DeploymentError("release activation could not reserve a temporary link")
+    identity = _activation_link_identity(temporary)
+    if identity is None:
+        raise DeploymentError("release activation temporary link identity is invalid")
     try:
         os.replace(str(temporary), str(root / "current"))
     except OSError as error:
-        try:
-            temporary.unlink()
-        except OSError:
-            pass
+        _cleanup_activation_link(temporary, identity)
         raise DeploymentError("release activation atomic replace failed") from error
 
 

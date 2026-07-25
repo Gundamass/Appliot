@@ -638,6 +638,8 @@ class DeploymentLifecycleTests(unittest.TestCase):
             original_token_hex = deployment.secrets.token_hex
             original_symlink_to = Path.symlink_to
             original_replace = deployment.os.replace
+            original_lstat = Path.lstat
+            original_readlink = deployment.os.readlink
 
             def fake_symlink_to(path: Path, target: Path, target_is_directory: bool = False) -> None:
                 if os.path.lexists(str(path)):
@@ -649,19 +651,93 @@ class DeploymentLifecycleTests(unittest.TestCase):
                 self.assertEqual(Path(destination), root / "current")
                 Path(source).unlink()
 
+            def fake_lstat(path: Path):
+                if any(path == created_path for created_path, _target, _directory in created):
+                    return SimpleNamespace(
+                        st_dev=11,
+                        st_ino=22,
+                        st_mode=deployment.stat.S_IFLNK | 0o777,
+                    )
+                return original_lstat(path)
+
+            def fake_readlink(path: str) -> str:
+                candidate = Path(path)
+                for created_path, target, _directory in created:
+                    if candidate == created_path:
+                        return str(target).replace("\\", "/")
+                return original_readlink(path)
+
             deployment.secrets.token_hex = lambda _size: next(values)
             Path.symlink_to = fake_symlink_to
+            Path.lstat = fake_lstat
+            deployment.os.readlink = fake_readlink
             deployment.os.replace = fake_replace
             try:
                 deployment.activate_release(root, NEW_ID)
             finally:
                 deployment.secrets.token_hex = original_token_hex
                 Path.symlink_to = original_symlink_to
+                Path.lstat = original_lstat
+                deployment.os.readlink = original_readlink
                 deployment.os.replace = original_replace
 
             self.assertEqual(predictable.read_text(encoding="ascii"), "attacker-owned")
             self.assertEqual(collision.read_text(encoding="ascii"), "collision-owned")
             self.assertEqual(created[0][0], root / ".current.fresh")
+
+    def test_activation_cleanup_preserves_attacker_replacement_after_replace_failure(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "resume-ai"
+            make_release(root, NEW_ID)
+            activation_temp = root / ".current.created"
+            original_token_hex = deployment.secrets.token_hex
+            original_symlink_to = Path.symlink_to
+            original_readlink = deployment.os.readlink
+            original_replace = deployment.os.replace
+            original_lstat = Path.lstat
+
+            def fake_symlink_to(path: Path, target: Path, target_is_directory: bool = False) -> None:
+                self.assertEqual(path, activation_temp)
+                path.write_text("created-link", encoding="ascii")
+
+            def fake_lstat(path: Path):
+                value = original_lstat(path)
+                if path == activation_temp and path.read_text(encoding="ascii") == "created-link":
+                    return SimpleNamespace(
+                        st_dev=11,
+                        st_ino=22,
+                        st_mode=deployment.stat.S_IFLNK | 0o777,
+                    )
+                return value
+
+            def fake_readlink(path: str) -> str:
+                if Path(path) == activation_temp:
+                    return "releases/" + NEW_ID
+                return original_readlink(path)
+
+            def fake_replace(source: str, destination: str) -> None:
+                self.assertEqual(Path(source), activation_temp)
+                self.assertEqual(Path(destination), root / "current")
+                activation_temp.write_text("attacker-replacement", encoding="ascii")
+                raise OSError("atomic replace failed")
+
+            deployment.secrets.token_hex = lambda _size: "created"
+            Path.symlink_to = fake_symlink_to
+            Path.lstat = fake_lstat
+            deployment.os.readlink = fake_readlink
+            deployment.os.replace = fake_replace
+            try:
+                with self.assertRaisesRegex(deployment.DeploymentError, "atomic replace"):
+                    deployment.activate_release(root, NEW_ID)
+            finally:
+                deployment.secrets.token_hex = original_token_hex
+                Path.symlink_to = original_symlink_to
+                Path.lstat = original_lstat
+                deployment.os.readlink = original_readlink
+                deployment.os.replace = original_replace
+
+            self.assertEqual(activation_temp.read_text(encoding="ascii"), "attacker-replacement")
 
     def test_foreign_owned_managed_path_is_rejected(self) -> None:
         deployment = load_deployment()
