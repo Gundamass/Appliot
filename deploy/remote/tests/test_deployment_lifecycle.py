@@ -598,6 +598,56 @@ class DeploymentLifecycleTests(unittest.TestCase):
             deployment.current_user_name = original_user
             deployment.prepare_install = original_prepare
 
+    def test_control_cannot_resolve_or_act_while_install_or_rollback_lock_is_held(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "resume-ai"
+            events: List[str] = []
+            original_user = deployment.current_user_name
+            original_load = deployment._load_owned_controller
+            deployment.current_user_name = lambda: "heqing"
+            deployment._load_owned_controller = lambda _root: events.append("load") or FakeController(events)
+            try:
+                with deployment.InstallLock(root):
+                    with self.assertRaisesRegex(deployment.DeploymentError, "already running"):
+                        deployment._control("stop", root)
+            finally:
+                deployment.current_user_name = original_user
+                deployment._load_owned_controller = original_load
+
+            self.assertEqual(events, [])
+
+    def test_control_acquires_lock_before_controller_resolution_and_action(self) -> None:
+        deployment = load_deployment()
+        events: List[str] = []
+
+        class TrackingLock:
+            def __init__(self, root: Path) -> None:
+                self.root = root
+
+            def __enter__(self):
+                events.append("lock-enter:" + str(self.root))
+                return self
+
+            def __exit__(self, _type, _value, _traceback) -> None:
+                events.append("lock-exit")
+
+        root = Path("/controlled/root")
+        original_user = deployment.current_user_name
+        original_lock = deployment.InstallLock
+        original_load = deployment._load_owned_controller
+        deployment.current_user_name = lambda: "heqing"
+        deployment.InstallLock = TrackingLock
+        deployment._load_owned_controller = lambda _root: events.append("load") or FakeController(events)
+        try:
+            deployment._control("stop", root)
+        finally:
+            deployment.current_user_name = original_user
+            deployment.InstallLock = original_lock
+            deployment._load_owned_controller = original_load
+
+        self.assertEqual(events, ["lock-enter:" + str(root), "load", "stop", "lock-exit"])
+
     @unittest.skipIf(os.name == "nt", "real activation symlinks require Linux")
     def test_activation_uses_exclusive_random_temp_and_preserves_collisions(self) -> None:
         deployment = load_deployment()

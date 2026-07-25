@@ -125,62 +125,65 @@ export class DeepSeekStructuredModelProvider implements StructuredModelProvider 
 
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
-    let response: Response;
     try {
-      response = await this.fetch(`${this.config.baseUrl}/chat/completions`, {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${this.config.apiKey}`,
-          "Content-Type": "application/json"
-        },
-        body: JSON.stringify({
-          model,
-          messages: [
-            {
-              role: "system",
-              content: `${input.system}\n\nReturn only valid json. Follow this example json shape exactly:\n${serializedExample}`
-            },
-            { role: "user", content: input.user }
-          ],
-          max_tokens: 8192,
-          response_format: { type: "json_object" },
-          thinking: { type: "disabled" }
-        }),
-        signal: controller.signal
-      });
-    } catch (error) {
-      if (isAbortError(error)) throw new ClassifiedFailure(new DeepSeekProviderError("timeout"), "retryable_transport");
-      throw new ClassifiedFailure(new DeepSeekProviderError("network"), "retryable_transport");
+      let response: Response;
+      try {
+        response = await this.fetch(`${this.config.baseUrl}/chat/completions`, {
+          method: "POST",
+          headers: {
+            Authorization: `Bearer ${this.config.apiKey}`,
+            "Content-Type": "application/json"
+          },
+          body: JSON.stringify({
+            model,
+            messages: [
+              {
+                role: "system",
+                content: `${input.system}\n\nReturn only valid json. Follow this example json shape exactly:\n${serializedExample}`
+              },
+              { role: "user", content: input.user }
+            ],
+            max_tokens: 8192,
+            response_format: { type: "json_object" },
+            thinking: { type: "disabled" }
+          }),
+          signal: controller.signal
+        });
+      } catch (error) {
+        if (isAbortError(error)) throw new ClassifiedFailure(new DeepSeekProviderError("timeout"), "retryable_transport");
+        throw new ClassifiedFailure(new DeepSeekProviderError("network"), "retryable_transport");
+      }
+
+      if (!response.ok) throw failureForStatus(response.status);
+
+      let payload: unknown;
+      try {
+        payload = await response.json();
+      } catch (error) {
+        if (isAbortError(error)) throw new ClassifiedFailure(new DeepSeekProviderError("timeout"), "retryable_transport");
+        throw new ClassifiedFailure(new DeepSeekProviderError("response"), "retryable_validation");
+      }
+
+      const completion = CompletionSchema.safeParse(payload);
+      if (!completion.success) throw new ClassifiedFailure(new DeepSeekProviderError("response"), "retryable_validation");
+
+      const content = completion.data.choices[0]!.message.content;
+      if (!content?.trim()) throw new ClassifiedFailure(new DeepSeekProviderError("validation"), "retryable_validation");
+
+      let parsed: unknown;
+      try {
+        parsed = JSON.parse(content);
+      } catch {
+        throw new ClassifiedFailure(new DeepSeekProviderError("validation"), "retryable_validation");
+      }
+
+      try {
+        return input.schema.parse(parsed);
+      } catch {
+        throw new ClassifiedFailure(new DeepSeekProviderError("validation"), "retryable_validation");
+      }
     } finally {
       clearTimeout(timeout);
-    }
-
-    if (!response.ok) throw failureForStatus(response.status);
-
-    let payload: unknown;
-    try {
-      payload = await response.json();
-    } catch {
-      throw new ClassifiedFailure(new DeepSeekProviderError("response"), "retryable_validation");
-    }
-
-    const completion = CompletionSchema.safeParse(payload);
-    if (!completion.success) throw new ClassifiedFailure(new DeepSeekProviderError("response"), "retryable_validation");
-
-    const content = completion.data.choices[0]!.message.content;
-    if (!content?.trim()) throw new ClassifiedFailure(new DeepSeekProviderError("validation"), "retryable_validation");
-
-    let parsed: unknown;
-    try {
-      parsed = JSON.parse(content);
-    } catch {
-      throw new ClassifiedFailure(new DeepSeekProviderError("validation"), "retryable_validation");
-    }
-
-    try {
-      return input.schema.parse(parsed);
-    } catch {
-      throw new ClassifiedFailure(new DeepSeekProviderError("validation"), "retryable_validation");
     }
   }
 }

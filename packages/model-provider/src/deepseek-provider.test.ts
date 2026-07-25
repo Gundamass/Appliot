@@ -102,6 +102,7 @@ describe("DeepSeekStructuredModelProvider", () => {
 
   it.each([
     ["empty content", [completion("")], 4, "validation", ""],
+    ["malformed response JSON", [response(200, "malformed-response-secret")], 4, "response", "malformed-response-secret"],
     ["malformed JSON", [completion("malformed-secret-content")], 4, "validation", "malformed-secret-content"],
     ["schema failure", [completion(JSON.stringify({ facts: "invalid-schema-secret" }))], 4, "validation", "invalid-schema-secret"],
     ["rate limit", [response(429, "rate-limit-secret-content")], 2, "rate_limit", "rate-limit-secret-content"],
@@ -141,6 +142,49 @@ describe("DeepSeekStructuredModelProvider", () => {
     expect(error).toMatchObject({ kind: "timeout" });
     expect(fetch).toHaveBeenCalledTimes(2);
     expect(errorText(error)).not.toContain("timeout-secret-content");
+  });
+
+  it("keeps one timeout active through stalled body parsing and clears every attempt timer", async () => {
+    vi.useFakeTimers();
+    const clearTimeoutSpy = vi.spyOn(globalThis, "clearTimeout");
+    try {
+      const signals: AbortSignal[] = [];
+      const fetch = vi.fn(async (_url: string, init?: RequestInit) => {
+        const signal = init!.signal!;
+        signals.push(signal);
+        return {
+          ok: true,
+          json: () => new Promise<never>((_resolve, reject) => {
+            signal.addEventListener("abort", () => {
+              reject(new DOMException("stalled-body-secret", "AbortError"));
+            }, { once: true });
+          })
+        } as unknown as Response;
+      });
+      const sleep = vi.fn(async () => undefined);
+      const provider = new DeepSeekStructuredModelProvider(config, {
+        fetch: fetch as typeof globalThis.fetch,
+        sleep
+      });
+      const operation = capture(() => provider.generateStructured({
+        system: "Return json.", user: "resume", schema: FactsSchema, jsonExample: { facts: [] }
+      }));
+
+      await vi.advanceTimersByTimeAsync(10);
+      await vi.advanceTimersByTimeAsync(10);
+
+      expect(fetch).toHaveBeenCalledTimes(2);
+      expect(sleep).toHaveBeenCalledTimes(1);
+      expect(signals).toHaveLength(2);
+      expect(signals.every((signal) => signal.aborted)).toBe(true);
+      expect(clearTimeoutSpy).toHaveBeenCalledTimes(2);
+      const error = await operation;
+      expect(error).toMatchObject({ kind: "timeout" });
+      expect(errorText(error)).not.toContain("stalled-body-secret");
+    } finally {
+      clearTimeoutSpy.mockRestore();
+      vi.useRealTimers();
+    }
   });
 
   it("escalates to Pro once after flash validation failures", async () => {

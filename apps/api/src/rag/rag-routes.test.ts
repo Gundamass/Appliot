@@ -182,7 +182,7 @@ describe("RAG routes", () => {
     expect(embeddingSearch.search).toHaveBeenCalledTimes(1);
   });
 
-  it("omits semantic search until embedding is ready while preserving keyword results", async () => {
+  it("blocks semantic work until embedding is ready", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
     const profileRepository = createProfileRepository(database);
@@ -210,11 +210,11 @@ describe("RAG routes", () => {
     });
 
     expect(response.statusCode).toBe(200);
-    expect(response.json()).toMatchObject({ decision: { status: "needs_review", value: "Keyword fallback." } });
+    expect(response.json()).toMatchObject({ decision: { status: "blocked", evidence: [], confidence: 0 } });
     expect(embeddingSearch.search).not.toHaveBeenCalled();
   });
 
-  it("preserves keyword fallback and follow-up behavior without semantic search", async () => {
+  it("blocks semantic work without semantic search", async () => {
     const { app, profileRepository } = await context();
     profileRepository.createExtracted({
       id: "summary", fieldPath: "application.coverLetter", value: "Supported long text.", status: "extracted",
@@ -230,15 +230,11 @@ describe("RAG routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      decision: {
-        status: "needs_review",
-        value: "Supported long text.",
-        evidence: [{ text: "Supported long text." }]
-      }
+      decision: { status: "blocked", evidence: [], confidence: 0 }
     });
   });
 
-  it("preserves keyword fallback when semantic search reports unavailability", async () => {
+  it("blocks semantic work when semantic search reports unavailability", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
     const profileRepository = createProfileRepository(database);
@@ -266,7 +262,7 @@ describe("RAG routes", () => {
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
-      decision: { status: "needs_review", value: "Supported long text.", evidence: [{ text: "Supported long text." }] }
+      decision: { status: "blocked", evidence: [], confidence: 0 }
     });
   });
 });

@@ -1387,23 +1387,24 @@ def _load_owned_controller(root: Path) -> Any:
 
 def _control(command: str, root: Path) -> None:
     _require_heqing()
-    controller = _load_owned_controller(root)
-    if command == "start":
-        release_id = current_release_id(root)
-        if release_id is None:
-            raise DeploymentError("no active release exists")
-        controller.start()
-        verify_workers_ready(root, release_id)
-        print("Both workers started and verified.")
-    elif command == "stop":
-        controller.stop()
-        print("Both workers stopped.")
-    else:
-        controller.status()
-        release_id = current_release_id(root)
-        if release_id is None:
-            raise DeploymentError("no active release exists")
-        verify_workers_ready(root, release_id, timeout=5)
+    with InstallLock(root):
+        controller = _load_owned_controller(root)
+        if command == "start":
+            release_id = current_release_id(root)
+            if release_id is None:
+                raise DeploymentError("no active release exists")
+            controller.start()
+            verify_workers_ready(root, release_id)
+            print("Both workers started and verified.")
+        elif command == "stop":
+            controller.stop()
+            print("Both workers stopped.")
+        else:
+            controller.status()
+            release_id = current_release_id(root)
+            if release_id is None:
+                raise DeploymentError("no active release exists")
+            verify_workers_ready(root, release_id, timeout=5)
 
 
 def _rollback(root: Path, release_id: str) -> None:

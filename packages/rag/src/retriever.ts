@@ -10,6 +10,7 @@ import {
 } from "./types.js";
 
 const SEARCH_LIMIT = 20;
+const EMBEDDING_UNAVAILABLE_REASON = "embedding search unavailable";
 
 export async function retrieveCandidates(
   request: FieldRequest,
@@ -37,15 +38,20 @@ export async function retrieveCandidates(
     return { candidates: [{ fact: parsed.fact, source: "exact", score: 1 }] };
   }
 
+  const requiresEmbedding = plan.strategy.includes("embedding");
+  const embeddingSearch = dependencies.embeddingSearch;
+  if (requiresEmbedding && !embeddingSearch) {
+    return { candidates: [], invalidReason: EMBEDDING_UNAVAILABLE_REASON };
+  }
+
   const keyword = await retrieveKeyword(request, plan, dependencies);
   if (keyword.invalidReason) return keyword;
 
-  if (!plan.strategy.includes("embedding")) return finalizeCandidates(keyword.candidates, request.taskId);
-  if (!dependencies.embeddingSearch) return finalizeCandidates(keyword.candidates, request.taskId);
+  if (!requiresEmbedding) return finalizeCandidates(keyword.candidates, request.taskId);
 
   let embeddingResults: EmbeddingSearchResult[];
   try {
-    embeddingResults = await dependencies.embeddingSearch.search({
+    embeddingResults = await embeddingSearch!.search({
       query: embeddingQuery(request, plan),
       taskId: request.taskId,
       limit: SEARCH_LIMIT,
@@ -55,7 +61,7 @@ export async function retrieveCandidates(
     });
   } catch (error) {
     if (error instanceof EmbeddingSearchUnavailableError) {
-      return finalizeCandidates(keyword.candidates, request.taskId);
+      return { candidates: [], invalidReason: EMBEDDING_UNAVAILABLE_REASON };
     }
     throw error;
   }

@@ -207,6 +207,7 @@ describe("RAG field resolution", () => {
 
   it("uses job description only for a planner-declared job-specific field", async () => {
     const search = fakeSearch([]);
+    const embeddingSearch = fakeEmbeddingSearch([]);
     const request: FieldRequest = {
       taskId: "task-1",
       fieldId: "cover-letter",
@@ -216,7 +217,7 @@ describe("RAG field resolution", () => {
       jobDescription: "Build reliable distributed systems"
     };
 
-    await createRagService({ repository: fakeRepository(), search }).resolveField(request);
+    await createRagService({ repository: fakeRepository(), search, embeddingSearch }).resolveField(request);
 
     expect(search.search).toHaveBeenCalledWith(expect.objectContaining({
       jobDescription: "Build reliable distributed systems"
@@ -225,7 +226,7 @@ describe("RAG field resolution", () => {
 });
 
 describe("planning and layered retrieval", () => {
-  it("keeps keyword candidates when semantic search is absent", async () => {
+  it("blocks semantic retrieval when embedding search is absent", async () => {
     const request: FieldRequest = {
       taskId: "task-1",
       fieldId: "cover-letter",
@@ -235,16 +236,17 @@ describe("planning and layered retrieval", () => {
     };
     const keyword = fact({ fieldPath: request.semantic, value: "Supported long text.", evidence: [evidence("Supported long text.")] });
 
+    const search = fakeSearch([keyword]);
     const retrieval = await retrieveCandidates(request, planField(request), {
       repository: fakeRepository(),
-      search: fakeSearch([keyword])
+      search
     });
 
-    expect(retrieval).toMatchObject({ candidates: [{ fact: { value: "Supported long text." }, source: "keyword" }] });
-    expect(retrieval.invalidReason).toBeUndefined();
+    expect(retrieval).toEqual({ candidates: [], invalidReason: "embedding search unavailable" });
+    expect(search.search).not.toHaveBeenCalled();
   });
 
-  it("keeps keyword candidates when semantic search reports unavailability", async () => {
+  it("blocks semantic retrieval when embedding search reports unavailability", async () => {
     const request: FieldRequest = {
       taskId: "task-1", fieldId: "cover-letter", semantic: "application.coverLetter", label: "Cover letter", type: "textarea"
     };
@@ -256,7 +258,18 @@ describe("planning and layered retrieval", () => {
       embeddingSearch: { async search() { throw new EmbeddingSearchUnavailableError(); } }
     });
 
-    expect(retrieval).toMatchObject({ candidates: [{ fact: { value: "Supported long text." }, source: "keyword" }] });
+    expect(retrieval).toEqual({ candidates: [], invalidReason: "embedding search unavailable" });
+  });
+
+  it("preserves keyword-only retrieval when the plan does not require embeddings", async () => {
+    const keyword = fact({ fieldPath: emailRequest.semantic, value: "me@example.com", evidence: [evidence("me@example.com")] });
+
+    const retrieval = await retrieveCandidates(emailRequest, planField(emailRequest), {
+      repository: fakeRepository(),
+      search: fakeSearch([keyword])
+    });
+
+    expect(retrieval).toMatchObject({ candidates: [{ fact: { value: "me@example.com" }, source: "keyword" }] });
     expect(retrieval.invalidReason).toBeUndefined();
   });
 
