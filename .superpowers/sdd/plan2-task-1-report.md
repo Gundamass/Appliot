@@ -36,3 +36,30 @@ Implementation commit: `6a102c5b62fbe36a9129f57479bad8b30cf61072`
 ## Concerns
 
 None for this contract boundary. Runtime verification of approval binding and validation/readback gates belongs to the later persistent worker and policy implementation.
+
+## Follow-up Fix: Required Unknown Values
+
+### RED Evidence
+
+Command: `corepack pnpm --filter @resume/contracts exec vitest run src/browser.test.ts`
+
+Result: 2 failures. A `FormField` without `currentValue` and a `fill` command without `value` both parsed successfully, demonstrating that Zod's `z.unknown()` alone does not require an own property.
+
+### GREEN Evidence
+
+- Focused command: `corepack pnpm --filter @resume/contracts exec vitest run src/browser.test.ts`
+  - Result: 1 test file and 6 tests passed.
+- Package command: `corepack pnpm --filter @resume/contracts test`
+  - Result: 5 test files and 18 tests passed.
+- Typecheck command: `corepack pnpm --filter @resume/contracts typecheck`
+  - Result: passed.
+
+### Fix
+
+- `FormFieldSchema` now verifies that `currentValue` is an own property.
+- `ExecutableCommandSchema` now verifies that a `fill` command has `value` as an own property.
+- Both schemas continue to accept explicitly present `undefined` values. No command variants, `click_intermediate`, action classification, or approval semantics changed.
+
+### Commit
+
+Fix commit: `811e951f70778bb20764b0ed84a0658eac7e3aed`
