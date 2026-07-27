@@ -37,6 +37,64 @@ describe("extractFacts", () => {
     }));
   });
 
+  it("requires complete resume-section coverage with canonical field paths", async () => {
+    const provider = providerReturning({ facts: [] });
+
+    await extractFacts(documentWithPage([
+      "实习经历：Example Corp 软件工程实习生",
+      "项目经历：ApplyPilot 简历投递助手",
+      "技能：TypeScript",
+      "自我评价：重视可靠性"
+    ].join("\n")), provider);
+
+    const input = provider.generateStructured.mock.calls[0]?.[0];
+    expect(input.system).toContain("internship");
+    expect(input.system).toContain("projects");
+    expect(input.system).toContain("skills");
+    expect(input.system).toContain("self-evaluation");
+    expect(input.system).toContain("certificates");
+    expect(input.system).toContain("links");
+    expect(input.system).toContain("job preferences");
+    expect(input.system).toContain("Do not stop after extracting basic or education fields");
+    expect(input.jsonExample.facts.map((fact: { fieldPath: string }) => fact.fieldPath)).toEqual(expect.arrayContaining([
+      "basics.email",
+      "education[0].school",
+      "work[0].company",
+      "projects[0].name",
+      "skills[0]",
+      "certificates[0].name",
+      "links.portfolio",
+      "self.summary",
+      "preferences.targetRole"
+    ]));
+  });
+
+  it("returns evidence-backed work, project, skill, and self-evaluation facts together", async () => {
+    const provider = new FakeStructuredModelProvider({
+      facts: [
+        { fieldPath: "work[0].company", value: "Example Corp", page: 1, quote: "Example Corp", confidence: 0.98 },
+        { fieldPath: "projects[0].name", value: "ApplyPilot", page: 1, quote: "ApplyPilot", confidence: 0.97 },
+        { fieldPath: "skills[0]", value: "TypeScript", page: 1, quote: "TypeScript", confidence: 0.96 },
+        { fieldPath: "self.summary", value: "重视可靠性", page: 1, quote: "重视可靠性", confidence: 0.95 }
+      ]
+    });
+
+    const facts = await extractFacts(documentWithPage([
+      "实习经历：Example Corp",
+      "项目经历：ApplyPilot",
+      "技能：TypeScript",
+      "自我评价：重视可靠性"
+    ].join("\n")), provider);
+
+    expect(facts.map((fact) => fact.fieldPath)).toEqual([
+      "work[0].company",
+      "projects[0].name",
+      "skills[0]",
+      "self.summary"
+    ]);
+    expect(facts.every((fact) => fact.evidence[0]?.page === 1)).toBe(true);
+  });
+
   it("rejects a model fact whose quoted evidence is absent from the page", async () => {
     const provider = new FakeStructuredModelProvider({
       facts: [{ fieldPath: "skills[0]", value: "Rust", page: 1, quote: "Experienced Rust", confidence: 0.9 }]

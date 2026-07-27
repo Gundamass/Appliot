@@ -7,17 +7,87 @@ import { ExtractionSchema, type ExtractionOutput } from "./extraction-schema.js"
 export const EXTRACTION_RULES = [
   "Extract only facts explicitly supported by the supplied pages.",
   "Each fact must quote exact evidence from one referenced page.",
-  "Do not infer or add unsupported claims."
+  "Do not infer or add unsupported claims.",
+  "Scan the entire resume and cover every explicitly present section: basics, education, internship and work experience, projects, skills, certificates, links, self-evaluation, and job preferences.",
+  "Do not stop after extracting basic or education fields.",
+  "Use only these canonical field paths when the value is present: basics.name, basics.email, basics.phone, basics.wechat, basics.address, basics.birthDate, basics.location; education[index].school, education[index].degree, education[index].major, education[index].startDate, education[index].endDate, education[index].gpa, education[index].description; work[index].company, work[index].title, work[index].employmentType, work[index].startDate, work[index].endDate, work[index].location, work[index].description, work[index].achievements; projects[index].name, projects[index].role, projects[index].startDate, projects[index].endDate, projects[index].description, projects[index].technologies, projects[index].url; skills[index]; certificates[index].name, certificates[index].issuer, certificates[index].date, certificates[index].credentialId, certificates[index].url; links.website, links.github, links.linkedin, links.portfolio; self.summary; preferences.targetRole, preferences.targetCity, preferences.employmentType, preferences.availability, preferences.salary.",
+  "Treat internships as work entries and preserve their internship role or employment type when the page states it.",
+  "Emit separate leaf facts for distinct values and use stable zero-based indexes for repeated education, work, project, skill, and certificate entries."
 ].join(" ");
 
 const EXTRACTION_JSON_EXAMPLE = {
-  facts: [{
-    fieldPath: "basics.email",
-    value: "candidate@example.com",
-    page: 1,
-    quote: "candidate@example.com",
-    confidence: 0.99
-  }]
+  facts: [
+    {
+      fieldPath: "basics.email",
+      value: "candidate@example.com",
+      page: 1,
+      quote: "candidate@example.com",
+      confidence: 0.99
+    },
+    {
+      fieldPath: "education[0].school",
+      value: "Example University",
+      page: 1,
+      quote: "Example University",
+      confidence: 0.98
+    },
+    {
+      fieldPath: "work[0].company",
+      value: "Example Corp",
+      page: 1,
+      quote: "Example Corp",
+      confidence: 0.98
+    },
+    {
+      fieldPath: "work[0].employmentType",
+      value: "internship",
+      page: 1,
+      quote: "Internship Experience",
+      confidence: 0.95
+    },
+    {
+      fieldPath: "projects[0].name",
+      value: "ApplyPilot",
+      page: 1,
+      quote: "ApplyPilot",
+      confidence: 0.98
+    },
+    {
+      fieldPath: "skills[0]",
+      value: "TypeScript",
+      page: 1,
+      quote: "TypeScript",
+      confidence: 0.98
+    },
+    {
+      fieldPath: "certificates[0].name",
+      value: "Example Certificate",
+      page: 1,
+      quote: "Example Certificate",
+      confidence: 0.96
+    },
+    {
+      fieldPath: "links.portfolio",
+      value: "https://portfolio.example.com",
+      page: 1,
+      quote: "https://portfolio.example.com",
+      confidence: 0.99
+    },
+    {
+      fieldPath: "self.summary",
+      value: "Reliable and evidence-driven",
+      page: 1,
+      quote: "Reliable and evidence-driven",
+      confidence: 0.95
+    },
+    {
+      fieldPath: "preferences.targetRole",
+      value: "Software Engineer",
+      page: 1,
+      quote: "Software Engineer",
+      confidence: 0.95
+    }
+  ]
 };
 
 export async function extractFacts(document: ExtractedDocument, provider: StructuredModelProvider): Promise<ProfileFact[]> {
