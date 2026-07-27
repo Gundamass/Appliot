@@ -1,7 +1,46 @@
 import { describe, expect, it } from "vitest";
-import { ExecutableCommandSchema } from "./browser.js";
+import { ExecutableCommandSchema, FormFieldSchema } from "./browser.js";
 
 describe("browser command contracts", () => {
+  it("rejects a form field without currentValue", () => {
+    expect(FormFieldSchema.safeParse({
+      id: "field-name",
+      label: "Name",
+      type: "text",
+      required: true,
+      options: []
+    }).success).toBe(false);
+  });
+
+  it("rejects a fill command without value", () => {
+    expect(ExecutableCommandSchema.safeParse({
+      type: "fill",
+      taskId: "task-1",
+      snapshotId: "snapshot-1",
+      fieldId: "field-name",
+      approval: "approval-1"
+    }).success).toBe(false);
+  });
+
+  it("accepts explicitly undefined unknown values", () => {
+    expect(FormFieldSchema.safeParse({
+      id: "field-name",
+      label: "Name",
+      type: "text",
+      required: true,
+      options: [],
+      currentValue: undefined
+    }).success).toBe(true);
+    expect(ExecutableCommandSchema.safeParse({
+      type: "fill",
+      taskId: "task-1",
+      snapshotId: "snapshot-1",
+      fieldId: "field-name",
+      value: undefined,
+      approval: "approval-1"
+    }).success).toBe(true);
+  });
+
   it("rejects terminal submit because it is not executable", () => {
     expect(ExecutableCommandSchema.safeParse({
       type: "submit",

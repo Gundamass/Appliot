@@ -16,7 +16,15 @@ export const FormFieldSchema = z.object({
   options: z.array(z.string()),
   currentValue: z.unknown(),
   semanticHint: z.string().optional()
-}).strict();
+}).strict().superRefine((field, context) => {
+  if (!Object.prototype.hasOwnProperty.call(field, "currentValue")) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["currentValue"],
+      message: "Required"
+    });
+  }
+});
 
 export const PageActionSchema = z.object({
   id: z.string(),
@@ -67,7 +75,15 @@ export const ExecutableCommandSchema = z.discriminatedUnion("type", [
     actionId: z.string(),
     approval: z.string()
   }).strict()
-]);
+]).superRefine((command, context) => {
+  if (command.type === "fill" && !Object.prototype.hasOwnProperty.call(command, "value")) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["value"],
+      message: "Required"
+    });
+  }
+});
 
 export const WorkerRequestSchema = z.discriminatedUnion("type", [
   z.object({
