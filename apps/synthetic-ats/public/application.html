@@ -1,0 +1,61 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <title>第一步：基本信息</title>
+</head>
+<body>
+  <main>
+    <h1>Java 后端开发工程师申请</h1>
+    <form method="post" action="/step2?taskId={{TASK_ID}}&scenario={{SCENARIO}}">
+      <label for="email">邮箱</label>
+      <input id="email" name="email" type="email" required>
+      <p id="email-error" role="alert" hidden>邮箱格式不正确</p>
+
+      <label for="city">城市</label>
+      <select id="city" name="city" required>
+        <option value="">请选择</option>
+        <option value="hangzhou">杭州</option>
+        <option value="shenzhen">深圳</option>
+      </select>
+
+      {{PHONE_FIELD}}
+
+      {{INTERMEDIATE_ACTION}}
+      <button type="submit" formaction="/submit?taskId={{TASK_ID}}">立即申请</button>
+    </form>
+  </main>
+  <script>
+    const scenario = {{SCENARIO_JSON}};
+    const email = document.querySelector("#email");
+    const emailError = document.querySelector("#email-error");
+    email.addEventListener("input", () => {
+      const invalid = email.value !== "" && !email.value.includes("@");
+      emailError.hidden = !invalid;
+      email.setCustomValidity(invalid ? "邮箱格式不正确" : "");
+    });
+
+    const nextStep = document.querySelector("#next-step");
+    const updateNextStep = () => {
+      if (!nextStep) return;
+      const parameters = new URLSearchParams({ taskId: "{{TASK_ID}}", scenario });
+      if (email) parameters.set("email", email.value);
+      const city = document.querySelector("#city");
+      if (city) parameters.set("city", city.value);
+      const phone = document.querySelector("#phone");
+      if (phone) parameters.set("phone", phone.value);
+      nextStep.href = `/step2?${parameters.toString()}`;
+    };
+    document.addEventListener("input", updateNextStep, true);
+    document.addEventListener("change", updateNextStep, true);
+
+    if (scenario === "stuck-control") {
+      document.querySelector("label[for=email]").remove();
+      document.querySelector("#email").remove();
+      document.querySelector("#email-error").remove();
+      document.querySelector("label[for=city]").remove();
+      document.querySelector("#city").remove();
+    }
+  </script>
+</body>
+</html>

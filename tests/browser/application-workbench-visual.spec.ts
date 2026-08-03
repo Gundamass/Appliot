@@ -1,0 +1,139 @@
+import { fileURLToPath } from "node:url";
+import { expect, test, type Page } from "@playwright/test";
+import { createServer, type ViteDevServer } from "../../apps/web/node_modules/vite/dist/node/index.js";
+
+const taskId = "0f8fad5b-d9cb-469f-a165-70867728950e";
+const viewports = [
+  { name: "desktop", width: 1280, height: 900 },
+  { name: "tablet", width: 768, height: 900 },
+  { name: "mobile", width: 320, height: 800 }
+] as const;
+
+const stages = ["确定性填写", "语义补全", "动态校验", "等待审核"] as const;
+const terminalButtonName = /^(?:提交(?:申请|简历)?|投递(?:申请|简历)?|发送(?:申请|简历)?|确认(?:申请|投递)|确认并(?:提交|投递)|完成申请|立即申请|预览并提交)$/u;
+
+let server: ViteDevServer;
+let baseUrl: string;
+
+test.beforeAll(async () => {
+  server = await createServer({
+    root: fileURLToPath(new URL("../../apps/web", import.meta.url)),
+    server: { host: "127.0.0.1", port: 0 },
+    logLevel: "silent"
+  });
+  await server.listen();
+  const address = server.httpServer?.address();
+  if (!address || typeof address === "string") throw new Error("Web 测试服务器未启动");
+  baseUrl = `http://127.0.0.1:${address.port}`;
+});
+
+test.afterAll(async () => {
+  await server.close();
+});
+
+for (const viewport of viewports) {
+  test(`投递工作台在${viewport.width}px视口下保持可用布局`, async ({ page }) => {
+    await page.setViewportSize({ width: viewport.width, height: viewport.height });
+    await mockTask(page);
+    await page.goto(`${baseUrl}/applications/${taskId}`);
+
+    await expect(page.getByRole("heading", { name: "投递任务工作台" })).toBeVisible();
+    const bodyText = await page.locator("body").innerText();
+    expect(bodyText.trim().length).toBeGreaterThan(0);
+
+    const dimensions = await page.evaluate(() => ({
+      scrollWidth: document.documentElement.scrollWidth,
+      viewportWidth: window.innerWidth
+    }));
+    expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
+
+    if (viewport.name === "desktop") {
+      await expect(page.locator(".application-rail")).toBeVisible();
+      await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
+    }
+
+    const layout = await page.evaluate(() => {
+      const shell = document.querySelector<HTMLElement>(".application-shell");
+      const rail = document.querySelector<HTMLElement>(".application-rail");
+      const navigation = document.querySelector<HTMLElement>(".application-rail nav");
+      const workspace = document.querySelector<HTMLElement>(".task-workbench-grid");
+      if (!shell || !rail || !navigation || !workspace) throw new Error("工作台布局节点缺失");
+      return {
+        shellDisplay: getComputedStyle(shell).display,
+        railWidth: rail.getBoundingClientRect().width,
+        railMinHeight: getComputedStyle(rail).minHeight,
+        navigationOverflowX: getComputedStyle(navigation).overflowX,
+        workspaceColumns: getComputedStyle(workspace).gridTemplateColumns
+      };
+    });
+
+    if (viewport.name === "desktop") {
+      expect(layout.shellDisplay).toBe("flex");
+      expect(layout.railWidth).toBeGreaterThanOrEqual(220);
+      expect(layout.workspaceColumns.split(" ")).toHaveLength(2);
+    } else if (viewport.name === "tablet") {
+      expect(layout.workspaceColumns.split(" ")).toHaveLength(1);
+    } else {
+      expect(layout.shellDisplay).toBe("block");
+      expect(layout.railWidth).toBeLessThanOrEqual(viewport.width);
+      expect(["auto", "scroll"]).toContain(layout.navigationOverflowX);
+      expect(layout.workspaceColumns.split(" ")).toHaveLength(1);
+    }
+
+    for (const stage of stages) {
+      await expect(page.getByText(stage, { exact: true })).toBeVisible();
+    }
+    await expect(page.getByText("风险聚焦", { exact: true })).toBeVisible();
+    await expect(page.getByRole("heading", { name: "需要你处理" })).toBeVisible();
+    await expect(page.locator(".task-attention-list").getByRole("button", { name: /可入职时间/u })).toBeVisible();
+
+    await expect(page.getByRole("button", { name: terminalButtonName })).toHaveCount(0);
+
+    const screenshot = await page.screenshot({
+      path: `playwright-artifacts/application-workbench-${viewport.name}.png`,
+      fullPage: true
+    });
+    expect(screenshot.byteLength).toBeGreaterThan(0);
+  });
+}
+
+async function mockTask(page: Page): Promise<void> {
+  await page.route(`**/api/applications/${taskId}/events`, (route) => route.fulfill({
+    status: 200,
+    contentType: "text/event-stream",
+    body: ": ready\n\n"
+  }));
+  await page.route(`**/api/applications/${taskId}`, (route) => route.fulfill({
+    status: 200,
+    contentType: "application/json",
+    body: JSON.stringify({
+      id: taskId,
+      applicationUrl: "https://career.example.com/jobs/42",
+      state: "needs_questions",
+      commands: ["cancel", "open_browser", "answer_questions"],
+      questions: [
+        {
+          id: "date",
+          fieldId: "date",
+          fieldPath: "preferences.availableDate",
+          label: "可入职时间",
+          text: "请确认可入职时间",
+          inputType: "date",
+          options: [],
+          required: true
+        },
+        {
+          id: "travel",
+          fieldId: "travel",
+          fieldPath: "preferences.travel",
+          label: "接受出差",
+          text: "是否接受出差",
+          inputType: "checkbox",
+          options: [],
+          required: false
+        }
+      ],
+      taskAnswers: []
+    })
+  }));
+}

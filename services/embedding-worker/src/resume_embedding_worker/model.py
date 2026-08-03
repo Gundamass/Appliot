@@ -48,7 +48,7 @@ class QwenEmbeddingBackend:
         self._batch_size = settings.batch_size
         self._ready = False
         self._model = transformer_cls(
-            settings.model_path,
+            str(settings.model_path),
             device="cuda:0",
             model_kwargs={"torch_dtype": torch_runtime.float16, "attn_implementation": "sdpa"},
             tokenizer_kwargs={"padding_side": "left"},

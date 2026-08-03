@@ -28,6 +28,41 @@ function createTestProfileRepository(options?: { afterSnapshot?: () => void }) {
 }
 
 describe("ProfileRepository", () => {
+  it("creates a user-corrected fact when a missing field is supplied", () => {
+    const repository = createTestProfileRepository();
+
+    const fact = repository.upsertUserFact({
+      fieldPath: "preferences.targetCity",
+      value: "深圳"
+    });
+
+    expect(fact).toMatchObject({
+      fieldPath: "preferences.targetCity",
+      value: "深圳",
+      status: "user_corrected",
+      confidence: 1,
+      scope: "profile",
+      revision: 1
+    });
+    expect(fact.evidence[0]).toMatchObject({ documentId: "user", extraction: "user" });
+  });
+
+  it("updates the reviewed semantic equivalent instead of creating a competing fact", () => {
+    const repository = createTestProfileRepository();
+    const first = repository.upsertUserFact({ fieldPath: "work[0].title", value: "Java 后端实习" });
+    const second = repository.upsertUserFact({ fieldPath: "work[0].position", value: "Java 后端开发实习" });
+
+    expect(second).toMatchObject({
+      id: first.id,
+      fieldPath: "work[0].title",
+      value: "Java 后端开发实习",
+      revision: 2
+    });
+    expect(repository.listActive().filter((fact) =>
+      fact.fieldPath === "work[0].title" || fact.fieldPath === "work[0].position"
+    )).toHaveLength(1);
+  });
+
   it("keeps revisions and resolves task answers before profile defaults", () => {
     const repository = createTestProfileRepository();
     repository.createExtracted(makeFact("Hangzhou"));
@@ -52,6 +87,63 @@ describe("ProfileRepository", () => {
 
     expect(repository.resolveForTask("task-1", "basics.email")).toMatchObject({ id: "second" });
     expect(repository.listActive().map((fact) => fact.id)).not.toContain("first");
+  });
+
+  it("resolves a reviewed legacy profile path through its canonical semantic", () => {
+    const repository = createTestProfileRepository();
+    repository.createExtracted(makeFact("Java backend intern", "work[0].title", "work-title"));
+    repository.confirm("work-title");
+
+    expect(repository.resolveForTask("task-1", "work[0].position")).toMatchObject({
+      id: "work-title",
+      fieldPath: "work[0].position",
+      value: "Java backend intern"
+    });
+  });
+
+  it("prefers a task-scoped legacy answer over a canonical profile default", () => {
+    const repository = createTestProfileRepository();
+    repository.createExtracted(makeFact("Profile position", "work[0].position", "profile-position"));
+    repository.confirm("profile-position");
+    repository.putTaskAnswer("task-1", "work[0].title", "Task-specific position", userEvidence("Task-specific position"));
+
+    expect(repository.resolveForTask("task-1", "work[0].position")).toMatchObject({
+      scope: "application",
+      fieldPath: "work[0].position",
+      value: "Task-specific position"
+    });
+  });
+
+  it("replaces an equivalent legacy task answer when the canonical path is saved", () => {
+    const repository = createTestProfileRepository();
+    repository.putTaskAnswer("task-1", "work[0].title", "Legacy position", userEvidence("Legacy position"));
+    repository.putTaskAnswer("task-1", "work[0].position", "Canonical position", userEvidence("Canonical position"));
+
+    expect(repository.resolveForTask("task-1", "work[0].title")).toMatchObject({
+      value: "Canonical position",
+      fieldPath: "work[0].title"
+    });
+    expect(repository.listForTask("task-1")
+      .filter((fact) => fact.scope === "application")
+      .map((fact) => [fact.fieldPath, fact.value]))
+      .toEqual([["work[0].position", "Canonical position"]]);
+  });
+
+  it("treats canonical and legacy reviewed facts as one semantic slot", () => {
+    const repository = createTestProfileRepository();
+    repository.createExtracted(makeFact("Legacy position", "work[0].title", "legacy-position"));
+    repository.confirm("legacy-position");
+    repository.createExtracted(makeFact("Canonical position", "work[0].position", "canonical-position"));
+    repository.confirm("canonical-position");
+
+    expect(repository.listActive().map((fact) => [fact.id, fact.fieldPath, fact.value])).toEqual([
+      ["canonical-position", "work[0].position", "Canonical position"]
+    ]);
+    expect(repository.resolveForTask("task-1", "work[0].title")).toMatchObject({
+      id: "canonical-position",
+      fieldPath: "work[0].title",
+      value: "Canonical position"
+    });
   });
 
   it("enforces task IDs for application-scoped facts at the database boundary", () => {

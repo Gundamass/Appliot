@@ -277,7 +277,7 @@ describe("review fix: retrieval visibility and precedence", () => {
     }).resolveField(pmpRequest);
 
     expect(decision.status).toBe("needs_question");
-    expect(decision.question).toContain("conflicting values");
+    expect(decision.question).toContain("存在冲突值");
   });
 
   it("does not let embeddings erase same-priority long-text conflicts", async () => {

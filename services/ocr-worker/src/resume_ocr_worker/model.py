@@ -12,7 +12,7 @@ os.environ["TRANSFORMERS_OFFLINE"] = "1"
 
 PROMPT = "<image>\n<|grounding|>Convert the document to markdown."
 _WARMUP_IMAGE = base64.b64decode(
-    "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAQAAAC1HAwCAAAAC0lEQVR42mP8/x8AAusB9Y9Jr8sAAAAASUVORK5CYII="
+    "iVBORw0KGgoAAAANSUhEUgAAAAgAAAAICAIAAABLbSncAAAAFUlEQVR4nGP8//8/AzbAhFV00EoAAFbUAw037MyjAAAAAElFTkSuQmCC"
 )
 AutoTokenizer = None
 AutoModel = None
@@ -83,7 +83,8 @@ class DeepSeekOcrBackend:
                 base_size=1024,
                 image_size=768,
                 crop_mode=True,
-                save_results=True,
+                save_results=False,
+                eval_mode=True,
             )
             return _markdown_result(result, output_dir)
 

@@ -2,14 +2,19 @@ import type { FieldRequest, RequiredRange, RetrievalPlan } from "./types.js";
 
 const SUPPORTED_ROOTS = new Set([
   "application",
+  "awards",
   "basics",
+  "campus",
   "certificates",
   "contact",
   "education",
   "experience",
+  "identity",
   "languages",
   "preferences",
+  "publications",
   "projects",
+  "selfEvaluation",
   "skills",
   "work"
 ]);
@@ -22,13 +27,14 @@ const JOB_SPECIFIC_SEMANTICS = new Set([
 ]);
 
 const SENSITIVE_SEGMENT = /(?:salary|compensation|relocat|visa|sponsor|notice|availability|overtime|travel|noncompete|commitment)/i;
+const SENSITIVE_ROOT = /^identity(?:\.|$)/u;
 
 export function planField(request: FieldRequest): RetrievalPlan {
   const semantic = request.semantic.trim();
   const validators = normalizeValidators(request.validators ?? []);
   const root = semantic.split(/[.[\]]/, 1)[0] ?? "";
   const knownSemantic = semantic.length > 0 && SUPPORTED_ROOTS.has(root);
-  const sensitive = SENSITIVE_SEGMENT.test(semantic);
+  const sensitive = SENSITIVE_ROOT.test(semantic) || SENSITIVE_SEGMENT.test(semantic);
   const needsJobDescription = JOB_SPECIFIC_SEMANTICS.has(semantic);
   const longText = request.type === "textarea";
   const requiredRange = rangeFrom(validators);

@@ -5,6 +5,7 @@ import { tmpdir } from "node:os";
 import { resolve } from "node:path";
 import { setTimeout as delay } from "node:timers/promises";
 import { describe, expect, it } from "vitest";
+import { BrowserWorkerClient } from "./browser/worker-client.js";
 import { monitorMalformedLaunch, terminateChild, waitForChildExit, type ExitResult } from "./server-launch-monitor.js";
 
 const packageRoot = resolve(import.meta.dirname, "..");
@@ -82,6 +83,22 @@ async function terminate(launched: LaunchedServer): Promise<ExitResult> {
 }
 
 describe("production API artifact", () => {
+  it("starts the bundled browser worker without the TypeScript loader", async () => {
+    buildApi();
+    const directory = await mkdtemp(resolve(tmpdir(), "resume-browser-worker-build-"));
+    const client = await BrowserWorkerClient.start({
+      profileDir: resolve(directory, "profile"),
+      headless: true,
+      workerEntry: resolve(packageRoot, "dist/browser-worker.js")
+    });
+
+    try {
+      await expect(client.stop()).resolves.toBeUndefined();
+    } finally {
+      await rm(directory, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("starts the built API in degraded mode and shuts down cleanly", async () => {
     buildApi();
     const directory = await mkdtemp(resolve(tmpdir(), "resume-api-launch-"));
@@ -105,7 +122,7 @@ describe("production API artifact", () => {
       }
       await rm(directory, { recursive: true, force: true });
     }
-  });
+  }, 30_000);
 
   it("exits before opening a port when a DeepSeek group is malformed", async () => {
     buildApi();

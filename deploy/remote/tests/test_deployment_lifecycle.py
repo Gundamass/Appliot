@@ -4,6 +4,7 @@ import importlib.util
 import json
 import os
 import socket
+import sys
 import tempfile
 import unittest
 from pathlib import Path
@@ -85,6 +86,68 @@ class FakeController:
 
 
 class DeploymentLifecycleTests(unittest.TestCase):
+    def test_deployment_fingerprint_changes_with_verifier(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            _bundle, asset_root = make_install_fixture(Path(temporary))
+            first = deployment.deployment_fingerprint(asset_root, "a" * 64)
+            (asset_root / "verify-assets.py").write_text("updated verifier", encoding="ascii")
+
+            self.assertNotEqual(first, deployment.deployment_fingerprint(asset_root, "a" * 64))
+
+    def test_deployment_fingerprint_covers_every_copied_directory_entry(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            _bundle, asset_root = make_install_fixture(Path(temporary))
+            first = deployment.deployment_fingerprint(asset_root, "a" * 64)
+            nested = asset_root / "bin" / "metadata"
+            nested.mkdir()
+            (nested / "release.conf").write_text("v2", encoding="ascii")
+
+            self.assertNotEqual(first, deployment.deployment_fingerprint(asset_root, "a" * 64))
+
+    def test_private_asset_snapshot_detects_source_mutation(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            _bundle, asset_root = make_install_fixture(base)
+            (base / "staging").mkdir()
+            expected = deployment.deployment_fingerprint(asset_root, "a" * 64)
+            original_copytree = deployment.shutil.copytree
+
+            def mutating_copytree(source, destination, *args, **kwargs):
+                result = original_copytree(source, destination, *args, **kwargs)
+                (asset_root / "deployment.py").write_text("mutated", encoding="ascii")
+                return result
+
+            deployment.shutil.copytree = mutating_copytree
+            try:
+                with self.assertRaisesRegex(deployment.DeploymentError, "deployment assets changed"):
+                    deployment.stage_deployment_assets(asset_root, base / "staging", expected, "a" * 64)
+            finally:
+                deployment.shutil.copytree = original_copytree
+
+    def test_deployment_asset_snapshot_normalizes_shell_scripts_to_lf(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            _bundle, asset_root = make_install_fixture(base)
+            script = asset_root / "bin" / "start-all.sh"
+            script.write_bytes(b"#!/usr/bin/env bash\r\nset -eu\r\n")
+            (base / "staging").mkdir()
+            expected = deployment.deployment_fingerprint(asset_root, "a" * 64)
+
+            snapshot = deployment.stage_deployment_assets(
+                asset_root, base / "staging", expected, "a" * 64
+            )
+            try:
+                self.assertEqual(
+                    (snapshot / "bin" / "start-all.sh").read_bytes(),
+                    b"#!/usr/bin/env bash\nset -eu\n",
+                )
+            finally:
+                deployment.shutil.rmtree(str(snapshot.parent))
+
     def test_install_runs_complete_transaction_with_fake_host_boundaries(self) -> None:
         deployment = load_deployment()
         with tempfile.TemporaryDirectory() as temporary:
@@ -263,7 +326,7 @@ class DeploymentLifecycleTests(unittest.TestCase):
             (root / "envs" / "embedding" / "bin").mkdir(parents=True)
             (root / "run").mkdir()
             (root / "services").mkdir()
-            for name in ("supervisord", "supervisorctl"):
+            for name in ("supervisord", "supervisorctl", "python"):
                 executable = root / "envs" / "embedding" / "bin" / name
                 executable.write_text("fixture", encoding="ascii")
                 executable.chmod(0o700)
@@ -279,7 +342,7 @@ class DeploymentLifecycleTests(unittest.TestCase):
 
             def run(arguments, **kwargs):
                 calls.append(list(arguments))
-                if arguments[0].endswith("supervisorctl"):
+                if "supervisor.supervisorctl" in arguments:
                     return type("Result", (), {"stdout": next(states)})()
                 return type("Result", (), {"stdout": ""})()
 
@@ -302,7 +365,7 @@ class DeploymentLifecycleTests(unittest.TestCase):
             (root / "envs" / "embedding" / "bin").mkdir(parents=True)
             (root / "run").mkdir()
             (root / "services").mkdir()
-            for name in ("supervisord", "supervisorctl"):
+            for name in ("supervisord", "supervisorctl", "python"):
                 executable = root / "envs" / "embedding" / "bin" / name
                 executable.write_text("fixture", encoding="ascii")
                 executable.chmod(0o700)
@@ -349,6 +412,9 @@ class DeploymentLifecycleTests(unittest.TestCase):
             supervisorctl = root / "envs" / "embedding" / "bin" / "supervisorctl"
             supervisorctl.write_text("fixture", encoding="ascii")
             supervisorctl.chmod(0o700)
+            python = root / "envs" / "embedding" / "bin" / "python"
+            python.write_text("fixture", encoding="ascii")
+            python.chmod(0o700)
             config = services / "supervisord.conf"
             config.write_text("fixture", encoding="ascii")
             pid_path = run_dir / "supervisord.pid"
@@ -396,14 +462,14 @@ class DeploymentLifecycleTests(unittest.TestCase):
             (root / "envs" / "embedding" / "bin").mkdir(parents=True)
             (root / "run").mkdir()
             (root / "services").mkdir()
-            for name in ("supervisord", "supervisorctl"):
+            for name in ("supervisord", "supervisorctl", "python"):
                 executable = root / "envs" / "embedding" / "bin" / name
                 executable.write_text("fixture", encoding="ascii")
                 executable.chmod(0o700)
             (root / "services" / "supervisord.conf").write_text("startsecs=1\n", encoding="ascii")
 
             def run(arguments, **_kwargs):
-                if arguments[0].endswith("supervisorctl"):
+                if "supervisor.supervisorctl" in arguments:
                     return type(
                         "Result",
                         (),
@@ -508,6 +574,135 @@ class DeploymentLifecycleTests(unittest.TestCase):
             self.assertEqual(observed, [False])
             self.assertTrue((release / ".complete").is_file())
 
+    def test_create_environment_uses_only_verified_snapshot_conda_channel(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            snapshot = base / "snapshot"
+            release = base / "release"
+            worker = snapshot / "workers" / "embedding-worker"
+            wheelhouse = worker / "wheelhouse"
+            channel = snapshot / "conda-channel"
+            wheelhouse.mkdir(parents=True)
+            channel.mkdir(parents=True)
+            release.mkdir()
+            (worker / "requirements.lock").write_text("--require-hashes\n", encoding="ascii")
+            wheel = wheelhouse / "worker.whl"
+            wheel.write_bytes(b"wheel")
+            (worker / "worker-manifest.json").write_text(
+                json.dumps({"wheel": "wheelhouse/worker.whl"}), encoding="ascii"
+            )
+            commands = []
+            original_run = deployment._run
+            deployment._run = lambda command, **_kwargs: commands.append(command) or SimpleNamespace(stdout="")
+            try:
+                deployment._create_environment(
+                    "conda", snapshot, release, "embedding", "3.10",
+                    "embedding-worker", "resume_embedding_worker.main",
+                )
+            finally:
+                deployment._run = original_run
+
+            create = commands[0]
+            self.assertEqual(create[create.index("--solver") + 1], "classic")
+            self.assertIn("--offline", create)
+            self.assertIn("--override-channels", create)
+            self.assertEqual(create[create.index("--channel") + 1], channel.resolve().as_uri())
+            self.assertNotIn("defaults", create)
+
+    def test_create_environment_uses_private_staging_conda_cache(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            base = Path(temporary)
+            snapshot = base / "staging" / "snapshot"
+            release = base / "staging" / "release"
+            worker = snapshot / "workers" / "embedding-worker"
+            (worker / "wheelhouse").mkdir(parents=True)
+            (snapshot / "conda-channel").mkdir()
+            release.mkdir()
+            (worker / "requirements.lock").write_text("--require-hashes\n", encoding="ascii")
+            (worker / "wheelhouse" / "worker.whl").write_bytes(b"wheel")
+            (worker / "worker-manifest.json").write_text(
+                json.dumps({"wheel": "wheelhouse/worker.whl"}), encoding="ascii"
+            )
+            environments = []
+            original_run = deployment._run
+            deployment._run = lambda _command, **kwargs: environments.append(kwargs.get("env")) or SimpleNamespace(stdout="")
+            try:
+                deployment._create_environment(
+                    "conda", snapshot, release, "embedding", "3.10",
+                    "embedding-worker", "resume_embedding_worker.main",
+                )
+            finally:
+                deployment._run = original_run
+
+            expected = str(snapshot.parent / "conda-pkgs")
+            self.assertEqual(environments[0]["CONDA_PKGS_DIRS"], expected)
+
+    def test_conda_preflight_does_not_require_cached_python_packages(self) -> None:
+        deployment = load_deployment()
+        commands = []
+
+        def run(command, **_kwargs):
+            commands.append(command)
+            return SimpleNamespace(stdout=json.dumps({"envs_dirs": [], "pkgs_dirs": []}))
+
+        original_run = deployment._run
+        original_which = deployment.shutil.which
+        deployment._run = run
+        deployment.shutil.which = lambda _name: "/usr/bin/python3"
+        try:
+            deployment._conda_preflight("conda", "python3")
+        finally:
+            deployment._run = original_run
+            deployment.shutil.which = original_which
+
+        self.assertEqual(commands, [["conda", "info", "--json"]])
+
+    def test_host_preflight_accepts_safe_read_only_system_release_metadata(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            release = Path(temporary) / "os-release"
+            release.write_text('ID="ubuntu"\nVERSION_ID="20.04"\n', encoding="utf-8")
+            commands = {
+                ("uname", "-s"): "Linux\n",
+                ("uname", "-m"): "x86_64\n",
+                ("id", "-un"): "heqing\n",
+                ("nvidia-smi", "--query-gpu=index", "--format=csv,noheader,nounits"): "5\n",
+            }
+            original_run = deployment._run
+            original_release = deployment.os.environ.get("RESUME_AI_OS_RELEASE")
+            original_owned = deployment.path_is_owned
+            deployment._run = lambda args, **_kwargs: SimpleNamespace(stdout=commands[tuple(args)])
+            deployment.os.environ["RESUME_AI_OS_RELEASE"] = str(release)
+            deployment.path_is_owned = lambda path: path != release
+            try:
+                deployment._host_preflight()
+            finally:
+                deployment._run = original_run
+                deployment.path_is_owned = original_owned
+                if original_release is None:
+                    deployment.os.environ.pop("RESUME_AI_OS_RELEASE", None)
+                else:
+                    deployment.os.environ["RESUME_AI_OS_RELEASE"] = original_release
+
+    @unittest.skipIf(os.name == "nt", "symbolic link creation requires Linux")
+    def test_read_only_regular_allows_only_the_expected_symlink_target(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            expected = root / "expected"
+            unexpected = root / "unexpected"
+            expected.write_text("expected", encoding="ascii")
+            unexpected.write_text("unexpected", encoding="ascii")
+            link = root / "metadata"
+            link.symlink_to(expected)
+
+            deployment._require_read_only_regular(link, "metadata", expected)
+
+            with self.assertRaisesRegex(deployment.DeploymentError, "unsafe"):
+                deployment._require_read_only_regular(link, "metadata", unexpected)
+
     def test_post_build_validation_failure_never_publishes_completion_marker(self) -> None:
         deployment = load_deployment()
         with tempfile.TemporaryDirectory() as temporary:
@@ -563,6 +758,43 @@ class DeploymentLifecycleTests(unittest.TestCase):
 
             self.assertFalse(release.exists())
             self.assertFalse((snapshot.parent / "release" / ".complete").exists())
+
+    @unittest.skipIf(os.name == "nt", "POSIX permission bits require Linux")
+    def test_release_permissions_remove_group_and_world_write_bits(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary)
+            directory = root / "bin"
+            directory.mkdir()
+            executable = directory / "worker"
+            executable.write_text("worker", encoding="ascii")
+            directory.chmod(0o775)
+            executable.chmod(0o775)
+
+            deployment._harden_release_permissions(root)
+
+            self.assertEqual(directory.stat().st_mode & 0o777, 0o755)
+            self.assertEqual(executable.stat().st_mode & 0o777, 0o755)
+
+    @unittest.skipIf(os.name == "nt", "symbolic links require Linux")
+    def test_release_tree_allows_only_internal_relative_environment_links(self) -> None:
+        deployment = load_deployment()
+        with tempfile.TemporaryDirectory() as temporary:
+            root = Path(temporary) / "release"
+            bin_dir = root / "envs" / "embedding" / "bin"
+            bin_dir.mkdir(parents=True)
+            python = bin_dir / "python3.10"
+            python.write_text("python", encoding="ascii")
+            link = bin_dir / "python"
+            link.symlink_to("python3.10")
+
+            deployment._harden_release_permissions(root)
+            deployment._validate_release_tree(root)
+
+            link.unlink()
+            link.symlink_to("../../../../outside")
+            with self.assertRaisesRegex(deployment.DeploymentError, "environment symlink"):
+                deployment._validate_release_tree(root)
 
     def test_lifecycle_rejects_non_heqing_before_filesystem_access(self) -> None:
         deployment = load_deployment()
@@ -963,6 +1195,52 @@ class DeploymentLifecycleTests(unittest.TestCase):
 
             self.assertFalse(lock_path.exists())
 
+    def test_posix_install_lock_uses_and_releases_raw_directory_descriptor(self) -> None:
+        deployment = load_deployment()
+        events = []
+        fake_fcntl = SimpleNamespace(
+            LOCK_EX=1,
+            LOCK_NB=2,
+            LOCK_UN=4,
+            flock=lambda descriptor, operation: events.append(("flock", descriptor, operation)),
+        )
+        original_name = deployment.os.name
+        original_open = deployment.os.open
+        original_close = deployment.os.close
+        original_fdopen = deployment.os.fdopen
+        original_nearest = deployment.nearest_existing_parent
+        original_fcntl = sys.modules.get("fcntl")
+        deployment.os.name = "posix"
+        deployment.os.open = lambda *_args: events.append(("open",)) or 41
+        deployment.os.close = lambda descriptor: events.append(("close", descriptor))
+        deployment.os.fdopen = lambda *_args: self.fail("POSIX directory lock must not use fdopen")
+        deployment.nearest_existing_parent = lambda _root: Path(".")
+        sys.modules["fcntl"] = fake_fcntl
+        try:
+            with deployment.InstallLock(Path("/tmp/resume-ai")):
+                events.append(("body",))
+        finally:
+            deployment.os.name = original_name
+            deployment.os.open = original_open
+            deployment.os.close = original_close
+            deployment.os.fdopen = original_fdopen
+            deployment.nearest_existing_parent = original_nearest
+            if original_fcntl is None:
+                del sys.modules["fcntl"]
+            else:
+                sys.modules["fcntl"] = original_fcntl
+
+        self.assertEqual(
+            events,
+            [
+                ("open",),
+                ("flock", 41, fake_fcntl.LOCK_EX | fake_fcntl.LOCK_NB),
+                ("body",),
+                ("flock", 41, fake_fcntl.LOCK_UN),
+                ("close", 41),
+            ],
+        )
+
     def test_first_install_does_not_stop_nonexistent_systemd_units(self) -> None:
         deployment = load_deployment()
         with tempfile.TemporaryDirectory() as temporary:
@@ -1285,7 +1563,8 @@ class DeploymentLifecycleTests(unittest.TestCase):
             services.mkdir(parents=True)
             supervisord = bin_dir / "supervisord"
             supervisorctl = bin_dir / "supervisorctl"
-            for executable in (supervisord, supervisorctl):
+            python = bin_dir / "python"
+            for executable in (supervisord, supervisorctl, python):
                 executable.write_text("fixture", encoding="ascii")
                 executable.chmod(0o700)
             (services / "supervisord.conf").write_text("fixture", encoding="ascii")
@@ -1308,8 +1587,8 @@ class DeploymentLifecycleTests(unittest.TestCase):
             self.assertEqual(
                 calls,
                 [
-                    ([str(supervisord), "-c", str(services / "supervisord.conf")], str(root)),
-                    ([str(supervisorctl), "-c", str(services / "supervisord.conf"), "status"], str(root)),
+                    ([str(bin_dir / "python"), "-m", "supervisor.supervisord", "-c", str(services / "supervisord.conf")], str(root)),
+                    ([str(bin_dir / "python"), "-m", "supervisor.supervisorctl", "-c", str(services / "supervisord.conf"), "status"], str(root)),
                 ],
             )
 

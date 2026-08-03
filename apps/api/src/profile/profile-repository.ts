@@ -1,5 +1,13 @@
 import { randomUUID } from "node:crypto";
-import { ProfileFactSchema, type Evidence, type JsonValue, type ProfileFact } from "@resume/contracts";
+import {
+  ProfileFactSchema,
+  ProfileFactUpsertInputSchema,
+  type Evidence,
+  type JsonValue,
+  type ProfileFact,
+  type ProfileFactUpsertInput
+} from "@resume/contracts";
+import { semanticLookupPaths } from "@resume/form-semantics";
 import type { SqliteDatabase } from "../db/client.js";
 
 interface FactRow {
@@ -26,6 +34,7 @@ interface ApplicationAnswerRow {
 export interface ProfileRepository {
   transaction<T>(operation: () => T): T;
   createExtracted(fact: ProfileFact): ProfileFact;
+  upsertUserFact(input: ProfileFactUpsertInput): ProfileFact;
   confirm(factId: string): ProfileFact;
   correct(factId: string, value: JsonValue, evidence: Evidence[]): ProfileFact;
   putTaskAnswer(taskId: string, fieldPath: string, value: JsonValue, evidence: Evidence[]): ProfileFact;
@@ -72,6 +81,10 @@ function parseApplicationAnswer(row: ApplicationAnswerRow): ProfileFact {
   });
 }
 
+function withRequestedFieldPath(fact: ProfileFact, fieldPath: string): ProfileFact {
+  return fact.fieldPath === fieldPath ? fact : { ...fact, fieldPath };
+}
+
 export function createProfileRepository(database: SqliteDatabase, options: ProfileRepositoryOptions = {}): ProfileRepository {
   const findFact = database.prepare("SELECT * FROM profile_facts WHERE id = ?");
   const insertFact = database.prepare(`
@@ -100,6 +113,16 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
   const findTaskAnswer = database.prepare(
     "SELECT * FROM application_answers WHERE task_id = ? AND field_path = ?"
   );
+  const findProfileFact = database.prepare(`
+    SELECT * FROM profile_facts
+    WHERE scope = 'profile' AND field_path = ? AND status IN ('user_corrected', 'user_confirmed')
+    ORDER BY CASE status WHEN 'user_corrected' THEN 0 ELSE 1 END, revision DESC, updated_at DESC, id ASC
+    LIMIT 1
+  `);
+  const findReviewedProfileFacts = database.prepare(`
+    SELECT * FROM profile_facts
+    WHERE scope = 'profile' AND field_path = ? AND status IN ('user_confirmed', 'user_corrected')
+  `);
   const insertTaskAnswer = database.prepare(`
     INSERT INTO application_answers (
       id, task_id, field_path, value_json, evidence_json, confidence, created_at, updated_at
@@ -111,6 +134,9 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
       confidence = excluded.confidence,
       updated_at = excluded.updated_at
   `);
+  const deleteTaskAnswer = database.prepare(
+    "DELETE FROM application_answers WHERE task_id = ? AND field_path = ?"
+  );
 
   const requireFact = (factId: string): ProfileFact => {
     const row = findFact.get(factId) as FactRow | undefined;
@@ -136,11 +162,51 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
 
   const supersedeReviewedAlternatives = (fact: ProfileFact, timestamp: string): void => {
     if (fact.scope !== "profile") return;
-    const alternatives = findReviewedAlternatives.all(fact.fieldPath, fact.id) as FactRow[];
-    for (const alternative of alternatives.map(parseFact)) {
+    const alternatives = new Map<string, ProfileFact>();
+    for (const fieldPath of semanticLookupPaths(fact.fieldPath)) {
+      for (const row of findReviewedAlternatives.all(fieldPath, fact.id) as FactRow[]) {
+        alternatives.set(row.id, parseFact(row));
+      }
+    }
+    for (const alternative of alternatives.values()) {
       snapshot(alternative, timestamp);
       supersedeFact.run(alternative.revision + 1, timestamp, alternative.id);
     }
+  };
+
+  const findReviewedProfileFact = (fieldPath: string): ProfileFact | undefined => {
+    const candidates = new Map<string, ProfileFact>();
+    for (const lookupPath of semanticLookupPaths(fieldPath)) {
+      for (const row of findReviewedProfileFacts.all(lookupPath) as FactRow[]) {
+        candidates.set(row.id, parseFact(row));
+      }
+    }
+    return [...candidates.values()].sort((left, right) => {
+      const statusDifference = Number(right.status === "user_corrected") - Number(left.status === "user_corrected");
+      if (statusDifference !== 0) return statusDifference;
+      if (right.revision !== left.revision) return right.revision - left.revision;
+      return left.id.localeCompare(right.id);
+    })[0];
+  };
+
+  const correctStoredFact = (factId: string, value: JsonValue, evidence: Evidence[]): ProfileFact => {
+    const current = requireFact(factId);
+    if (current.status === "superseded") throw new Error(`cannot correct superseded fact: ${factId}`);
+    const nextRevision = current.revision + 1;
+    const timestamp = now();
+    const corrected = ProfileFactSchema.parse({
+      ...current,
+      value,
+      evidence,
+      status: "user_corrected",
+      confidence: 1,
+      revision: nextRevision
+    });
+    snapshot(current, timestamp);
+    options.afterSnapshot?.();
+    updateFact.run(JSON.stringify(value), JSON.stringify(evidence), nextRevision, timestamp, factId);
+    supersedeReviewedAlternatives(corrected, timestamp);
+    return corrected;
   };
 
   return {
@@ -167,6 +233,47 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
       return parsed;
     },
 
+    upsertUserFact(input) {
+      const parsed = ProfileFactUpsertInputSchema.parse(input);
+      const evidence: Evidence[] = [{
+        documentId: "user",
+        page: 1,
+        text: `用户补充：${parsed.fieldPath}`,
+        extraction: "user"
+      }];
+      return database.transaction(() => {
+        const existing = findReviewedProfileFact(parsed.fieldPath);
+        if (existing) return correctStoredFact(existing.id, parsed.value, evidence);
+
+        const timestamp = now();
+        const created = ProfileFactSchema.parse({
+          id: randomUUID(),
+          fieldPath: parsed.fieldPath,
+          value: parsed.value,
+          status: "user_corrected",
+          confidence: 1,
+          scope: "profile",
+          evidence,
+          revision: 1
+        });
+        insertFact.run(
+          created.id,
+          created.fieldPath,
+          JSON.stringify(created.value),
+          created.status,
+          created.confidence,
+          created.scope,
+          null,
+          JSON.stringify(created.evidence),
+          created.revision,
+          timestamp,
+          timestamp
+        );
+        supersedeReviewedAlternatives(created, timestamp);
+        return created;
+      })();
+    },
+
     confirm(factId) {
       return database.transaction(() => {
         const current = requireFact(factId);
@@ -181,64 +288,53 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
     },
 
     correct(factId, value, evidence) {
-      return database.transaction(() => {
-        const current = requireFact(factId);
-        if (current.status === "superseded") throw new Error(`cannot correct superseded fact: ${factId}`);
-        const nextRevision = current.revision + 1;
-        const timestamp = now();
-        const corrected = ProfileFactSchema.parse({
-          ...current,
-          value,
-          evidence,
-          status: "user_corrected",
-          confidence: 1,
-          revision: nextRevision
-        });
-        snapshot(current, timestamp);
-        options.afterSnapshot?.();
-        updateFact.run(JSON.stringify(value), JSON.stringify(evidence), nextRevision, timestamp, factId);
-        supersedeReviewedAlternatives(corrected, timestamp);
-        return corrected;
-      })();
+      return database.transaction(() => correctStoredFact(factId, value, evidence))();
     },
 
     putTaskAnswer(taskId, fieldPath, value, evidence) {
-      const timestamp = now();
-      const fact = ProfileFactSchema.parse({
-        id: randomUUID(),
-        fieldPath,
-        value,
-        status: "user_confirmed",
-        confidence: 1,
-        scope: "application",
-        taskId,
-        evidence,
-        revision: 1
-      });
-      insertTaskAnswer.run(
-        fact.id,
-        taskId,
-        fieldPath,
-        JSON.stringify(value),
-        JSON.stringify(evidence),
-        fact.confidence,
-        timestamp,
-        timestamp
-      );
-      const stored = findTaskAnswer.get(taskId, fieldPath) as ApplicationAnswerRow;
-      return parseApplicationAnswer(stored);
+      return database.transaction(() => {
+        const timestamp = now();
+        const fact = ProfileFactSchema.parse({
+          id: randomUUID(),
+          fieldPath,
+          value,
+          status: "user_confirmed",
+          confidence: 1,
+          scope: "application",
+          taskId,
+          evidence,
+          revision: 1
+        });
+        for (const equivalentPath of semanticLookupPaths(fieldPath)) {
+          if (equivalentPath !== fieldPath) deleteTaskAnswer.run(taskId, equivalentPath);
+        }
+        insertTaskAnswer.run(
+          fact.id,
+          taskId,
+          fieldPath,
+          JSON.stringify(value),
+          JSON.stringify(evidence),
+          fact.confidence,
+          timestamp,
+          timestamp
+        );
+        const stored = findTaskAnswer.get(taskId, fieldPath) as ApplicationAnswerRow;
+        return parseApplicationAnswer(stored);
+      })();
     },
 
     resolveForTask(taskId, fieldPath) {
-      const answer = findTaskAnswer.get(taskId, fieldPath) as ApplicationAnswerRow | undefined;
-      if (answer) return parseApplicationAnswer(answer);
-      const row = database.prepare(`
-        SELECT * FROM profile_facts
-        WHERE scope = 'profile' AND field_path = ? AND status IN ('user_corrected', 'user_confirmed')
-        ORDER BY CASE status WHEN 'user_corrected' THEN 0 ELSE 1 END, revision DESC, updated_at DESC, id ASC
-        LIMIT 1
-      `).get(fieldPath) as FactRow | undefined;
-      return row ? parseFact(row) : undefined;
+      const lookupPaths = semanticLookupPaths(fieldPath);
+      for (const lookupPath of lookupPaths) {
+        const answer = findTaskAnswer.get(taskId, lookupPath) as ApplicationAnswerRow | undefined;
+        if (answer) return withRequestedFieldPath(parseApplicationAnswer(answer), fieldPath);
+      }
+      for (const lookupPath of lookupPaths) {
+        const row = findProfileFact.get(lookupPath) as FactRow | undefined;
+        if (!row) continue;
+        return withRequestedFieldPath(parseFact(row), fieldPath);
+      }
+      return undefined;
     },
 
     listActive() {

@@ -14,7 +14,12 @@ const statuses: AdapterStatus[] = [
 ];
 
 const profileApi: ProfileApi = {
-  upload: vi.fn(), listFacts: vi.fn(async () => []), confirm: vi.fn(), correct: vi.fn()
+  upload: vi.fn(),
+  listFacts: vi.fn(async () => []),
+  upsert: vi.fn(),
+  getCompleteness: vi.fn(async () => ({ completed: 0, total: 1, sections: [] })),
+  confirm: vi.fn(),
+  correct: vi.fn()
 };
 
 function deferred<T>() {
@@ -54,9 +59,9 @@ describe("ServiceStatus", () => {
     await waitFor(() => expect(healthApi.getStatuses).toHaveBeenCalled());
     const viewButtons = screen.getByRole("navigation").querySelectorAll("button");
     await user.click(viewButtons[1]!);
-    await user.type(screen.getByLabelText("Job description"), "React role");
+    await user.type(screen.getByLabelText("岗位描述"), "React role");
 
-    expect(screen.getByRole("button", { name: "Create review" })).toBeEnabled();
+    expect(screen.getByRole("button", { name: "创建审核" })).toBeEnabled();
   });
 
   it("disables new self-evaluation creation when DeepSeek is unavailable", async () => {
@@ -73,9 +78,9 @@ describe("ServiceStatus", () => {
     const viewButtons = screen.getByRole("navigation").querySelectorAll("button");
     await user.click(viewButtons[1]!);
     await screen.findByText("DeepSeek 离线");
-    await user.type(screen.getByLabelText("Job description"), "React role");
+    await user.type(screen.getByLabelText("岗位描述"), "React role");
 
-    expect(screen.getByRole("button", { name: "Create review" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "创建审核" })).toBeDisabled();
   });
 
   it("keeps the newest health refresh when responses resolve out of order", async () => {

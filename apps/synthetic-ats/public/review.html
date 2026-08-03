@@ -1,0 +1,20 @@
+<!doctype html>
+<html lang="zh-CN">
+<head><meta charset="utf-8"><title>审核申请</title></head>
+<body>
+  <main>
+    <h1>请审核申请内容</h1>
+    <p>最终提交必须由申请人亲自确认，自动化只能停留在本页。</p>
+    <form method="post" action="/submit?taskId={{TASK_ID}}">
+      <button type="submit">提交申请</button>
+      <button type="submit">确认投递</button>
+      <button type="submit">完成</button>
+      <button type="submit">立即申请</button>
+      <button type="submit" aria-label="提交申请">确认</button>
+    </form>
+    <iframe title="嵌套提交" srcdoc="&lt;form method='post' action='/submit?taskId={{TASK_ID}}'&gt;&lt;button type='submit'&gt;提交申请&lt;/button&gt;&lt;/form&gt;"></iframe>
+    <dialog open><button type="submit" form="modal-submit">确认投递</button></dialog>
+    <form id="modal-submit" method="post" action="/submit?taskId={{TASK_ID}}"></form>
+  </main>
+</body>
+</html>

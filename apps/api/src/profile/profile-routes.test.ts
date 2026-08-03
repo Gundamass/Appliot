@@ -60,8 +60,8 @@ function multipart(
   };
 }
 
-function multipartPdf(bytes: Uint8Array, mimeType = "application/pdf") {
-  return multipart([{ type: "file", bytes, mimeType }]);
+function multipartPdf(bytes: Uint8Array, mimeType = "application/pdf", filename?: string) {
+  return multipart([{ type: "file", bytes, mimeType, ...(filename ? { filename } : {}) }]);
 }
 
 function pdfBytes(size = 12): Uint8Array {
@@ -167,6 +167,110 @@ describe("profile routes", () => {
     expect(await readFile(row.source_path)).toEqual(Buffer.from(bytes));
   });
 
+  it("serves the retained original PDF by evidence fingerprint", async () => {
+    const bytes = pdfBytes(128);
+    const fingerprint = createHash("sha256").update(bytes).digest("hex");
+    const app = await buildTestApp();
+
+    expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) })).statusCode).toBe(202);
+    const response = await app.inject({ method: "GET", url: `/api/profile/documents/${fingerprint}/pdf` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("application/pdf");
+    expect(response.headers["content-disposition"]).toContain("resume.pdf");
+    expect(response.rawPayload).toEqual(Buffer.from(bytes));
+  });
+
+  it("serves a PDF whose original filename contains Chinese characters", async () => {
+    const bytes = pdfBytes(128);
+    const fingerprint = createHash("sha256").update(bytes).digest("hex");
+    const app = await buildTestApp();
+
+    expect((await app.inject({
+      method: "POST",
+      url: "/api/documents",
+      ...multipartPdf(bytes, "application/pdf", "何清-中文简历.pdf")
+    })).statusCode).toBe(202);
+    const response = await app.inject({ method: "GET", url: `/api/profile/documents/${fingerprint}/pdf` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-disposition"]).toContain('filename="resume.pdf"');
+    expect(response.headers["content-disposition"]).toContain(
+      `filename*=UTF-8''${encodeURIComponent("何清-中文简历.pdf")}`
+    );
+  });
+
+  it("rejects invalid or unknown PDF evidence fingerprints", async () => {
+    const app = await buildTestApp();
+
+    expect((await app.inject({ method: "GET", url: "/api/profile/documents/not-a-fingerprint/pdf" })).statusCode).toBe(400);
+    expect((await app.inject({ method: "GET", url: `/api/profile/documents/${"a".repeat(64)}/pdf` })).statusCode).toBe(404);
+  });
+
+  it("returns OCR grounding boxes for an exact evidence quote", async () => {
+    const bytes = pdfBytes(128);
+    const fingerprint = createHash("sha256").update(bytes).digest("hex");
+    const app = await buildTestApp({
+      extractPdf: async () => ({
+        fingerprint,
+        pages: [{
+          page: 1,
+          source: "ocr",
+          text: "<|ref|>text<|/ref|><|det|>[[377, 67, 636, 84]]<|/det|>\n邮箱：1940424503@qq.com ada@example.com"
+        }]
+      }),
+      extractFacts: async () => [{
+        id: "fact-grounded-email",
+        fieldPath: "basics.email",
+        value: "1940424503@qq.com",
+        status: "extracted",
+        confidence: 0.99,
+        scope: "profile",
+        evidence: [{
+          documentId: fingerprint,
+          page: 1,
+          text: "邮箱：1940424503@qq.com",
+          extraction: "ocr"
+        }],
+        revision: 1
+      }]
+    });
+    expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) })).statusCode).toBe(202);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/profile/documents/${fingerprint}/pages/1/grounding?text=${encodeURIComponent("邮箱：1940424503@qq.com")}`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      match: "exact",
+      coordinateSpace: 1000,
+      boxes: [{ x1: 377, y1: 67, x2: 636, y2: 84 }]
+    });
+  });
+
+  it("serves a rendered PDF page as PNG for evidence overlays", async () => {
+    const bytes = pdfBytes(128);
+    const fingerprint = createHash("sha256").update(bytes).digest("hex");
+    const renderPdfPage = vi.fn(async (_bytes: Uint8Array, _page: number) =>
+      Uint8Array.from([137, 80, 78, 71, 13, 10, 26, 10])
+    );
+    const app = await buildTestApp({ renderPdfPage });
+    expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) })).statusCode).toBe(202);
+
+    const response = await app.inject({
+      method: "GET",
+      url: `/api/profile/documents/${fingerprint}/pages/1/image`
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.headers["content-type"]).toContain("image/png");
+    expect(response.rawPayload).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    expect(renderPdfPage).toHaveBeenCalledWith(expect.any(Uint8Array), 1);
+    expect(Buffer.from(renderPdfPage.mock.calls[0]![0])).toEqual(Buffer.from(bytes));
+  });
+
   it("retains exact original PDF bytes when extraction fails", async () => {
     const bytes = pdfBytes(96);
     const { app, database } = await buildTestContext({
@@ -206,6 +310,45 @@ describe("profile routes", () => {
         extraction: "user"
       }]
     });
+  });
+
+  it("saves user supplied profile facts and reports profile completeness", async () => {
+    const app = await buildTestApp();
+
+    const saved = await app.inject({
+      method: "POST",
+      url: "/api/profile/facts",
+      payload: { fieldPath: "preferences.targetCity", value: "深圳" }
+    });
+    expect(saved.statusCode).toBe(200);
+    expect(saved.json()).toMatchObject({
+      fieldPath: "preferences.targetCity",
+      value: "深圳",
+      status: "user_corrected",
+      scope: "profile"
+    });
+
+    const completeness = await app.inject({ method: "GET", url: "/api/profile/completeness" });
+    expect(completeness.statusCode).toBe(200);
+    expect(completeness.json().sections).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        id: "preferences",
+        completed: expect.any(Number),
+        missing: expect.not.arrayContaining(["preferences.targetCity"])
+      })
+    ]));
+  });
+
+  it("rejects malformed profile fact upserts", async () => {
+    const app = await buildTestApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/profile/facts",
+      payload: { fieldPath: "", value: "深圳" }
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toEqual({ error: "Invalid request" });
   });
 
   it("returns 400 for invalid correction payloads", async () => {

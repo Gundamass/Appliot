@@ -5,7 +5,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p ../../tsconfig.json",
-    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.js --external:@napi-rs/canvas --external:better-sqlite3 --external:drizzle-orm --external:drizzle-orm/* --external:fastify --external:@fastify/* --external:pdfjs-dist/*",
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.js --external:@napi-rs/canvas --external:better-sqlite3 --external:drizzle-orm --external:drizzle-orm/* --external:fastify --external:@fastify/* --external:pdfjs-dist/* && esbuild ../browser-worker/src/main.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/browser-worker.js --external:playwright-core",
     "start": "node --env-file-if-exists=../../.env.local dist/server.js",
     "dev": "node --env-file-if-exists=../../.env.local --import tsx src/server.ts"
   },
@@ -13,7 +13,9 @@
     "@fastify/busboy": "3.2.0",
     "@fastify/multipart": "9.2.1",
     "@napi-rs/canvas": "0.1.70",
+    "@resume/action-policy": "workspace:*",
     "@resume/contracts": "workspace:*",
+    "@resume/form-semantics": "workspace:*",
     "@resume/model-provider": "workspace:*",
     "@resume/profile-domain": "workspace:*",
     "@resume/rag": "workspace:*",
@@ -21,6 +23,8 @@
     "drizzle-orm": "0.44.2",
     "fastify": "5.5.0",
     "pdfjs-dist": "5.3.31",
+    "playwright-core": "1.53.1",
+    "xstate": "5.19.4",
     "zod": "3.25.67"
   },
   "devDependencies": {

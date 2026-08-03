@@ -1,0 +1,10 @@
+{
+  "name": "@resume/synthetic-ats",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "test": "vitest run --passWithNoTests",
+    "typecheck": "tsc --noEmit -p ../../tsconfig.json",
+    "build": "tsc --noEmit -p ../../tsconfig.json"
+  }
+}

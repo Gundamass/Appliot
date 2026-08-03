@@ -1,9 +1,11 @@
 import asyncio
+from io import BytesIO
 from pathlib import Path
 
 import pytest
+from PIL import Image
 
-from resume_ocr_worker.model import DeepSeekOcrBackend, OcrInferenceError, PROMPT
+from resume_ocr_worker.model import DeepSeekOcrBackend, OcrInferenceError, PROMPT, _WARMUP_IMAGE
 
 
 class FakeTorch:
@@ -91,6 +93,13 @@ def backend(tmp_path: Path) -> DeepSeekOcrBackend:
     )
 
 
+def test_warmup_image_is_a_decodable_rgb_png():
+    with Image.open(BytesIO(_WARMUP_IMAGE)) as image:
+        image.load()
+        assert image.format == "PNG"
+        assert image.mode == "RGB"
+
+
 def test_backend_loads_pinned_local_snapshot_with_bf16_flash_attention_and_warmup(tmp_path: Path):
     instance = backend(tmp_path)
 
@@ -125,7 +134,8 @@ def test_backend_passes_exact_document_prompt_and_cleans_temporary_files(tmp_pat
     assert call["base_size"] == 1024
     assert call["image_size"] == 768
     assert call["crop_mode"] is True
-    assert call["save_results"] is True
+    assert call["eval_mode"] is True
+    assert call["save_results"] is False
     assert list(tmp_path.iterdir()) == []
 
 

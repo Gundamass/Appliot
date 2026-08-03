@@ -14,9 +14,18 @@ import { getDocument } from "pdfjs-dist/legacy/build/pdf.mjs";
 import { describe, expect, it, vi } from "vitest";
 import { createPdf, createScannedPdf } from "../../../../tests/fixtures/create-pdf.js";
 import { OcrOutputError } from "./ocr.js";
-import { classifyPdfText, extractPdf, hasUsablePdfText, InvalidPdfDocumentError } from "./extract-pdf.js";
+import { classifyPdfText, extractPdf, hasUsablePdfText, InvalidPdfDocumentError, renderPdfPage } from "./extract-pdf.js";
 
 describe("extractPdf", () => {
+  it("renders a requested PDF page as PNG and rejects a missing page", async () => {
+    const pdf = await createPdf(["First page", "Second page"]);
+
+    const image = await renderPdfPage(pdf, 2);
+
+    expect(Buffer.from(image.subarray(0, 8))).toEqual(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+    await expect(renderPdfPage(pdf, 3)).rejects.toBeInstanceOf(RangeError);
+  });
+
   it("preserves page numbers and uses OCR only for image-only pages", async () => {
     const textPdf = await createPdf(["Ada Lovelace\nada@example.com", "Short text"]);
     const scannedPdf = await createScannedPdf();

@@ -43,6 +43,7 @@ class AssetVerifierTests(unittest.TestCase):
             "aaa02f3811945a91062062994c5c4a3f4c0af2b0",
             custom_code=True,
         )
+        self._make_conda_channel()
 
     def tearDown(self) -> None:
         self.temp_directory.cleanup()
@@ -85,6 +86,61 @@ class AssetVerifierTests(unittest.TestCase):
         config.write_text("corrupt", encoding="utf-8")
 
         with self.assertRaisesRegex(verifier.VerificationError, "hash mismatch"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_conda_package_hash_mismatch(self) -> None:
+        verifier = self._load_verifier()
+        package = self.bundle / "conda-channel/linux-64/python-fixture.conda"
+        package.write_bytes(b"tampered data")
+
+        with self.assertRaisesRegex(verifier.VerificationError, "Conda package hash mismatch"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_inconsistent_current_conda_repodata(self) -> None:
+        verifier = self._load_verifier()
+        path = self.bundle / "conda-channel/linux-64/current_repodata.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        value["packages.conda"]["python-fixture.conda"]["sha256"] = "0" * 64
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+        with self.assertRaisesRegex(verifier.VerificationError, "repodata.*inconsistent"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_conda_channel_nested_directory(self) -> None:
+        verifier = self._load_verifier()
+        extra = self.bundle / "conda-channel/linux-64/unverified"
+        extra.mkdir()
+        (extra / "payload").write_bytes(b"extra")
+
+        with self.assertRaisesRegex(verifier.VerificationError, "unsafe entry"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_unsafe_conda_package_filename_before_filesystem_access(self) -> None:
+        verifier = self._load_verifier()
+        path = self.bundle / "conda-channel/linux-64/repodata.json"
+        value = json.loads(path.read_text(encoding="utf-8"))
+        record = value["packages.conda"].pop("python-fixture.conda")
+        value["packages.conda"]["../python-fixture.conda"] = record
+        path.write_text(json.dumps(value), encoding="utf-8")
+
+        with self.assertRaisesRegex(verifier.VerificationError, "filename is unsafe"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_unreferenced_conda_package(self) -> None:
+        verifier = self._load_verifier()
+        (self.bundle / "conda-channel/linux-64/unlisted.conda").write_bytes(b"extra")
+
+        with self.assertRaisesRegex(verifier.VerificationError, "Conda channel contains unreferenced files"):
+            verifier.verify_bundle(self.bundle)
+
+    def test_rejects_missing_conda_subdir(self) -> None:
+        verifier = self._load_verifier()
+        noarch = self.bundle / "conda-channel/noarch"
+        for child in noarch.iterdir():
+            child.unlink()
+        noarch.rmdir()
+
+        with self.assertRaisesRegex(verifier.VerificationError, "Conda channel structure"):
             verifier.verify_bundle(self.bundle)
 
     def test_rejects_path_traversal(self) -> None:
@@ -385,6 +441,32 @@ class AssetVerifierTests(unittest.TestCase):
             ],
         }
         (root / "worker-manifest.json").write_text(json.dumps(manifest), encoding="utf-8")
+
+    def _make_conda_channel(self) -> None:
+        root = self.bundle / "conda-channel"
+        for subdir, package_name, payload in (
+            ("linux-64", "python-fixture.conda", b"linux package"),
+            ("noarch", "pip-fixture.conda", b"noarch package"),
+        ):
+            directory = root / subdir
+            directory.mkdir(parents=True)
+            package = directory / package_name
+            package.write_bytes(payload)
+            record = {
+                package_name: {
+                    "name": "python" if subdir == "linux-64" else "pip",
+                    "version": "3.10.0" if subdir == "linux-64" else "1.0",
+                    "build": "fixture",
+                    "build_number": 0,
+                    "subdir": subdir,
+                    "depends": [],
+                    "sha256": sha256(package),
+                    "size": package.stat().st_size,
+                }
+            }
+            repodata = {"info": {"subdir": subdir}, "packages": {}, "packages.conda": record}
+            (directory / "repodata.json").write_text(json.dumps(repodata), encoding="utf-8")
+            (directory / "current_repodata.json").write_text(json.dumps(repodata), encoding="utf-8")
 
     def _make_model(
         self,

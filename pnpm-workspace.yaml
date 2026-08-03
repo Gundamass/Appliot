@@ -1,3 +1,10 @@
 packages:
   - apps/*
   - packages/*
+allowBuilds:
+  better-sqlite3: true
+  esbuild: true
+overrides:
+  node-gyp: 12.1.0
+patchedDependencies:
+  better-sqlite3@11.10.0: patches/better-sqlite3@11.10.0.patch

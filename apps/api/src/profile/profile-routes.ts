@@ -1,7 +1,16 @@
 import { Busboy as BusboyConstructor, type Busboy as BusboyParser, type BusboyFileStream } from "@fastify/busboy";
+import { readFile } from "node:fs/promises";
+import { basename } from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
-import { DocumentResponseSchema, JsonValueSchema, ProfileFactSchema } from "@resume/contracts";
+import {
+  DocumentResponseSchema,
+  JsonValueSchema,
+  ProfileCompletenessSchema,
+  ProfileFactSchema,
+  ProfileFactUpsertInputSchema
+} from "@resume/contracts";
+import { renderPdfPage as renderProfilePdfPage } from "@resume/profile-domain/src/pdf/extract-pdf.js";
 import { sendError } from "../http-response.js";
 import {
   DuplicateDocumentError,
@@ -12,8 +21,14 @@ import {
   type ProfileImportDependencies
 } from "./import-service.js";
 import type { ProfileRepository } from "./profile-repository.js";
+import { createDocumentRepository } from "./document-repository.js";
+import { findEvidenceGrounding } from "./evidence-grounding.js";
+import { calculateProfileCompleteness } from "./profile-completeness.js";
 
 const FactIdParamsSchema = z.object({ id: z.string().min(1).max(128) });
+const DocumentFingerprintParamsSchema = z.object({ fingerprint: z.string().regex(/^[a-f0-9]{64}$/) });
+const DocumentPageParamsSchema = DocumentFingerprintParamsSchema.extend({ page: z.coerce.number().int().positive() });
+const GroundingQuerySchema = z.object({ text: z.string().min(1).max(12_000) });
 const CorrectionBodySchema = z.object({
   value: JsonValueSchema
 }).strict();
@@ -32,9 +47,13 @@ class MultipartInputError extends Error {
 
 export interface ProfileRouteDependencies extends ProfileImportDependencies {
   profileRepository: ProfileRepository;
+  renderPdfPage?: (bytes: Uint8Array, page: number) => Promise<Uint8Array>;
 }
 
 export function registerProfileRoutes(app: FastifyInstance, dependencies: ProfileRouteDependencies): void {
+  const documents = createDocumentRepository(dependencies.database);
+  const renderPdfPage = dependencies.renderPdfPage ?? renderProfilePdfPage;
+
   app.post("/api/documents", async (request, reply) => {
     if (!request.isMultipart()) return sendError(reply, 400, "Invalid request");
 
@@ -59,6 +78,69 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
 
   app.get("/api/profile/facts", async (_request, reply) => {
     return reply.code(200).send(z.array(ProfileFactSchema).parse(dependencies.profileRepository.listActive()));
+  });
+
+  app.post("/api/profile/facts", async (request, reply) => {
+    const body = ProfileFactUpsertInputSchema.safeParse(request.body);
+    if (!body.success) return sendError(reply, 400, "Invalid request");
+    return reply.code(200).send(ProfileFactSchema.parse(
+      dependencies.profileRepository.upsertUserFact(body.data)
+    ));
+  });
+
+  app.get("/api/profile/completeness", async (_request, reply) => {
+    return reply.code(200).send(ProfileCompletenessSchema.parse(
+      calculateProfileCompleteness(dependencies.profileRepository.listActive())
+    ));
+  });
+
+  app.get("/api/profile/documents/:fingerprint/pdf", async (request, reply) => {
+    const params = DocumentFingerprintParamsSchema.safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "Invalid request");
+    const document = documents.findByFingerprint(params.data.fingerprint);
+    if (!document || document.importStatus !== "completed") return sendError(reply, 404, "Document not found");
+
+    const filename = basename(document.filename).replace(/[\r\n]/g, "_") || "resume.pdf";
+    const fallbackFilename = /^[\x20-\x7e]+$/.test(filename)
+      ? filename.replace(/["\\]/g, "_")
+      : "resume.pdf";
+    const bytes = await readFile(document.sourcePath);
+    return reply
+      .code(200)
+      .type("application/pdf")
+      .header(
+        "Content-Disposition",
+        `inline; filename="${fallbackFilename}"; filename*=UTF-8''${encodeContentDispositionFilename(filename)}`
+      )
+      .header("Cache-Control", "private, max-age=3600")
+      .send(bytes);
+  });
+
+  app.get("/api/profile/documents/:fingerprint/pages/:page/image", async (request, reply) => {
+    const params = DocumentPageParamsSchema.safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "Invalid request");
+    const document = documents.findByFingerprint(params.data.fingerprint);
+    if (!document || document.importStatus !== "completed") return sendError(reply, 404, "Document not found");
+    try {
+      const image = await renderPdfPage(await readFile(document.sourcePath), params.data.page);
+      return reply
+        .code(200)
+        .type("image/png")
+        .header("Cache-Control", "private, max-age=3600")
+        .send(image);
+    } catch (error) {
+      if (error instanceof RangeError) return sendError(reply, 404, "Document page not found");
+      throw error;
+    }
+  });
+
+  app.get("/api/profile/documents/:fingerprint/pages/:page/grounding", async (request, reply) => {
+    const params = DocumentPageParamsSchema.safeParse(request.params);
+    const query = GroundingQuerySchema.safeParse(request.query);
+    if (!params.success || !query.success) return sendError(reply, 400, "Invalid request");
+    const content = documents.findPageContent(params.data.fingerprint, params.data.page);
+    if (content === undefined) return sendError(reply, 404, "Document page not found");
+    return reply.code(200).send(findEvidenceGrounding(content, query.data.text));
   });
 
   app.post("/api/profile/facts/:id/confirm", async (request, reply) => {
@@ -89,6 +171,12 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
       return profileFactError(error, reply);
     }
   });
+}
+
+function encodeContentDispositionFilename(filename: string): string {
+  return encodeURIComponent(filename).replace(/['()*]/g, (character) =>
+    `%${character.charCodeAt(0).toString(16).toUpperCase()}`
+  );
 }
 
 function hasPdfSignature(bytes: Uint8Array): boolean {

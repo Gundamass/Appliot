@@ -19,6 +19,8 @@ describe("HTTP response contracts", () => {
 
   it("accepts only a non-empty strict API error envelope", () => {
     expect(ErrorResponseSchema.parse({ error: "Invalid request" })).toEqual({ error: "Invalid request" });
+    expect(ErrorResponseSchema.parse({ error: "Invalid request", code: "invalid_request" }))
+      .toEqual({ error: "Invalid request", code: "invalid_request" });
     expect(ErrorResponseSchema.safeParse({ error: "", detail: "extra" }).success).toBe(false);
   });
 });

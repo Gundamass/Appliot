@@ -47,7 +47,7 @@ scripts/                                   Local development and packaging comma
 - Consumes: `ApplicationService` from Plan 2.
 - Produces: task CRUD, answer/review commands, browser-open command, and `GET /api/applications/:id/events` SSE.
 
-- [ ] **Step 1: Write failing route and event tests**
+- [x] **Step 1: Write failing route and event tests**
 
 ```ts
 it("creates a task and emits state changes without exposing a submit command", async () => {
@@ -58,12 +58,12 @@ it("creates a task and emits state changes without exposing a submit command", a
 });
 ```
 
-- [ ] **Step 2: Run route tests and verify failure**
+- [x] **Step 2: Run route tests and verify failure**
 
 Run: `pnpm --filter @resume/api test -- routes.test.ts`
 Expected: FAIL because application routes are not registered.
 
-- [ ] **Step 3: Implement Zod-validated endpoints and replayable SSE**
+- [x] **Step 3: Implement Zod-validated endpoints and replayable SSE**
 
 Expose these commands only: create, cancel, open-browser, resume, answer-questions, approve-content, reject-content, and promote-answer-to-profile. Store monotonically increasing event IDs so reconnecting SSE clients pass `Last-Event-ID` and receive missed events.
 
@@ -79,7 +79,7 @@ export const ApplicationCommandSchema = z.discriminatedUnion("type", [
 ]);
 ```
 
-- [ ] **Step 4: Verify authorization scope, reconnect, malformed commands, and missing tasks**
+- [x] **Step 4: Verify authorization scope, reconnect, malformed commands, and missing tasks**
 
 Run: `pnpm --filter @resume/api test -- routes.test.ts`
 Expected: PASS with `201/200/400/404` behavior and no representable submit command.
@@ -104,7 +104,7 @@ git commit -m "feat: expose application task api and events"
 - Consumes: Task APIs and SSE from Task 1.
 - Produces: URL/job input, browser launch, manual-login waiting, state timeline, and connection recovery.
 
-- [ ] **Step 1: Write failing task-page tests**
+- [x] **Step 1: Write failing task-page tests**
 
 ```tsx
 it("shows manual login and advances from task events", async () => {
@@ -116,16 +116,16 @@ it("shows manual login and advances from task events", async () => {
 });
 ```
 
-- [ ] **Step 2: Run task UI tests and verify failure**
+- [x] **Step 2: Run task UI tests and verify failure**
 
 Run: `pnpm --filter @resume/web test -- ApplicationTaskPage.test.tsx`
 Expected: FAIL because the task page is missing.
 
-- [ ] **Step 3: Implement operational task UI**
+- [x] **Step 3: Implement operational task UI**
 
 Use a restrained full-width work surface: compact task header, status timeline, current-page field progress, browser connection, and only context-valid commands. Reconnect SSE with backoff and display the last checkpoint while disconnected. Do not place instructional feature copy or a submit control in the application.
 
-- [ ] **Step 4: Verify create, login, reconnect, cancel, and narrow layout**
+- [x] **Step 4: Verify create, login, reconnect, cancel, and narrow layout**
 
 Run: `pnpm --filter @resume/web test -- ApplicationTaskPage.test.tsx NewApplicationPage.test.tsx && pnpm --filter @resume/web build`
 Expected: PASS and production build completes.
@@ -150,7 +150,7 @@ git commit -m "feat: add live application task workspace"
 - Consumes: grouped `needs_question` decisions and self-evaluation drafts.
 - Produces: one page-level answer command and explicit adopt/edit/reject review commands.
 
-- [ ] **Step 1: Write failing grouped-question and review tests**
+- [x] **Step 1: Write failing grouped-question and review tests**
 
 ```tsx
 it("sends all current-page answers in one command", async () => {
@@ -164,16 +164,16 @@ it("sends all current-page answers in one command", async () => {
 });
 ```
 
-- [ ] **Step 2: Run review UI tests and verify failure**
+- [x] **Step 2: Run review UI tests and verify failure**
 
 Run: `pnpm --filter @resume/web test -- QuestionPanel.test.tsx ContentReviewPage.test.tsx`
 Expected: FAIL because review components are absent.
 
-- [ ] **Step 3: Implement answer scope and side-by-side content diff**
+- [x] **Step 3: Implement answer scope and side-by-side content diff**
 
 Question answers default to application scope and require a separate checkbox to save as a profile default. The review page shows original, draft, editable final text, reasons, evidence, and unsupported-claim warnings. `blocked` drafts have no approve command.
 
-- [ ] **Step 4: Verify editing, rejection, evidence inspection, and scope promotion**
+- [x] **Step 4: Verify editing, rejection, evidence inspection, and scope promotion**
 
 Run: `pnpm --filter @resume/web test -- QuestionPanel.test.tsx ContentReviewPage.test.tsx`
 Expected: PASS; no draft is approved implicitly.

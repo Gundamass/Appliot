@@ -8,3 +8,11 @@ playwright-report/
 test-results/
 .worktrees/
 .superpowers/
+.codegraph/
+*.log
+playwright-artifacts/
+apps/api/browser-profile/
+**/__pycache__/
+*.py[cod]
+*.egg-info/
+build/

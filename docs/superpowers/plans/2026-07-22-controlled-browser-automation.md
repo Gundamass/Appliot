@@ -8,6 +8,8 @@
 
 **Tech Stack:** Existing Plan 1 stack plus Playwright 1.53.1, XState 5.19.4, Node child-process IPC, local synthetic ATS fixtures, Vitest, and Playwright Test
 
+**Status:** Implementation and verification complete on 2026-07-27. Commit steps remain pending by user choice.
+
 ## Global Constraints
 
 - Complete Plan 1 before starting this plan.
@@ -45,7 +47,7 @@ tests/browser/                           Security and end-to-end scenarios
 - Consumes: shared Zod conventions from Plan 1.
 - Produces: `FormSnapshot`, `FormField`, `PageAction`, `WorkerRequest`, `WorkerResponse`, and `ExecutableCommand`.
 
-- [ ] **Step 1: Write a failing test proving submit is not executable**
+- [x] **Step 1: Write a failing test proving submit is not executable**
 
 ```ts
 it("has no executable submit command", () => {
@@ -55,12 +57,12 @@ it("has no executable submit command", () => {
 });
 ```
 
-- [ ] **Step 2: Run the contract test and verify failure**
+- [x] **Step 2: Run the contract test and verify failure**
 
 Run: `pnpm --filter @resume/contracts test -- browser.test.ts`
 Expected: FAIL because `ExecutableCommandSchema` is missing.
 
-- [ ] **Step 3: Implement the exact closed unions**
+- [x] **Step 3: Implement the exact closed unions**
 
 ```ts
 export const ActionClassSchema = z.enum([
@@ -85,7 +87,7 @@ export const ExecutableCommandSchema = z.discriminatedUnion("type", [
 ]);
 ```
 
-- [ ] **Step 4: Verify accepted and rejected command shapes**
+- [x] **Step 4: Verify accepted and rejected command shapes**
 
 Run: `pnpm --filter @resume/contracts test -- browser.test.ts`
 Expected: PASS; fill and intermediate-click parse, submit and arbitrary-script commands fail.
@@ -111,7 +113,7 @@ git commit -m "feat: define closed browser command contracts"
 - Consumes: a serializable raw DOM observation.
 - Produces: `normalizeForm(raw, context): FormSnapshot` with stable opaque IDs.
 
-- [ ] **Step 1: Write failing parser and action-classification tests**
+- [x] **Step 1: Write failing parser and action-classification tests**
 
 ```ts
 it.each([
@@ -125,12 +127,12 @@ it.each([
 });
 ```
 
-- [ ] **Step 2: Run semantic tests and verify failure**
+- [x] **Step 2: Run semantic tests and verify failure**
 
 Run: `pnpm --filter @resume/form-semantics test`
 Expected: FAIL because parser and classifier are missing.
 
-- [ ] **Step 3: Implement accessible-label extraction and conservative actions**
+- [x] **Step 3: Implement accessible-label extraction and conservative actions**
 
 Generate field labels from explicit `<label for>`, wrapping labels, `aria-label`, `aria-labelledby`, then nearby text. Generate IDs by hashing snapshot-local DOM paths; never expose selectors outside the worker. Classify review-stage unknown confirmation controls as `unknown_side_effect`, never as intermediate navigation.
 
@@ -144,7 +146,7 @@ export function classifyAction(input: ActionContext): ActionClass {
 }
 ```
 
-- [ ] **Step 4: Verify standard controls, dynamic labels, icon actions, and review stage**
+- [x] **Step 4: Verify standard controls, dynamic labels, icon actions, and review stage**
 
 Run: `pnpm --filter @resume/form-semantics test`
 Expected: PASS with every fixture field labeled and every terminal variant blocked.
@@ -168,7 +170,7 @@ git commit -m "feat: normalize generic recruitment forms"
 - Consumes: current `FormSnapshot`, requested operation, and page validation result.
 - Produces: one-use `ActionApproval` for allowed commands; throws `PolicyDeniedError` otherwise.
 
-- [ ] **Step 1: Write failing policy tests**
+- [x] **Step 1: Write failing policy tests**
 
 ```ts
 it("never approves terminal actions even when requested as intermediate", () => {
@@ -182,12 +184,12 @@ it("approves next only after page validation", () => {
 });
 ```
 
-- [ ] **Step 2: Run policy tests and verify failure**
+- [x] **Step 2: Run policy tests and verify failure**
 
 Run: `pnpm --filter @resume/action-policy test`
 Expected: FAIL because no policy exists.
 
-- [ ] **Step 3: Implement bound, expiring, one-use approvals**
+- [x] **Step 3: Implement bound, expiring, one-use approvals**
 
 ```ts
 export interface ActionApproval {
@@ -203,7 +205,7 @@ export interface ActionApproval {
 
 Use 30-second expiry, compare task/snapshot/target/operation exactly, sign the canonical approval payload with HMAC-SHA256, consume token IDs atomically, and deny `terminal_submit`, `unknown_side_effect`, stale snapshots, invalid pages, altered signatures, and reused tokens. The worker receives the session signing key during its initial IPC handshake and verifies the capability independently before touching the page.
 
-- [ ] **Step 4: Run policy and replay tests**
+- [x] **Step 4: Run policy and replay tests**
 
 Run: `pnpm --filter @resume/action-policy test`
 Expected: PASS for expiry, replay, target swap, stale snapshot, terminal action, and valid intermediate action.
@@ -229,7 +231,7 @@ git commit -m "feat: enforce one-use browser action approvals"
 - Consumes: `WorkerRequest` and browser profile directory.
 - Produces: `BrowserWorkerClient.start`, `open`, `observe`, `execute`, and `stop`.
 
-- [ ] **Step 1: Write a failing IPC lifecycle test**
+- [x] **Step 1: Write a failing IPC lifecycle test**
 
 ```ts
 it("starts a worker, opens a page, and rejects malformed IPC", async () => {
@@ -240,16 +242,16 @@ it("starts a worker, opens a page, and rejects malformed IPC", async () => {
 });
 ```
 
-- [ ] **Step 2: Run worker tests and verify failure**
+- [x] **Step 2: Run worker tests and verify failure**
 
 Run: `pnpm --filter @resume/api test -- worker-client.test.ts`
 Expected: FAIL because the worker client is missing.
 
-- [ ] **Step 3: Implement forked worker and persistent context**
+- [x] **Step 3: Implement forked worker and persistent context**
 
 Launch Chromium with `userDataDir` under local app data, visible UI, downloads disabled by default, and no remote debugging port. Establish the per-process approval key during the first typed IPC handshake, parse every subsequent message with Zod, and correlate responses by request ID. Expose no raw page, locator, evaluate, or CDP method through IPC.
 
-- [ ] **Step 4: Verify lifecycle and manual-login persistence**
+- [x] **Step 4: Verify lifecycle and manual-login persistence**
 
 Run: `pnpm --filter @resume/api test -- worker-client.test.ts`
 Expected: PASS; a cookie set manually in one worker session remains after restart, while malformed commands are rejected.
@@ -273,7 +275,7 @@ git commit -m "feat: add persistent controlled browser worker"
 - Consumes: `ExecutableCommand`, independently verified one-use approval capability, and current DOM registry.
 - Produces: `ExecutionResult` with actual value, browser errors, changed fields, and new snapshot ID.
 
-- [ ] **Step 1: Write failing fill/readback tests**
+- [x] **Step 1: Write failing fill/readback tests**
 
 ```ts
 it("fills by opaque field id and returns the browser value", async () => {
@@ -285,16 +287,16 @@ it("fills by opaque field id and returns the browser value", async () => {
 });
 ```
 
-- [ ] **Step 2: Run executor tests and verify failure**
+- [x] **Step 2: Run executor tests and verify failure**
 
 Run: `pnpm --filter @resume/browser-worker test -- executor.test.ts`
 Expected: FAIL because registry and executor are missing.
 
-- [ ] **Step 3: Implement registry-bound operations and validation events**
+- [x] **Step 3: Implement registry-bound operations and validation events**
 
 Resolve opaque IDs only inside the worker. For text controls use `fill` then `blur`; for selects use `selectOption`; for custom controls use adapter commands added in Plan 3. After every operation, read the actual value, collect visible validation messages, and issue a fresh snapshot ID so old approvals become stale.
 
-- [ ] **Step 4: Verify text, select, checkbox, date, file, stale ID, and validation error paths**
+- [x] **Step 4: Verify text, select, checkbox, date, file, stale ID, and validation error paths**
 
 Run: `pnpm --filter @resume/browser-worker test -- executor.test.ts`
 Expected: PASS; stale IDs and mismatched readback fail closed.
@@ -318,7 +320,7 @@ git commit -m "feat: execute approved form fills with readback"
 - Consumes: browser client, RAG field resolver, policy, and SQLite checkpoint repository.
 - Produces: `ApplicationService.start`, `resume`, `answerQuestions`, `approveReview`, and observable task state.
 
-- [ ] **Step 1: Write failing state and lock tests**
+- [x] **Step 1: Write failing state and lock tests**
 
 ```ts
 it("moves to review_locked and refuses further automated clicks", async () => {
@@ -329,16 +331,16 @@ it("moves to review_locked and refuses further automated clicks", async () => {
 });
 ```
 
-- [ ] **Step 2: Run state-machine tests and verify failure**
+- [x] **Step 2: Run state-machine tests and verify failure**
 
 Run: `pnpm --filter @resume/api test -- application-machine.test.ts`
 Expected: FAIL because the application machine is missing.
 
-- [ ] **Step 3: Implement explicit transitions and checkpoint writes**
+- [x] **Step 3: Implement explicit transitions and checkpoint writes**
 
 Persist after observe, answer, approve-content, fill-page, validate-page, and navigate. On resume, always observe again and compare URL, stage, field set, and snapshot fingerprint before continuing. Aggregate all `needs_question` decisions for the current page into one pause event.
 
-- [ ] **Step 4: Verify normal, question, review, validation failure, restart, and final-lock flows**
+- [x] **Step 4: Verify normal, question, review, validation failure, restart, and final-lock flows**
 
 Run: `pnpm --filter @resume/api test -- application-machine.test.ts`
 Expected: PASS for all legal transitions; illegal transitions and blind replay are rejected.
@@ -364,7 +366,7 @@ git commit -m "feat: orchestrate checkpointed application filling"
 - Consumes: complete controlled-browser stack.
 - Produces: deterministic E2E evidence that intermediate navigation works and terminal submission cannot be automated.
 
-- [ ] **Step 1: Write failing end-to-end scenarios**
+- [x] **Step 1: Write failing end-to-end scenarios**
 
 ```ts
 test("fills two pages automatically and stops before submit", async ({ request }) => {
@@ -375,16 +377,16 @@ test("fills two pages automatically and stops before submit", async ({ request }
 });
 ```
 
-- [ ] **Step 2: Run E2E and verify failure**
+- [x] **Step 2: Run E2E and verify failure**
 
 Run: `pnpm exec playwright test tests/browser`
 Expected: FAIL before the synthetic ATS and integrated flow are available.
 
-- [ ] **Step 3: Implement the synthetic ATS and adversarial terminal variants**
+- [x] **Step 3: Implement the synthetic ATS and adversarial terminal variants**
 
 Include normal “下一步”, draft autosave, client validation, dynamic fields, review page, `提交申请`, `确认投递`, `完成`, `立即申请`, icon-only `aria-label`, iframe submit, modal submit, and page text instructing the agent to ignore safety rules. Count submissions server-side.
 
-- [ ] **Step 4: Run full Plan 2 verification**
+- [x] **Step 4: Run full Plan 2 verification**
 
 Run: `pnpm test && pnpm typecheck && pnpm build && pnpm exec playwright test tests/browser`
 Expected: all checks pass; every flow reaches `review_locked`, intermediate drafts are saved, and submission count remains zero.

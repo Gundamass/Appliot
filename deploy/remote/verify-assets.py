@@ -53,7 +53,13 @@ class VerificationError(ValueError):
 
 def verify_bundle(bundle: Union[Path, str]) -> str:
     bundle_root = _safe_root(Path(bundle), "bundle")
-    _assert_exact_children(bundle_root, {"models", "workers"}, set(), "bundle structure")
+    _assert_exact_children(
+        bundle_root,
+        {"conda-channel", "models", "workers"},
+        set(),
+        "bundle structure",
+    )
+    _verify_conda_channel(bundle_root / "conda-channel")
     _assert_exact_children(
         bundle_root / "workers",
         {item["directory"] for item in WORKERS},
@@ -115,6 +121,83 @@ def verify_bundle(bundle: Union[Path, str]) -> str:
         if expected.get("requires_review"):
             _verify_custom_code_review(manifest_path, manifest, verified)
     return _fingerprint_closure(bundle_root)
+
+
+def _verify_conda_channel(channel: Path) -> None:
+    root = _safe_root(channel, "Conda channel")
+    _assert_exact_children(root, {"linux-64", "noarch"}, set(), "Conda channel structure")
+    for subdir in ("linux-64", "noarch"):
+        directory = _safe_root(root / subdir, "Conda channel subdirectory")
+        indexes: List[Dict[str, Any]] = []
+        repodata_path = directory / "repodata.json"
+        current_path = directory / "current_repodata.json"
+        for path in (repodata_path, current_path):
+            value = _read_json_object(path, "Conda repodata")
+            info = value.get("info")
+            if not isinstance(info, dict) or info.get("subdir") != subdir:
+                raise VerificationError(f"{path}: Conda repodata subdir is invalid")
+            records: Dict[str, Any] = {}
+            for key in ("packages", "packages.conda"):
+                entries = value.get(key, {})
+                if not isinstance(entries, dict):
+                    raise VerificationError(f"{path}: Conda repodata packages are invalid")
+                records.update(entries)
+            for filename, record in records.items():
+                if not isinstance(filename, str) or not isinstance(record, dict):
+                    raise VerificationError(f"{path}: Conda repodata record is invalid")
+                if (
+                    filename in ("", ".", "..")
+                    or "/" in filename
+                    or "\\" in filename
+                    or Path(filename).name != filename
+                ):
+                    raise VerificationError(f"{path}: Conda package filename is unsafe")
+                expected_hash = record.get("sha256")
+                expected_size = record.get("size")
+                if not isinstance(expected_hash, str) or SHA256.fullmatch(expected_hash) is None:
+                    raise VerificationError(f"{path}: Conda package hash is invalid")
+                if not isinstance(expected_size, int) or expected_size < 1:
+                    raise VerificationError(f"{path}: Conda package size is invalid")
+            indexes.append(records)
+        if indexes[0] != indexes[1]:
+            raise VerificationError(f"{directory}: Conda repodata indexes are inconsistent")
+        referenced = set(indexes[0])
+        for filename, record in indexes[0].items():
+                package = directory / filename
+                if not package.is_file() or package.is_symlink():
+                    raise VerificationError(f"{package}: Conda package is missing or unsafe")
+                expected_hash = record["sha256"]
+                expected_size = record["size"]
+                if package.stat().st_size != expected_size:
+                    raise VerificationError(f"{package}: Conda package size mismatch")
+                actual_hash = _sha256_file(package)
+                if not hmac.compare_digest(actual_hash.lower(), expected_hash.lower()):
+                    raise VerificationError(f"{package}: Conda package hash mismatch")
+        allowed = referenced | {"repodata.json", "current_repodata.json"}
+        children = list(directory.iterdir())
+        if any(child.is_symlink() or not child.is_file() for child in children):
+            raise VerificationError(f"{directory}: Conda channel contains an unsafe entry")
+        if {child.name for child in children} != allowed:
+            raise VerificationError(f"{directory}: Conda channel contains unreferenced files")
+
+
+def _read_json_object(path: Path, label: str) -> Dict[str, Any]:
+    if path.is_symlink() or not path.is_file():
+        raise VerificationError(f"{path}: {label} is missing or unsafe")
+    def reject_duplicates(pairs: List[Tuple[str, Any]]) -> Dict[str, Any]:
+        value: Dict[str, Any] = {}
+        for key, item in pairs:
+            if key in value:
+                raise VerificationError(f"{path}: duplicate JSON field {key}")
+            value[key] = item
+        return value
+    try:
+        value = json.loads(path.read_text(encoding="utf-8"), object_pairs_hook=reject_duplicates)
+    except (OSError, UnicodeError, json.JSONDecodeError) as error:
+        raise VerificationError(f"{path}: {label} is invalid") from error
+    if not isinstance(value, dict):
+        raise VerificationError(f"{path}: {label} must contain an object")
+    return value
 
 
 def _safe_root(path: Path, label: str) -> Path:

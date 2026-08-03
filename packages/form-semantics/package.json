@@ -1,0 +1,21 @@
+{
+  "name": "@resume/form-semantics",
+  "private": true,
+  "type": "module",
+  "exports": {
+    ".": "./src/index.ts",
+    "./field-registry": "./src/field-registry.ts"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "typecheck": "tsc --noEmit -p ../../tsconfig.json",
+    "build": "tsc --noEmit -p ../../tsconfig.json"
+  },
+  "dependencies": {
+    "@resume/contracts": "workspace:*"
+  },
+  "devDependencies": {
+    "@types/jsdom": "21.1.7",
+    "jsdom": "29.1.1"
+  }
+}

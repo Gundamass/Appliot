@@ -1,17 +1,20 @@
 {
   "name": "resume-application-assistant",
   "private": true,
+  "type": "module",
   "packageManager": "pnpm@10.13.1",
   "engines": {
     "node": ">=24.14.1"
   },
   "scripts": {
     "test": "corepack pnpm -r test",
+    "test:e2e": "node scripts/run-playwright.mjs test",
     "typecheck": "tsc --noEmit",
     "build": "corepack pnpm -r build",
     "start:api": "corepack pnpm --filter @resume/api start"
   },
   "devDependencies": {
+    "@playwright/test": "1.53.1",
     "@types/node": "24.0.0",
     "node-gyp": "12.1.0",
     "pdf-lib": "1.17.1",
@@ -29,5 +32,8 @@
     "patchedDependencies": {
       "better-sqlite3@11.10.0": "patches/better-sqlite3@11.10.0.patch"
     }
+  },
+  "optionalDependencies": {
+    "@rollup/rollup-win32-x64-msvc": "4.62.2"
   }
 }

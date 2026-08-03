@@ -24,7 +24,12 @@ const review = {
 describe("self-evaluation workflow", () => {
   it("creates from job provenance and promotes only after explicit approval", async () => {
     const profileApi: ProfileApi = {
-      upload: vi.fn(), listFacts: vi.fn(async () => []), confirm: vi.fn(), correct: vi.fn()
+      upload: vi.fn(),
+      listFacts: vi.fn(async () => []),
+      upsert: vi.fn(),
+      getCompleteness: vi.fn(async () => ({ completed: 0, total: 1, sections: [] })),
+      confirm: vi.fn(),
+      correct: vi.fn()
     };
     const reviewApi: SelfEvaluationReviewApi = {
       create: vi.fn(async () => review),
@@ -40,17 +45,17 @@ describe("self-evaluation workflow", () => {
     const taskInput = screen.getByLabelText("任务 ID");
     await user.clear(taskInput);
     await user.type(taskInput, "task-new");
-    await user.type(screen.getByLabelText("Job description"), "React platform role");
-    await user.click(screen.getByRole("button", { name: "Create review" }));
+    await user.type(screen.getByLabelText("岗位描述"), "React platform role");
+    await user.click(screen.getByRole("button", { name: "创建审核" }));
 
     expect(reviewApi.create).toHaveBeenCalledWith("task-new", "React platform role");
     expect(await screen.findByText("Tailored summary")).toBeVisible();
     expect(reviewApi.approve).not.toHaveBeenCalled();
 
     await user.click(screen.getByRole("button", { name: "采用此版本" }));
-    expect(await screen.findByRole("button", { name: "Promote to profile" })).toBeVisible();
+    expect(await screen.findByRole("button", { name: "推广到长期资料" })).toBeVisible();
     expect(reviewApi.promote).not.toHaveBeenCalled();
-    await user.click(screen.getByRole("button", { name: "Promote to profile" }));
+    await user.click(screen.getByRole("button", { name: "推广到长期资料" }));
     expect(reviewApi.promote).toHaveBeenCalledWith("task-new");
   });
 });

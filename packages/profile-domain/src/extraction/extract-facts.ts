@@ -10,8 +10,8 @@ export const EXTRACTION_RULES = [
   "Do not infer or add unsupported claims.",
   "Scan the entire resume and cover every explicitly present section: basics, education, internship and work experience, projects, skills, certificates, links, self-evaluation, and job preferences.",
   "Do not stop after extracting basic or education fields.",
-  "Use only these canonical field paths when the value is present: basics.name, basics.email, basics.phone, basics.wechat, basics.address, basics.birthDate, basics.location; education[index].school, education[index].degree, education[index].major, education[index].startDate, education[index].endDate, education[index].gpa, education[index].description; work[index].company, work[index].title, work[index].employmentType, work[index].startDate, work[index].endDate, work[index].location, work[index].description, work[index].achievements; projects[index].name, projects[index].role, projects[index].startDate, projects[index].endDate, projects[index].description, projects[index].technologies, projects[index].url; skills[index]; certificates[index].name, certificates[index].issuer, certificates[index].date, certificates[index].credentialId, certificates[index].url; links.website, links.github, links.linkedin, links.portfolio; self.summary; preferences.targetRole, preferences.targetCity, preferences.employmentType, preferences.availability, preferences.salary.",
-  "Treat internships as work entries and preserve their internship role or employment type when the page states it.",
+  "Use only these canonical field paths when the value is present: basics.name, basics.email, basics.phone, basics.wechat, basics.address, basics.birthDate, basics.location; education[index].school, education[index].degree, education[index].major, education[index].startDate, education[index].endDate, education[index].gpa, education[index].description, education[index].details; work[index].company, work[index].title, work[index].employmentType, work[index].startDate, work[index].endDate, work[index].location, work[index].description, work[index].highlights[index]; projects[index].name, projects[index].role, projects[index].startDate, projects[index].endDate, projects[index].description, projects[index].technologies, projects[index].highlights[index], projects[index].url; skills[index]; certificates[index].name, certificates[index].issuer, certificates[index].date, certificates[index].credentialId, certificates[index].url; links.website, links.github, links.linkedin, links.portfolio; self.summary; preferences.targetRole, preferences.targetCity, preferences.employmentType, preferences.availability, preferences.salary.",
+  "Treat internships as work entries. Put the exact role shown by the resume in work[index].title, including the internship wording when present, for example Java backend internship. Use work[index].employmentType only for the generic category such as internship or full-time, never as a substitute for the role.",
   "Emit separate leaf facts for distinct values and use stable zero-based indexes for repeated education, work, project, skill, and certificate entries."
 ].join(" ");
 
@@ -39,6 +39,13 @@ const EXTRACTION_JSON_EXAMPLE = {
       confidence: 0.98
     },
     {
+      fieldPath: "work[0].title",
+      value: "Java Backend Internship",
+      page: 1,
+      quote: "Java Backend Internship",
+      confidence: 0.98
+    },
+    {
       fieldPath: "work[0].employmentType",
       value: "internship",
       page: 1,
@@ -46,11 +53,25 @@ const EXTRACTION_JSON_EXAMPLE = {
       confidence: 0.95
     },
     {
+      fieldPath: "work[0].highlights[0]",
+      value: "Reduced API latency by 80%",
+      page: 1,
+      quote: "Reduced API latency by 80%",
+      confidence: 0.97
+    },
+    {
       fieldPath: "projects[0].name",
       value: "ApplyPilot",
       page: 1,
       quote: "ApplyPilot",
       confidence: 0.98
+    },
+    {
+      fieldPath: "projects[0].highlights[0]",
+      value: "Built evidence-backed resume extraction",
+      page: 1,
+      quote: "Built evidence-backed resume extraction",
+      confidence: 0.97
     },
     {
       fieldPath: "skills[0]",

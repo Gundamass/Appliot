@@ -74,6 +74,32 @@ export function migrateDatabase(database: SqliteDatabase): void {
     );
     CREATE INDEX IF NOT EXISTS application_answers_task_field_idx ON application_answers(task_id, field_path);
 
+    CREATE TABLE IF NOT EXISTS application_tasks (
+      id TEXT PRIMARY KEY,
+      application_url TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS application_task_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      task_id TEXT NOT NULL,
+      type TEXT NOT NULL CHECK (type = 'state_changed'),
+      state TEXT NOT NULL CHECK (state IN (
+        'created', 'observing_page', 'waiting_for_login', 'needs_questions',
+        'awaiting_content_review', 'filling', 'validating', 'navigating',
+        'review_locked', 'cancelled', 'failed'
+      )),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS application_task_events_task_id_id_idx
+      ON application_task_events(task_id, id);
+
+    CREATE TABLE IF NOT EXISTS application_task_event_cursors (
+      task_id TEXT PRIMARY KEY,
+      discarded_through_id INTEGER NOT NULL CHECK (discarded_through_id > 0)
+    );
+
     CREATE TABLE IF NOT EXISTS self_evaluation_reviews (
       task_id TEXT PRIMARY KEY,
       payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
@@ -81,6 +107,37 @@ export function migrateDatabase(database: SqliteDatabase): void {
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
     );
+
+    CREATE TABLE IF NOT EXISTS application_checkpoints (
+      task_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      state TEXT NOT NULL CHECK (state IN (
+        'created', 'observing', 'awaiting_login', 'needs_questions',
+        'awaiting_content_review', 'filling', 'validating', 'navigating',
+        'review_locked', 'cancelled', 'failed'
+      )),
+      url TEXT NOT NULL,
+      stage TEXT NOT NULL CHECK (stage IN ('login', 'application_form', 'review', 'success', 'unknown')),
+      snapshot_id TEXT NOT NULL,
+      field_ids_json TEXT NOT NULL CHECK (json_valid(field_ids_json) AND json_type(field_ids_json) = 'array'),
+      questions_json TEXT NOT NULL CHECK (json_valid(questions_json) AND json_type(questions_json) = 'array'),
+      snapshot_json TEXT CHECK (snapshot_json IS NULL OR json_valid(snapshot_json)),
+      content_review_json TEXT CHECK (content_review_json IS NULL OR json_valid(content_review_json)),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (task_id, sequence)
+    );
+
+    DROP TRIGGER IF EXISTS application_tasks_cleanup;
+    CREATE TRIGGER application_tasks_cleanup
+    AFTER DELETE ON application_tasks
+    BEGIN
+      DELETE FROM application_task_events WHERE task_id = OLD.id;
+      DELETE FROM application_task_event_cursors WHERE task_id = OLD.id;
+      DELETE FROM application_checkpoints WHERE task_id = OLD.id;
+      DELETE FROM application_answers WHERE task_id = OLD.id;
+      DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
+      DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
+    END;
 
     CREATE TABLE IF NOT EXISTS embeddings (
       id TEXT PRIMARY KEY,
@@ -115,6 +172,14 @@ export function migrateDatabase(database: SqliteDatabase): void {
       PRIMARY KEY (index_id, fact_id)
     );
   `);
+
+  const checkpointColumns = database.prepare("PRAGMA table_info(application_checkpoints)").all() as Array<{ name: string }>;
+  if (!checkpointColumns.some((column) => column.name === "snapshot_json")) {
+    database.exec("ALTER TABLE application_checkpoints ADD COLUMN snapshot_json TEXT");
+  }
+  if (!checkpointColumns.some((column) => column.name === "content_review_json")) {
+    database.exec("ALTER TABLE application_checkpoints ADD COLUMN content_review_json TEXT");
+  }
 
   upgradeFactForeignKeys(database);
 

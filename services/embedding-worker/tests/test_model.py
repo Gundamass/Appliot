@@ -49,7 +49,7 @@ def test_backend_loads_once_with_offline_gpu_safe_options():
     assert backend.ready is True
     assert len(FakeSentenceTransformer.instances) == 1
     model = FakeSentenceTransformer.instances[0]
-    assert model.model_path == Settings.model_path
+    assert model.model_path == str(Settings.model_path)
     assert model.kwargs == {
         "device": "cuda:0",
         "model_kwargs": {"torch_dtype": FakeTorch.float16, "attn_implementation": "sdpa"},

@@ -6,7 +6,9 @@ export const DocumentResponseSchema = z.object({
 }).strict();
 
 export const ErrorResponseSchema = z.object({
-  error: z.string().min(1)
+  error: z.string().min(1),
+  code: z.string().regex(/^[a-z][a-z0-9_]*$/).optional(),
+  taskId: z.string().uuid().optional()
 }).strict();
 
 export type DocumentResponse = z.infer<typeof DocumentResponseSchema>;

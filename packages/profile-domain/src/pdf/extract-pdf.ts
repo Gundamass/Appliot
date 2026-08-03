@@ -58,6 +58,26 @@ export function classifyPdfText(text: string): "usable" | "empty" | "corrupt" | 
 
 export class InvalidPdfDocumentError extends Error {}
 
+export async function renderPdfPage(bytes: Uint8Array, pageNumber: number): Promise<Uint8Array> {
+  if (!Number.isInteger(pageNumber) || pageNumber <= 0) throw new RangeError("PDF page number is invalid");
+  const loadingTask = getDocument({
+    data: Uint8Array.from(bytes),
+    standardFontDataUrl
+  });
+  try {
+    const document = await loadingTask.promise;
+    if (pageNumber > document.numPages) throw new RangeError("PDF page does not exist");
+    const page = await document.getPage(pageNumber);
+    try {
+      return await renderPageForOcr(page);
+    } finally {
+      page.cleanup();
+    }
+  } finally {
+    await loadingTask.destroy();
+  }
+}
+
 export async function extractPdf(bytes: Uint8Array, ocr: OcrEngine): Promise<ExtractedDocument> {
   const snapshot = Uint8Array.from(bytes);
   const fingerprint = createHash("sha256").update(snapshot).digest("hex");

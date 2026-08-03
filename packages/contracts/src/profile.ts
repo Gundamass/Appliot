@@ -83,7 +83,29 @@ export const ProfileFactSchema = z.object({
   }
 });
 
+export const ProfileFactUpsertInputSchema = z.object({
+  fieldPath: z.string().min(1).max(256),
+  value: JsonValueSchema
+}).strict();
+
+export const ProfileCompletenessSectionSchema = z.object({
+  id: z.string().min(1),
+  label: z.string().min(1),
+  completed: z.number().int().nonnegative(),
+  total: z.number().int().positive(),
+  missing: z.array(z.string().min(1))
+}).strict();
+
+export const ProfileCompletenessSchema = z.object({
+  completed: z.number().int().nonnegative(),
+  total: z.number().int().positive(),
+  sections: z.array(ProfileCompletenessSectionSchema)
+}).strict();
+
 export type ProfileFact = z.infer<typeof ProfileFactSchema>;
+export type ProfileFactUpsertInput = z.infer<typeof ProfileFactUpsertInputSchema>;
+export type ProfileCompletenessSection = z.infer<typeof ProfileCompletenessSectionSchema>;
+export type ProfileCompleteness = z.infer<typeof ProfileCompletenessSchema>;
 export type Evidence = z.infer<typeof EvidenceSchema>;
 export type FactStatus = z.infer<typeof FactStatusSchema>;
 export type FactScope = z.infer<typeof FactScopeSchema>;

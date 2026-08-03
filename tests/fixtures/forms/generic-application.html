@@ -1,0 +1,33 @@
+<!doctype html>
+<html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>模拟招聘申请</title>
+  </head>
+  <body>
+    <main>
+      <form>
+        <label for="full-name">姓名</label>
+        <input id="full-name" name="name" required>
+
+        <label>
+          最高学历
+          <select name="degree">
+            <option value="">请选择</option>
+            <option>本科</option>
+            <option>硕士</option>
+            <option>博士</option>
+          </select>
+        </label>
+
+        <input id="adjustment" type="checkbox" aria-label="接受调剂">
+        <input id="resume-file" type="file" aria-labelledby="resume-file-label">
+        <span id="resume-file-label">简历附件</span>
+
+        <button type="button">保存草稿</button>
+        <button type="button">下一步</button>
+        <button type="submit">提交申请</button>
+      </form>
+    </main>
+  </body>
+</html>

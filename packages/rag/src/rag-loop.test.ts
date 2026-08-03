@@ -63,8 +63,8 @@ describe("RAG field resolution", () => {
     });
     expect(decision.question).toContain("PMP certification");
     expect(decision.question).toContain("certificates.pmp");
-    expect(decision.question).toContain("no supported information was found");
-    expect(decision.question).toContain("this application task only");
+    expect(decision.question).toContain("未找到有证据支持的信息");
+    expect(decision.question).toContain("仅用于本次投递任务");
   });
 
   it("keeps extracted keyword evidence in needs_review", async () => {
@@ -106,6 +106,32 @@ describe("RAG field resolution", () => {
       status: "blocked",
       evidence: [],
       confidence: 0
+    });
+  });
+
+  it("retrieves a reviewed resume self-evaluation by its canonical field path", async () => {
+    const selfEvaluation = fact({
+      fieldPath: "selfEvaluation",
+      value: "具备扎实的 Java 后端开发能力",
+      status: "user_confirmed",
+      confidence: 1,
+      evidence: [evidence("具备扎实的 Java 后端开发能力")]
+    });
+    const repository = fakeRepository();
+    repository.resolveForTask = vi.fn(() => selfEvaluation);
+
+    const decision = await createRagService({ repository }).resolveField({
+      taskId: "task-1",
+      fieldId: "self-evaluation",
+      semantic: "selfEvaluation",
+      label: "自我评价",
+      type: "textarea"
+    });
+
+    expect(decision).toMatchObject({
+      status: "verified_auto",
+      value: selfEvaluation.value,
+      evidence: selfEvaluation.evidence
     });
   });
 
@@ -320,6 +346,30 @@ describe("planning and layered retrieval", () => {
   });
 
   it.each([
+    "campus[0].name",
+    "awards[0].name",
+    "publications[0].title"
+  ])("accepts an extended candidate-profile semantic: %s", (semantic) => {
+    expect(planField({
+      taskId: "task-1",
+      fieldId: "profile-field",
+      semantic,
+      label: "候选人资料",
+      type: "text"
+    })).toMatchObject({ autoFillEligible: true, risk: "none", valid: true });
+  });
+
+  it("recognizes identity semantics but keeps them ineligible for automatic filling", () => {
+    expect(planField({
+      taskId: "task-1",
+      fieldId: "identity-number",
+      semantic: "identity.idNumber",
+      label: "证件号码",
+      type: "text"
+    })).toMatchObject({ autoFillEligible: false, risk: "sensitive_commitment", valid: true });
+  });
+
+  it.each([
     ["unsupported validator", { ...emailRequest, validators: ["sometimes"] }],
     ["invalid regex", { ...emailRequest, validators: ["pattern:["] }],
     ["invalid date boundary", { ...emailRequest, semantic: "basics.birthDate", type: "date" as const, validators: ["dateMin:2025-02-29"] }],
@@ -485,10 +535,10 @@ describe("deterministic verification", () => {
     expect(decision.status).toBe("needs_question");
     expect(decision.value).toBeUndefined();
     expect(decision.evidence).toEqual([...first.evidence, ...second.evidence]);
-    expect(decision.question).toContain("conflicting values");
+    expect(decision.question).toContain("存在冲突值");
     expect(decision.question).toContain("first@example.com");
     expect(decision.question).toContain("second@example.com");
-    expect(decision.question).toContain("this application task only");
+    expect(decision.question).toContain("仅用于本次投递任务");
   });
 
   it("blocks a candidate with no evidence", async () => {
@@ -539,7 +589,7 @@ describe("deterministic verification", () => {
 
   it("builds deterministic aggregate-ready conflict questions", () => {
     expect(buildQuestion(emailRequest, "conflict", ["a@example.com", "b@example.com"]))
-      .toBe("Please provide \"Email address\" (basics.email) for this application task only because the retrieved evidence has conflicting values: \"a@example.com\", \"b@example.com\".");
+      .toBe("请提供“Email address”（basics.email），该信息仅用于本次投递任务，因为检索证据中存在冲突值：\"a@example.com\"、\"b@example.com\"。");
   });
 });
 

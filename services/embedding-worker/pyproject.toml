@@ -13,7 +13,10 @@ dependencies = [
   "fastapi==0.115.12",
   "uvicorn[standard]==0.34.3",
   "pydantic==2.11.7",
-  "numpy==2.2.6"
+  "numpy==2.2.6",
+  "Pillow==11.2.1",
+  "supervisor==4.2.5",
+  "setuptools==80.9.0"
 ]
 
 [project.optional-dependencies]

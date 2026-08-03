@@ -7,6 +7,16 @@ name = "resume-ocr-worker"
 version = "0.1.0"
 requires-python = "==3.12.*"
 dependencies = [
+  "torch==2.6.0+cu118",
+  "torchvision==0.21.0+cu118",
+  "transformers==4.46.3",
+  "flash-attn==2.7.3",
+  "addict==2.4.0",
+  "einops==0.8.1",
+  "easydict==1.13",
+  "requests==2.32.5",
+  "tqdm==4.67.1",
+  "numpy==2.2.6",
   "fastapi==0.115.12",
   "uvicorn[standard]==0.34.3",
   "pydantic==2.11.7",

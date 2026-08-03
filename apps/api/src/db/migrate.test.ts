@@ -15,6 +15,43 @@ describe("migrateDatabase", () => {
     database.close();
   });
 
+  it("upgrades legacy task cleanup triggers to remove all task-scoped data", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    database.exec(`
+      DROP TRIGGER application_tasks_cleanup;
+      CREATE TRIGGER application_tasks_cleanup
+      AFTER DELETE ON application_tasks
+      BEGIN
+        DELETE FROM application_task_events WHERE task_id = OLD.id;
+        DELETE FROM application_task_event_cursors WHERE task_id = OLD.id;
+        DELETE FROM application_checkpoints WHERE task_id = OLD.id;
+      END;
+    `);
+
+    migrateDatabase(database);
+    database.prepare(`
+      INSERT INTO application_tasks (id, application_url, created_at, updated_at)
+      VALUES ('task-1', 'https://jobs.example.test/apply', '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z')
+    `).run();
+    database.prepare(`
+      INSERT INTO application_answers (id, task_id, field_path, value_json, evidence_json, confidence, created_at, updated_at)
+      VALUES ('answer-1', 'task-1', 'selfEvaluation', '"Task value"', '[{"documentId":"user","page":1,"text":"Task value","extraction":"user"}]', 1, '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z')
+    `).run();
+    database.prepare(`
+      INSERT INTO self_evaluation_reviews (task_id, payload_json, status, created_at, updated_at)
+      VALUES ('task-1', '{}', 'needs_review', '2026-08-03T00:00:00.000Z', '2026-08-03T00:00:00.000Z')
+    `).run();
+
+    database.prepare("DELETE FROM application_tasks WHERE id = 'task-1'").run();
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM application_answers WHERE task_id = 'task-1'").get())
+      .toEqual({ count: 0 });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM self_evaluation_reviews WHERE task_id = 'task-1'").get())
+      .toEqual({ count: 0 });
+    database.close();
+  });
+
   it("upgrades legacy fact revision foreign keys without retaining renamed triggers", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

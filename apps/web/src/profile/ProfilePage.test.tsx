@@ -1,9 +1,11 @@
 import type { JsonValue, ProfileFact } from "@resume/contracts";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ProfileApi, SelfEvaluationReviewApi } from "../api/client.js";
 import { ProfilePage } from "./ProfilePage.js";
+
+afterEach(() => vi.unstubAllGlobals());
 
 function makeFact(overrides: Partial<ProfileFact> = {}): ProfileFact {
   return {
@@ -39,6 +41,8 @@ function fakeProfileApi(initialFacts: ProfileFact[] = []) {
   const api: ProfileApi = {
     upload: vi.fn(async () => ({ documentId: "document-1" })),
     listFacts: vi.fn(async () => facts),
+    upsert: vi.fn(async (fieldPath, value) => makeFact({ fieldPath, value: value as JsonValue, status: "user_corrected" })),
+    getCompleteness: vi.fn(async () => ({ completed: 0, total: 1, sections: [] })),
     confirm: vi.fn(async (factId) => {
       const updated = { ...facts.find((fact) => fact.id === factId)!, status: "user_confirmed" as const };
       facts = facts.map((fact) => fact.id === factId ? updated : fact);
@@ -74,6 +78,18 @@ function reviewFor(taskId: string) {
     base: { factId: "self", revision: 1, original: `${taskId} 原始自我评价`, evidence: [{ documentId: "resume", page: 1, text: "原始自我评价", extraction: "pdf_text" as const }] }
   };
 }
+
+describe("application navigation", () => {
+  it("opens the new application workflow from the profile header", async () => {
+    const user = userEvent.setup();
+    const onStartApplication = vi.fn();
+    render(<ProfilePage api={fakeProfileApi()} onStartApplication={onStartApplication} />);
+
+    await user.click(screen.getByRole("button", { name: "新建投递" }));
+
+    expect(onStartApplication).toHaveBeenCalledOnce();
+  });
+});
 
 describe("self-evaluation review view", () => {
   it("loads a selected task review and applies explicit keep-original approval", async () => {
@@ -239,6 +255,16 @@ describe("ProfilePage loading states", () => {
 });
 
 describe("fact review", () => {
+  it("keeps PDF import and evidence review available when embedded in the candidate workspace", async () => {
+    const user = userEvent.setup();
+    render(<ProfilePage api={fakeProfileApi([makeFact()])} embedded />);
+
+    expect(await screen.findByLabelText("选择 PDF 简历")).toBeEnabled();
+    const row = await screen.findByTestId("fact-fact-email");
+    await user.click(within(row).getByRole("button", { name: "查看来源" }));
+    expect(screen.getByRole("dialog", { name: "证据映射" })).toBeVisible();
+  });
+
   it("keeps an extracted fact visibly pending until confirmation succeeds", async () => {
     const api = fakeProfileApi([makeFact()]);
     const user = userEvent.setup();
@@ -257,17 +283,20 @@ describe("fact review", () => {
     const sourceButton = await screen.findByRole("button", { name: "查看来源" });
 
     await user.click(sourceButton);
-    const dialog = screen.getByRole("dialog", { name: "提取来源" });
+    const dialog = screen.getByRole("dialog", { name: "证据映射" });
     expect(dialog).toHaveAttribute("aria-modal", "true");
+    expect(within(dialog).getByRole("heading", { level: 3, name: "邮箱" })).toBeVisible();
     expect(within(dialog).getByText("文档标识")).toBeVisible();
     expect(within(dialog).getByText("a".repeat(64))).toBeVisible();
     expect(within(dialog).getByText("第 1 页")).toBeVisible();
     expect(within(dialog).getByText("Email: ada@example.com")).toBeVisible();
     expect(within(dialog).getByText("PDF 文本提取")).toBeVisible();
+    const preview = within(dialog).getByTitle("原始 PDF 第 1 页");
+    expect(preview.getAttribute("src")).toContain(`/api/profile/documents/${"a".repeat(64)}/pages/1/image`);
     expect(within(dialog).getByRole("button", { name: "关闭来源" })).toHaveFocus();
 
     await user.keyboard("{Escape}");
-    expect(screen.queryByRole("dialog", { name: "提取来源" })).not.toBeInTheDocument();
+    expect(screen.queryByRole("dialog", { name: "证据映射" })).not.toBeInTheDocument();
     expect(sourceButton).toHaveFocus();
   });
 
@@ -278,6 +307,41 @@ describe("fact review", () => {
 
     expect(screen.queryByText(/\.pdf/)).not.toBeInTheDocument();
     expect(screen.getByText("文档标识")).toBeVisible();
+  });
+
+  it("switches the PDF page and original quote when another evidence item is selected", async () => {
+    const user = userEvent.setup();
+    const groundingResponse = {
+      match: "exact",
+      coordinateSpace: 1000,
+      boxes: [{ x1: 120, y1: 240, x2: 620, y2: 300 }]
+    };
+    const fetchGrounding = vi.fn(async () => new Response(JSON.stringify(groundingResponse), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchGrounding);
+    render(<ProfilePage api={fakeProfileApi([makeFact({
+      evidence: [
+        { documentId: "a".repeat(64), page: 1, text: "第一页原文", extraction: "pdf_text" },
+        { documentId: "a".repeat(64), page: 2, text: "第二页 OCR 原文", extraction: "ocr" }
+      ]
+    })])} />);
+    await user.click(await screen.findByRole("button", { name: "查看来源" }));
+    const dialog = screen.getByRole("dialog", { name: "证据映射" });
+
+    await user.click(within(dialog).getByRole("button", { name: "OCR 识别，第 2 页" }));
+
+    expect(within(dialog).getByText("第二页 OCR 原文")).toBeVisible();
+    expect(await within(dialog).findByText("文本位置高亮")).toBeVisible();
+    const preview = within(dialog).getByTitle("原始 PDF 第 2 页");
+    expect(preview.getAttribute("src")).toContain("/pages/2/image");
+    const highlight = within(dialog).getByTestId("evidence-highlight-0");
+    expect(highlight).toHaveStyle({ left: "12%", top: "24%", width: "50%", height: "6%" });
+    expect(fetchGrounding).toHaveBeenCalledWith(
+      expect.stringContaining(`/pages/2/grounding?text=${encodeURIComponent("第二页 OCR 原文")}`),
+      expect.objectContaining({ signal: expect.any(AbortSignal) })
+    );
   });
 
   it("renders user evidence as a correction record without a fake document page or original quote", async () => {
@@ -292,7 +356,7 @@ describe("fact review", () => {
       }]
     })])} />);
     await user.click(await screen.findByRole("button", { name: "查看来源" }));
-    const dialog = screen.getByRole("dialog", { name: "提取来源" });
+    const dialog = screen.getByRole("dialog", { name: "证据映射" });
 
     expect(within(dialog).getByText("用户更正")).toBeVisible();
     expect(within(dialog).getByRole("heading", { level: 3, name: "更正记录" })).toBeVisible();
@@ -301,6 +365,7 @@ describe("fact review", () => {
     expect(within(dialog).queryByText("第 1 页")).not.toBeInTheDocument();
     expect(within(dialog).queryByText("原文")).not.toBeInTheDocument();
     expect(within(dialog).queryByText("文档标识")).not.toBeInTheDocument();
+    expect(within(dialog).queryByTitle(/原始 PDF/)).not.toBeInTheDocument();
   });
 
   it("keeps controls disabled in flight and reports confirmation failure without false success", async () => {
@@ -446,7 +511,7 @@ describe("fact review", () => {
     pending.resolve(corrected);
     expect(await within(row).findByText("new@example.com")).toBeVisible();
     expect(within(row).getByText("已修改")).toBeVisible();
-    expect(within(row).getByRole("button", { name: "查看来源" })).toHaveFocus();
+    await waitFor(() => expect(within(row).getByRole("button", { name: "查看来源" })).toHaveFocus());
   });
 
   it("guards duplicate correction submits before React can render saving state", async () => {
@@ -620,7 +685,10 @@ describe("fact review", () => {
       makeFact({ id: "certificate-title", fieldPath: "certificates[1].title", value: "AWS SAA" }),
       makeFact({ id: "skills-entry", fieldPath: "skills[0]", value: "TypeScript" }),
       makeFact({ id: "education-title", fieldPath: "education[0].title", value: "本科" }),
-      makeFact({ id: "work-title", fieldPath: "work_experience[0].title", value: "工程师" })
+      makeFact({ id: "work-title", fieldPath: "work_experience[0].title", value: "工程师" }),
+      makeFact({ id: "project-description", fieldPath: "projects[0].description", value: "项目介绍" }),
+      makeFact({ id: "project-end-date", fieldPath: "projects[0].endDate", value: "2025.06" }),
+      makeFact({ id: "unknown-field", fieldPath: "custom.unknownField", value: "自定义内容" })
     ])} />);
 
     expect(within(await screen.findByTestId("fact-project-name")).getByText("项目名称")).toBeVisible();
@@ -630,6 +698,65 @@ describe("fact review", () => {
     expect(within(screen.getByTestId("fact-skills-entry")).getByText("技能")).toBeVisible();
     expect(within(screen.getByTestId("fact-education-title")).getByText("学历/学位")).toBeVisible();
     expect(within(screen.getByTestId("fact-work-title")).getByText("职位")).toBeVisible();
+    expect(within(screen.getByTestId("fact-project-description")).getByText("项目描述")).toBeVisible();
+    expect(within(screen.getByTestId("fact-project-end-date")).getByText("结束时间")).toBeVisible();
+    expect(within(screen.getByTestId("fact-unknown-field")).getByText("其他字段")).toBeVisible();
+  });
+
+  it("keeps each project and internship as a separate experience entry", async () => {
+    render(<ProfilePage api={fakeProfileApi([
+      makeFact({ id: "project-0-name", fieldPath: "projects[0].name", value: "简历投递助手" }),
+      makeFact({ id: "project-0-start", fieldPath: "projects[0].startDate", value: "2025.01" }),
+      makeFact({ id: "project-0-end", fieldPath: "projects[0].endDate", value: "2025.06" }),
+      makeFact({ id: "project-0-description", fieldPath: "projects[0].description", value: "自动解析并审核简历" }),
+      makeFact({ id: "project-0-keywords", fieldPath: "projects[0].keywords", value: "React, TypeScript" }),
+      makeFact({ id: "project-0-highlight", fieldPath: "projects[0].highlights[0]", value: "实现可验证 RAG" }),
+      makeFact({ id: "project-1-name", fieldPath: "projects[1].name", value: "社区平台" }),
+      makeFact({ id: "project-1-description", fieldPath: "projects[1].description", value: "高并发内容服务" }),
+      makeFact({ id: "work-0-company", fieldPath: "work[0].company", value: "大疆" }),
+      makeFact({ id: "work-0-position", fieldPath: "work[0].position", value: "Java后端开发" }),
+      makeFact({ id: "work-0-type", fieldPath: "work[0].employmentType", value: "internship" }),
+      makeFact({ id: "work-0-description", fieldPath: "work[0].summary", value: "负责招聘系统开发" }),
+      makeFact({ id: "work-0-highlight", fieldPath: "work[0].highlights[0]", value: "接口耗时降低 80%" }),
+      makeFact({ id: "work-1-company", fieldPath: "work[1].company", value: "腾讯" }),
+      makeFact({ id: "work-1-title", fieldPath: "work[1].title", value: "研发实习生" }),
+      makeFact({ id: "work-1-description", fieldPath: "work[1].description", value: "负责内容平台开发" }),
+      makeFact({ id: "education-0-school", fieldPath: "education[0].institution", value: "合肥工业大学" }),
+      makeFact({ id: "education-0-major", fieldPath: "education[0].major", value: "计算机技术" }),
+      makeFact({ id: "education-0-details", fieldPath: "education[0].details", value: "学院奖学金" }),
+      makeFact({ id: "education-1-school", fieldPath: "education[1].institution", value: "武汉商学院" }),
+      makeFact({ id: "education-1-major", fieldPath: "education[1].major", value: "软件工程" })
+    ])} />);
+
+    const firstProject = await screen.findByTestId("fact-entry-projects-0");
+    const secondProject = screen.getByTestId("fact-entry-projects-1");
+    expect(within(firstProject).getByRole("heading", { name: "简历投递助手" })).toBeVisible();
+    expect(within(firstProject).getByText("自动解析并审核简历")).toBeVisible();
+    expect(within(firstProject).queryByText("高并发内容服务")).not.toBeInTheDocument();
+    expect(within(screen.getByTestId("fact-project-0-highlight")).getByText("项目要点")).toBeVisible();
+    expect(within(screen.getByTestId("fact-project-0-keywords")).getByText("技术栈")).toBeVisible();
+    expect(within(firstProject).getAllByTestId(/^fact-/).map((row) => row.dataset.testid)).toEqual([
+      "fact-project-0-name", "fact-project-0-start", "fact-project-0-end", "fact-project-0-description", "fact-project-0-keywords", "fact-project-0-highlight"
+    ]);
+    expect(within(secondProject).getByRole("heading", { name: "社区平台" })).toBeVisible();
+    expect(within(secondProject).getByText("高并发内容服务")).toBeVisible();
+
+    const firstWork = screen.getByTestId("fact-entry-work-0");
+    const secondWork = screen.getByTestId("fact-entry-work-1");
+    expect(within(firstWork).getByRole("heading", { name: "大疆 · Java后端实习" })).toBeVisible();
+    expect(within(screen.getByTestId("fact-work-0-type")).getByText("Java后端实习")).toBeVisible();
+    expect(within(firstWork).getByText("负责招聘系统开发")).toBeVisible();
+    expect(within(screen.getByTestId("fact-work-0-highlight")).getByText("职责和成果")).toBeVisible();
+    expect(within(firstWork).queryByText("负责内容平台开发")).not.toBeInTheDocument();
+    expect(within(secondWork).getByRole("heading", { name: "腾讯 · 研发实习生" })).toBeVisible();
+    expect(within(secondWork).getByText("负责内容平台开发")).toBeVisible();
+
+    const firstEducation = screen.getByTestId("fact-entry-education-0");
+    const secondEducation = screen.getByTestId("fact-entry-education-1");
+    expect(within(firstEducation).getByRole("heading", { name: "合肥工业大学" })).toBeVisible();
+    expect(within(firstEducation).getByText("学院奖学金")).toBeVisible();
+    expect(within(firstEducation).queryByText("武汉商学院")).not.toBeInTheDocument();
+    expect(within(secondEducation).getByRole("heading", { name: "武汉商学院" })).toBeVisible();
   });
 
   it("distinguishes confirmed and corrected statuses without a dead superseded filter", async () => {

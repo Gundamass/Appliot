@@ -25,6 +25,8 @@ interface DocumentRow {
 export interface DocumentRepository {
   createRetained(document: NewRetainedDocument): RetainedDocument;
   findByFingerprint(fingerprint: string): RetainedDocument | undefined;
+  findPageContent(fingerprint: string, page: number): string | undefined;
+  findLatestCompleted(): RetainedDocument | undefined;
   claimImport(fingerprint: string): boolean;
   markRetained(fingerprint: string): void;
   markCompleted(fingerprint: string): void;
@@ -45,6 +47,18 @@ export function createDocumentRepository(database: SqliteDatabase): DocumentRepo
   const complete = database.prepare(
     "UPDATE documents SET import_status = 'completed' WHERE fingerprint = ? AND import_status = 'importing'"
   );
+  const findPage = database.prepare(`
+    SELECT chunks.content
+    FROM document_chunks AS chunks
+    INNER JOIN documents ON documents.id = chunks.document_id
+    WHERE documents.fingerprint = ? AND documents.import_status = 'completed' AND chunks.page = ?
+  `);
+  const findLatestCompleted = database.prepare(`
+    SELECT * FROM documents
+    WHERE import_status = 'completed'
+    ORDER BY created_at DESC, id DESC
+    LIMIT 1
+  `);
 
   const findByFingerprint = (fingerprint: string): RetainedDocument | undefined => {
     const row = find.get(fingerprint) as DocumentRow | undefined;
@@ -57,6 +71,13 @@ export function createDocumentRepository(database: SqliteDatabase): DocumentRepo
       return findByFingerprint(document.fingerprint)!;
     },
     findByFingerprint,
+    findPageContent(fingerprint, page) {
+      return (findPage.get(fingerprint, page) as { content: string } | undefined)?.content;
+    },
+    findLatestCompleted() {
+      const row = findLatestCompleted.get() as DocumentRow | undefined;
+      return row ? parseDocument(row) : undefined;
+    },
     claimImport(fingerprint) {
       return claim.run(fingerprint).changes === 1;
     },

@@ -1,7 +1,9 @@
 import {
   DocumentResponseSchema,
   ErrorResponseSchema,
+  ProfileCompletenessSchema,
   ProfileFactSchema,
+  ProfileFactUpsertInputSchema,
   RagFieldCorrectionResponseSchema,
   RagFieldInspectionSchema,
   SelfEvaluationDraftSchema,
@@ -11,7 +13,8 @@ import {
   type RagFieldInspection,
   type RagFieldRequest,
   type SelfEvaluationReview,
-  type ProfileFact
+  type ProfileFact,
+  type ProfileCompleteness
 } from "@resume/contracts";
 import { z } from "zod";
 
@@ -20,6 +23,8 @@ const ProfileFactListSchema = z.array(ProfileFactSchema);
 export interface ProfileApi {
   upload(file: File): Promise<{ documentId: string }>;
   listFacts(): Promise<ProfileFact[]>;
+  upsert(fieldPath: string, value: unknown): Promise<ProfileFact>;
+  getCompleteness(): Promise<ProfileCompleteness>;
   confirm(factId: string): Promise<ProfileFact>;
   correct(factId: string, value: unknown): Promise<ProfileFact>;
 }
@@ -38,6 +43,21 @@ export function createProfileApi(baseUrl = ""): ProfileApi {
     async listFacts() {
       const response = await fetch(`${baseUrl}/api/profile/facts`, { method: "GET" });
       return ProfileFactListSchema.parse(await readResponse(response));
+    },
+
+    async upsert(fieldPath, value) {
+      const payload = ProfileFactUpsertInputSchema.parse({ fieldPath, value });
+      const response = await fetch(`${baseUrl}/api/profile/facts`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      return ProfileFactSchema.parse(await readResponse(response));
+    },
+
+    async getCompleteness() {
+      const response = await fetch(`${baseUrl}/api/profile/completeness`, { method: "GET" });
+      return ProfileCompletenessSchema.parse(await readResponse(response));
     },
 
     async confirm(factId) {

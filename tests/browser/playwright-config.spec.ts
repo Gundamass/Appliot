@@ -1,0 +1,14 @@
+import { expect, test } from "@playwright/test";
+import config from "../../playwright.config.js";
+
+test("stores Playwright artifacts outside the API test-results directory", () => {
+  expect(config.outputDir).toBe("playwright-artifacts");
+});
+
+test("retains browser diagnostics for failed application flows", () => {
+  expect(config.use).toMatchObject({
+    screenshot: "only-on-failure",
+    trace: "retain-on-failure",
+    video: "retain-on-failure"
+  });
+});

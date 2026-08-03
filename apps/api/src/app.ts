@@ -15,6 +15,10 @@ import { registerReviewRoutes } from "./reviews/review-routes.js";
 import { registerRagRoutes } from "./rag/rag-routes.js";
 import { createAdapterHealthRegistry, type AdapterHealthRegistry } from "./health/adapter-health.js";
 import { registerHealthRoutes } from "./health/health-routes.js";
+import { registerApplicationRoutes } from "./applications/routes.js";
+import type { ApplicationService } from "./applications/application-service.js";
+import type { TaskEventBus } from "./applications/task-events.js";
+import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
 
 export type { AdapterHealthRegistry } from "./health/adapter-health.js";
 
@@ -25,9 +29,13 @@ export interface AppDependencies {
   reviewRepository?: SelfEvaluationReviewRepository;
   extractPdf(bytes: Uint8Array): Promise<ExtractedDocument>;
   extractFacts(document: ExtractedDocument): Promise<ProfileFact[]>;
+  renderPdfPage?: (bytes: Uint8Array, page: number) => Promise<Uint8Array>;
   selfEvaluationModelProvider?: StructuredModelProvider;
   embeddingSearch?: EmbeddingSearchPort;
   adapterHealth: AdapterHealthRegistry;
+  applicationService?: ApplicationService;
+  taskEvents?: TaskEventBus;
+  applicationSseHeartbeatMs?: number;
   close?(): void | Promise<void>;
 }
 
@@ -65,5 +73,16 @@ export async function createApp(dependencies: CreateAppDependencies) {
       ? {}
       : { selfEvaluationModelProvider: dependencies.selfEvaluationModelProvider })
   });
+  if (dependencies.applicationService && dependencies.taskEvents) {
+    registerApplicationRoutes(app, {
+      applicationService: dependencies.applicationService,
+      taskEvents: dependencies.taskEvents,
+      tasks: createApplicationTaskRepository(dependencies.database),
+      profileRepository: dependencies.profileRepository,
+      ...(dependencies.applicationSseHeartbeatMs === undefined
+        ? {}
+        : { sseHeartbeatMs: dependencies.applicationSseHeartbeatMs })
+    });
+  }
   return app;
 }

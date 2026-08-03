@@ -1,17 +1,37 @@
-import type { ProfileFact } from "@resume/contracts";
-import { X } from "lucide-react";
-import { useEffect, useId, useRef } from "react";
+import type { JsonValue, ProfileFact } from "@resume/contracts";
+import { ExternalLink, FileSearch, Link2, X } from "lucide-react";
+import { useEffect, useId, useRef, useState } from "react";
 
 interface EvidenceDrawerProps {
   fact: ProfileFact;
+  fieldLabel: string;
   returnFocusTo: HTMLElement | null;
   onClose(): void;
 }
 
-export function EvidenceDrawer({ fact, returnFocusTo, onClose }: EvidenceDrawerProps) {
+interface EvidenceBox {
+  x1: number;
+  y1: number;
+  x2: number;
+  y2: number;
+}
+
+interface GroundingState {
+  status: "idle" | "loading" | "exact" | "page";
+  boxes: EvidenceBox[];
+}
+
+export function EvidenceDrawer({ fact, fieldLabel, returnFocusTo, onClose }: EvidenceDrawerProps) {
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
+  const [selectedIndex, setSelectedIndex] = useState(0);
+  const [grounding, setGrounding] = useState<GroundingState>({ status: "idle", boxes: [] });
+  const selectedEvidence = fact.evidence[selectedIndex] ?? fact.evidence[0];
+
+  useEffect(() => {
+    setSelectedIndex(0);
+  }, [fact.id]);
 
   useEffect(() => {
     closeRef.current?.focus();
@@ -23,6 +43,31 @@ export function EvidenceDrawer({ fact, returnFocusTo, onClose }: EvidenceDrawerP
     };
   }, [returnFocusTo]);
 
+  useEffect(() => {
+    if (!selectedEvidence || selectedEvidence.extraction !== "ocr") {
+      setGrounding({ status: "idle", boxes: [] });
+      return;
+    }
+    const controller = new AbortController();
+    setGrounding({ status: "loading", boxes: [] });
+    const url = `/api/profile/documents/${encodeURIComponent(selectedEvidence.documentId)}`
+      + `/pages/${selectedEvidence.page}/grounding?text=${encodeURIComponent(selectedEvidence.text)}`;
+    void fetch(url, { signal: controller.signal })
+      .then(async (response) => {
+        if (!response.ok) throw new Error("grounding request failed");
+        return response.json() as Promise<unknown>;
+      })
+      .then((payload) => {
+        if (controller.signal.aborted) return;
+        const result = parseGrounding(payload);
+        setGrounding(result ?? { status: "page", boxes: [] });
+      })
+      .catch(() => {
+        if (!controller.signal.aborted) setGrounding({ status: "page", boxes: [] });
+      });
+    return () => controller.abort();
+  }, [selectedEvidence]);
+
   const onKeyDown = (event: React.KeyboardEvent<HTMLElement>) => {
     if (event.key === "Escape") {
       event.preventDefault();
@@ -31,7 +76,7 @@ export function EvidenceDrawer({ fact, returnFocusTo, onClose }: EvidenceDrawerP
     }
     if (event.key !== "Tab") return;
     const focusable = dialogRef.current?.querySelectorAll<HTMLElement>(
-      'button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), [tabindex]:not([tabindex="-1"])'
+      'button:not([disabled]), a[href], input:not([disabled]), textarea:not([disabled]), iframe, [tabindex]:not([tabindex="-1"])'
     );
     if (!focusable?.length) return;
     const first = focusable[0];
@@ -45,6 +90,8 @@ export function EvidenceDrawer({ fact, returnFocusTo, onClose }: EvidenceDrawerP
     }
   };
 
+  const userEvidence = selectedEvidence?.extraction === "user";
+
   return (
     <div className="drawer-layer" onMouseDown={(event) => event.target === event.currentTarget && onClose()}>
       <aside
@@ -57,48 +104,133 @@ export function EvidenceDrawer({ fact, returnFocusTo, onClose }: EvidenceDrawerP
       >
         <header className="drawer-header">
           <div>
-            <p className="drawer-kicker">字段来源</p>
-            <h2 id={titleId}>提取来源</h2>
+            <p className="drawer-kicker">知识字段与原文核对</p>
+            <h2 id={titleId}>证据映射</h2>
           </div>
           <button ref={closeRef} className="icon-button" type="button" aria-label="关闭来源" title="关闭来源" onClick={onClose}>
             <X aria-hidden="true" size={20} />
           </button>
         </header>
-        <div className="drawer-content">
-          {fact.evidence.map((evidence, index) => {
-            const userEvidence = evidence.extraction === "user";
-            return (
-              <section className="evidence-item" key={`${evidence.documentId}-${evidence.page}-${index}`}>
-                <dl className="evidence-meta">
-                  {userEvidence ? (
+
+        <div className={`drawer-content ${userEvidence ? "user-evidence-view" : "document-evidence-view"}`}>
+          <section className="evidence-sidebar" aria-label="知识字段和证据列表">
+            <div className="knowledge-field">
+              <p>知识库字段</p>
+              <h3>{fieldLabel}</h3>
+              <div className="knowledge-value">{displayValue(fact.value)}</div>
+            </div>
+
+            <div className="evidence-list-block">
+              <div className="evidence-section-title">
+                <FileSearch aria-hidden="true" size={16} />
+                <h3>证据记录</h3>
+                <span>{fact.evidence.length}</span>
+              </div>
+              <div className="evidence-list">
+                {fact.evidence.map((evidence, index) => {
+                  const isUserEvidence = evidence.extraction === "user";
+                  const label = isUserEvidence
+                    ? "用户更正"
+                    : `${sourceLabel(evidence.extraction)}，第 ${evidence.page} 页`;
+                  return (
+                    <button
+                      className="evidence-option"
+                      type="button"
+                      aria-label={label}
+                      aria-pressed={selectedIndex === index}
+                      key={`${evidence.documentId}-${evidence.page}-${index}`}
+                      onClick={() => setSelectedIndex(index)}
+                    >
+                      <span className="evidence-option-source">
+                        {isUserEvidence ? `更正记录 ${index + 1}` : `证据 ${index + 1}`}
+                      </span>
+                      {!isUserEvidence && <span>第 {evidence.page} 页</span>}
+                    </button>
+                  );
+                })}
+              </div>
+            </div>
+          </section>
+
+          {selectedEvidence && !userEvidence ? (
+            <>
+              <div className="evidence-relationship" aria-hidden="true">
+                <span />
+                <Link2 size={17} />
+                <span />
+              </div>
+              <section className="document-evidence" aria-label="原始文档证据">
+                <header className="document-evidence-header">
+                  <div>
+                    <p>原始 PDF</p>
+                    <h3>页码 {selectedEvidence.page}</h3>
+                  </div>
+                  <div className="document-evidence-actions">
+                    <span className={`location-badge ${grounding.status === "exact" ? "exact" : grounding.status === "page" ? "page-level" : "text-level"}`}>
+                      {locationLabel(selectedEvidence.extraction, grounding.status)}
+                    </span>
+                    <a
+                      className="button secondary document-open-link"
+                      href={`/api/profile/documents/${encodeURIComponent(selectedEvidence.documentId)}/pdf#page=${selectedEvidence.page}`}
+                      target="_blank"
+                      rel="noreferrer"
+                    >
+                      <ExternalLink aria-hidden="true" size={15} />
+                      原始 PDF
+                    </a>
+                  </div>
+                </header>
+                <div className="pdf-preview-shell">
+                  <div className="pdf-page-stage">
+                    <img
+                      src={`/api/profile/documents/${encodeURIComponent(selectedEvidence.documentId)}/pages/${selectedEvidence.page}/image`}
+                      title={`原始 PDF 第 ${selectedEvidence.page} 页`}
+                      alt={`原始 PDF 第 ${selectedEvidence.page} 页`}
+                    />
+                    {grounding.status === "exact" && grounding.boxes.map((box, index) => (
+                      <span
+                        className="evidence-highlight"
+                        data-testid={`evidence-highlight-${index}`}
+                        key={`${box.x1}-${box.y1}-${box.x2}-${box.y2}-${index}`}
+                        style={{
+                          left: `${box.x1 / 10}%`,
+                          top: `${box.y1 / 10}%`,
+                          width: `${(box.x2 - box.x1) / 10}%`,
+                          height: `${(box.y2 - box.y1) / 10}%`
+                        }}
+                      />
+                    ))}
+                  </div>
+                </div>
+                <div className="selected-evidence-details">
+                  <div className="quote-block">
+                    <h3>原文</h3>
+                    <blockquote>{selectedEvidence.text}</blockquote>
+                  </div>
+                  <dl className="evidence-meta">
                     <div>
-                      <dt>来源</dt>
-                      <dd>用户更正</dd>
+                      <dt>提取方式</dt>
+                      <dd>{sourceLabel(selectedEvidence.extraction)}</dd>
                     </div>
-                  ) : (
-                    <>
-                      <div>
-                        <dt>文档标识</dt>
-                        <dd className="document-id">{evidence.documentId}</dd>
-                      </div>
-                      <div>
-                        <dt>页码</dt>
-                        <dd>第 {evidence.page} 页</dd>
-                      </div>
-                      <div>
-                        <dt>提取方式</dt>
-                        <dd>{sourceLabel(evidence.extraction)}</dd>
-                      </div>
-                    </>
-                  )}
-                </dl>
-                <div className="quote-block">
-                  <h3>{userEvidence ? "更正记录" : "原文"}</h3>
-                  <blockquote>{evidence.text}</blockquote>
+                    <div>
+                      <dt>文档标识</dt>
+                      <dd className="document-id">{selectedEvidence.documentId}</dd>
+                    </div>
+                  </dl>
                 </div>
               </section>
-            );
-          })}
+            </>
+          ) : selectedEvidence ? (
+            <section className="correction-evidence" aria-label="用户更正记录">
+              <p className="correction-source">用户更正</p>
+              <div className="quote-block">
+                <h3>更正记录</h3>
+                <blockquote>{selectedEvidence.text}</blockquote>
+              </div>
+            </section>
+          ) : (
+            <section className="empty-evidence">暂无可核对的证据记录</section>
+          )}
         </div>
       </aside>
     </div>
@@ -109,4 +241,39 @@ function sourceLabel(source: ProfileFact["evidence"][number]["extraction"]): str
   if (source === "pdf_text") return "PDF 文本提取";
   if (source === "ocr") return "OCR 识别";
   return "用户更正";
+}
+
+function displayValue(value: JsonValue): string {
+  if (typeof value === "string") return value;
+  if (value === null) return "空";
+  if (typeof value === "boolean") return value ? "是" : "否";
+  return typeof value === "number" ? String(value) : JSON.stringify(value, null, 2);
+}
+
+function locationLabel(
+  extraction: ProfileFact["evidence"][number]["extraction"],
+  status: GroundingState["status"]
+): string {
+  if (extraction !== "ocr") return "PDF 文本证据";
+  if (status === "loading") return "正在定位";
+  if (status === "exact") return "文本位置高亮";
+  return "页级定位";
+}
+
+function parseGrounding(payload: unknown): GroundingState | undefined {
+  if (typeof payload !== "object" || payload === null || !("match" in payload) || !("boxes" in payload)) return undefined;
+  const match = payload.match;
+  const boxes = payload.boxes;
+  if ((match !== "exact" && match !== "page") || !Array.isArray(boxes)) return undefined;
+  const parsedBoxes: EvidenceBox[] = [];
+  for (const box of boxes) {
+    if (typeof box !== "object" || box === null) return undefined;
+    const candidate = box as Partial<EvidenceBox>;
+    if (![candidate.x1, candidate.y1, candidate.x2, candidate.y2].every((value) => typeof value === "number")) return undefined;
+    const { x1, y1, x2, y2 } = candidate as EvidenceBox;
+    if (x1 < 0 || y1 < 0 || x2 > 1000 || y2 > 1000 || x1 >= x2 || y1 >= y2) return undefined;
+    parsedBoxes.push({ x1, y1, x2, y2 });
+  }
+  if (match === "exact" && parsedBoxes.length === 0) return undefined;
+  return { status: match, boxes: parsedBoxes };
 }

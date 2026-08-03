@@ -152,21 +152,73 @@ def prepare_install(
 
 def deployment_fingerprint(asset_root: Path, bundle_fingerprint: str) -> str:
     digest = hashlib.sha256(bundle_fingerprint.encode("ascii"))
-    paths = [
+    files = [
         asset_root / "deployment.py",
+        asset_root / "verify-assets.py",
         asset_root / "env.example",
         asset_root / "supervisord.conf",
     ]
-    paths.extend(sorted((asset_root / "bin").glob("*.sh")))
-    paths.extend(sorted((asset_root / "systemd").glob("*.service")))
-    for path in paths:
+    directories = []
+    for directory_name in ("bin", "systemd"):
+        directory = asset_root / directory_name
+        if not directory.is_dir() or directory.is_symlink():
+            raise DeploymentError("deployment asset directory is missing or unsafe: {}".format(directory_name))
+        for current, directory_names, file_names in os.walk(str(directory), followlinks=False):
+            current_path = Path(current)
+            for name in directory_names:
+                path = current_path / name
+                value = path.lstat()
+                if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+                    raise DeploymentError("deployment asset directory is unsafe: {}".format(name))
+                directories.append(path)
+            for name in file_names:
+                path = current_path / name
+                value = path.lstat()
+                if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+                    raise DeploymentError("deployment asset is unsafe: {}".format(name))
+                files.append(path)
+    for path in sorted(directories):
+        relative = path.relative_to(asset_root).as_posix()
+        digest.update(b"D\0" + relative.encode("utf-8") + b"\0")
+    for path in sorted(files):
         if not path.is_file() or path.is_symlink():
             raise DeploymentError("deployment asset is missing or unsafe: {}".format(path.name))
         relative = path.relative_to(asset_root).as_posix()
-        digest.update(relative.encode("utf-8") + b"\0")
-        digest.update(path.read_bytes())
+        digest.update(b"F\0" + relative.encode("utf-8") + b"\0")
+        digest.update(_deployment_asset_bytes(path))
         digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _deployment_asset_bytes(path: Path) -> bytes:
+    value = path.read_bytes()
+    return value.replace(b"\r\n", b"\n") if path.suffix == ".sh" else value
+
+
+def stage_deployment_assets(
+    asset_root: Path,
+    staging_parent: Path,
+    expected_deployment_id: str,
+    bundle_fingerprint: str,
+) -> Path:
+    temporary = Path(tempfile.mkdtemp(prefix="assets-", dir=str(staging_parent)))
+    snapshot = temporary / "snapshot"
+    try:
+        snapshot.mkdir(mode=0o700)
+        shutil.copytree(str(asset_root / "bin"), str(snapshot / "bin"), symlinks=True)
+        shutil.copytree(str(asset_root / "systemd"), str(snapshot / "systemd"), symlinks=True)
+        for name in ("deployment.py", "verify-assets.py", "supervisord.conf", "env.example"):
+            shutil.copy2(str(asset_root / name), str(snapshot / name), follow_symlinks=False)
+        for script in (snapshot / "bin").rglob("*.sh"):
+            if script.is_symlink() or not script.is_file():
+                raise DeploymentError("deployment shell script is missing or unsafe")
+            script.write_bytes(_deployment_asset_bytes(script))
+        if deployment_fingerprint(snapshot, bundle_fingerprint) != expected_deployment_id:
+            raise DeploymentError("deployment assets changed while staging")
+        return snapshot
+    except Exception:
+        shutil.rmtree(str(temporary), ignore_errors=True)
+        raise
 
 
 def validate_root_path(root: Path) -> Path:
@@ -232,6 +284,28 @@ def _require_directory(path: Path, label: str, writable: bool = True) -> None:
 def _require_regular(path: Path, label: str) -> None:
     value = _lstat(path)
     if not stat.S_ISREG(value.st_mode) or stat.S_ISLNK(value.st_mode):
+        raise DeploymentError("{} is unsafe: {}".format(label, path))
+
+
+def _require_read_only_regular(
+    path: Path,
+    label: str,
+    allowed_symlink_target: Optional[Path] = None,
+) -> None:
+    try:
+        value = path.lstat()
+    except OSError as error:
+        raise DeploymentError("could not inspect {}: {}".format(label, path)) from error
+    if stat.S_ISLNK(value.st_mode):
+        try:
+            resolved = path.resolve(strict=True)
+            target_value = resolved.lstat()
+        except OSError as error:
+            raise DeploymentError("{} is unsafe: {}".format(label, path)) from error
+        if allowed_symlink_target is None or resolved != allowed_symlink_target or not stat.S_ISREG(target_value.st_mode):
+            raise DeploymentError("{} is unsafe: {}".format(label, path))
+        return
+    if not stat.S_ISREG(value.st_mode):
         raise DeploymentError("{} is unsafe: {}".format(label, path))
 
 
@@ -396,6 +470,7 @@ class InstallLock:
         self.root = root
         self.path: Optional[Path] = None
         self.handle = None
+        self.descriptor: Optional[int] = None
 
     def __enter__(self) -> "InstallLock":
         parent = nearest_existing_parent(self.root)
@@ -406,13 +481,12 @@ class InstallLock:
             if hasattr(os, "O_DIRECTORY"):
                 flags |= os.O_DIRECTORY
             descriptor = os.open(str(parent), flags)
-            self.handle = os.fdopen(descriptor, "rb")
             try:
-                fcntl.flock(self.handle.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)
+                fcntl.flock(descriptor, fcntl.LOCK_EX | fcntl.LOCK_NB)
             except (OSError, IOError) as error:
-                self.handle.close()
-                self.handle = None
+                os.close(descriptor)
                 raise DeploymentError("another installation is already running") from error
+            self.descriptor = descriptor
             return self
 
         self.path = parent / ("." + self.root.name + ".install.lock")
@@ -441,6 +515,15 @@ class InstallLock:
         return self
 
     def __exit__(self, _type, _value, _traceback) -> None:
+        if self.descriptor is not None:
+            import fcntl
+
+            try:
+                fcntl.flock(self.descriptor, fcntl.LOCK_UN)
+            finally:
+                os.close(self.descriptor)
+                self.descriptor = None
+            return
         if self.handle is None or self.path is None:
             return
         try:
@@ -773,6 +856,7 @@ class SupervisorController:
         self.run = run
         self.process_is_owned = process_is_owned
         self.config = root / "services" / "supervisord.conf"
+        self.python = root / "envs" / "embedding" / "bin" / "python"
         self.supervisord = root / "envs" / "embedding" / "bin" / "supervisord"
         self.supervisorctl = root / "envs" / "embedding" / "bin" / "supervisorctl"
         self.poll_interval = max(0.0, poll_interval)
@@ -802,7 +886,7 @@ class SupervisorController:
 
     def _states(self) -> Dict[str, str]:
         result = self.run(
-            [str(self.supervisorctl), "-c", str(self.config), "status"],
+            [str(self.python), "-m", "supervisor.supervisorctl", "-c", str(self.config), "status"],
             env=self._environment(),
             capture_output=True,
         )
@@ -878,19 +962,22 @@ class SupervisorController:
             self._wait_started()
             return
         cleanup_stale_supervisor_state(self.root, self.process_is_owned)
-        if not os.access(str(self.supervisord), os.X_OK):
+        if not os.access(str(self.python), os.X_OK):
             raise DeploymentError("Supervisor is unavailable in the embedding environment")
-        self.run([str(self.supervisord), "-c", str(self.config)], env=self._environment())
+        self.run(
+            [str(self.python), "-m", "supervisor.supervisord", "-c", str(self.config)],
+            env=self._environment(),
+        )
         self._wait_started()
 
     def stop(self) -> None:
         if not self._owned_running():
             cleanup_stale_supervisor_state(self.root, self.process_is_owned)
             return
-        if not os.access(str(self.supervisorctl), os.X_OK):
+        if not os.access(str(self.python), os.X_OK):
             raise DeploymentError("supervisorctl is unavailable in the embedding environment")
         self.run(
-            [str(self.supervisorctl), "-c", str(self.config), "shutdown"],
+            [str(self.python), "-m", "supervisor.supervisorctl", "-c", str(self.config), "shutdown"],
             env=self._environment(),
         )
         self._wait_stopped()
@@ -970,7 +1057,8 @@ def _host_preflight() -> None:
     if _run(["id", "-un"], capture_output=True).stdout.strip() != "heqing":
         raise DeploymentError("installer must run as user heqing")
     os_release = Path(os.environ.get("RESUME_AI_OS_RELEASE", "/etc/os-release"))
-    _require_regular(os_release, "Ubuntu release metadata")
+    allowed_release_target = Path("/usr/lib/os-release") if os_release == Path("/etc/os-release") else None
+    _require_read_only_regular(os_release, "Ubuntu release metadata", allowed_release_target)
     values = {}
     for line in os_release.read_text(encoding="utf-8").splitlines():
         if "=" in line:
@@ -1001,14 +1089,6 @@ def _conda_preflight(conda: str, python_bin: str) -> List[Path]:
             if not isinstance(entry, str) or not entry:
                 raise DeploymentError("Conda path metadata is invalid")
             paths.append(Path(entry))
-    for version in ("3.10", "3.12"):
-        search = _run([conda, "search", "--offline", "--json", "python=" + version], capture_output=True)
-        try:
-            result = json.loads(search.stdout)
-        except ValueError as error:
-            raise DeploymentError("Conda has no offline Python {} package".format(version)) from error
-        if not isinstance(result, dict) or not any(result.values()):
-            raise DeploymentError("Conda has no offline Python {} package".format(version))
     if shutil.which(python_bin) is None:
         raise DeploymentError("python3 is required for verification")
     return paths
@@ -1065,7 +1145,27 @@ def _create_environment(
     worker = snapshot / "workers" / worker_directory
     manifest = json.loads((worker / "worker-manifest.json").read_text(encoding="utf-8"))
     wheel = worker / manifest["wheel"]
-    _run([conda, "create", "--yes", "--offline", "--prefix", str(prefix), "python=" + version, "pip"])
+    channel = (snapshot / "conda-channel").resolve(strict=True).as_uri()
+    conda_environment = os.environ.copy()
+    conda_environment["CONDA_PKGS_DIRS"] = str(snapshot.parent / "conda-pkgs")
+    _run(
+        [
+            conda,
+            "create",
+            "--solver",
+            "classic",
+            "--yes",
+            "--offline",
+            "--override-channels",
+            "--channel",
+            channel,
+            "--prefix",
+            str(prefix),
+            "python=" + version,
+            "pip",
+        ],
+        env=conda_environment,
+    )
     _run(
         [
             conda,
@@ -1153,6 +1253,7 @@ def _build_release(conda: str, snapshot: Path, asset_root: Path, release: Path, 
                 symlinks=True,
             )
         _copy_services(asset_root, build_root)
+        _harden_release_permissions(build_root)
         validate_installed_release(snapshot, asset_root, build_root)
         marker = build_root / ".complete"
         marker.write_bytes((release_id + "\n").encode("ascii"))
@@ -1192,6 +1293,47 @@ def _directory_digest(root: Path) -> str:
                     digest.update(chunk)
             digest.update(b"\0")
     return digest.hexdigest()
+
+
+def _harden_release_permissions(root: Path) -> None:
+    _require_directory(root, "release permission root")
+    os.chmod(str(root), stat.S_IMODE(root.lstat().st_mode) & ~0o022)
+    for current, directory_names, file_names in os.walk(str(root), followlinks=False):
+        current_path = Path(current)
+        for name in directory_names:
+            path = current_path / name
+            value = path.lstat()
+            if stat.S_ISLNK(value.st_mode):
+                _validate_internal_environment_symlink(root, path)
+                continue
+            if not stat.S_ISDIR(value.st_mode):
+                raise DeploymentError("release contains an unsafe directory: {}".format(path.relative_to(root)))
+            os.chmod(str(path), stat.S_IMODE(value.st_mode) & ~0o022)
+        for name in file_names:
+            path = current_path / name
+            value = path.lstat()
+            if stat.S_ISLNK(value.st_mode):
+                _validate_internal_environment_symlink(root, path)
+                continue
+            if not stat.S_ISREG(value.st_mode):
+                raise DeploymentError("release contains an unsafe file: {}".format(path.relative_to(root)))
+            os.chmod(str(path), stat.S_IMODE(value.st_mode) & ~0o022)
+
+
+def _validate_internal_environment_symlink(root: Path, path: Path) -> None:
+    relative = path.relative_to(root)
+    if len(relative.parts) < 3 or relative.parts[0] != "envs":
+        raise DeploymentError("release contains a symlink outside an environment: {}".format(relative))
+    target_text = os.readlink(str(path))
+    if Path(target_text).is_absolute():
+        raise DeploymentError("release contains an unsafe environment symlink: {}".format(relative))
+    environment_root = (root / "envs" / relative.parts[1]).resolve(strict=True)
+    try:
+        target = path.resolve(strict=True)
+    except OSError as error:
+        raise DeploymentError("release contains an unsafe environment symlink: {}".format(relative)) from error
+    if target != environment_root and environment_root not in target.parents:
+        raise DeploymentError("release contains an unsafe environment symlink: {}".format(relative))
 
 
 def validate_installed_release(snapshot: Path, asset_root: Path, release: Path) -> None:
@@ -1237,14 +1379,20 @@ def _validate_release_tree(release: Path) -> None:
         for name in directory_names:
             path = current_path / name
             value = _lstat(path)
-            if stat.S_ISLNK(value.st_mode) or not stat.S_ISDIR(value.st_mode):
+            if stat.S_ISLNK(value.st_mode):
+                _validate_internal_environment_symlink(release, path)
+                continue
+            if not stat.S_ISDIR(value.st_mode):
                 raise DeploymentError("published release contains an unsafe directory")
             if value.st_mode & 0o022:
                 raise DeploymentError("published release directory has unsafe permissions")
         for name in file_names:
             path = current_path / name
             value = _lstat(path)
-            if stat.S_ISLNK(value.st_mode) or not stat.S_ISREG(value.st_mode):
+            if stat.S_ISLNK(value.st_mode):
+                _validate_internal_environment_symlink(release, path)
+                continue
+            if not stat.S_ISREG(value.st_mode):
                 raise DeploymentError("published release contains an unsafe file")
             if value.st_mode & 0o022:
                 raise DeploymentError("published release file has unsafe permissions")
@@ -1338,20 +1486,27 @@ def _install(arguments: argparse.Namespace, asset_root: Path) -> None:
                     _require_regular(unit_path, "systemd unit")
 
         _create_stable_directories(plan.root)
-        snapshot = stage_verified_bundle(
-            plan.bundle,
+        assets_snapshot = stage_deployment_assets(
+            plan.asset_root,
             plan.root / "staging",
+            plan.deployment_id,
             plan.bundle_fingerprint,
-            lambda path: verify_assets(path, plan.asset_root),
         )
+        snapshot = None
         release = plan.root / "releases" / plan.deployment_id
         try:
+            snapshot = stage_verified_bundle(
+                plan.bundle,
+                plan.root / "staging",
+                plan.bundle_fingerprint,
+                lambda path: verify_assets(path, assets_snapshot),
+            )
             if _lexists(release):
                 validate_release(plan.root, plan.deployment_id)
             else:
-                _build_release(conda, snapshot, plan.asset_root, release, plan.deployment_id)
+                _build_release(conda, snapshot, assets_snapshot, release, plan.deployment_id)
                 validate_release(plan.root, plan.deployment_id)
-            validate_installed_release(snapshot, plan.asset_root, release)
+            validate_installed_release(snapshot, assets_snapshot, release)
             validate_published_release(plan.root, plan.deployment_id)
             _ensure_runtime_links(plan.root)
             _ensure_token(plan.root / "run" / "embedding.token")
@@ -1366,7 +1521,9 @@ def _install(arguments: argparse.Namespace, asset_root: Path) -> None:
                 release_validator=validate_published_release,
             )
         finally:
-            shutil.rmtree(str(snapshot.parent), ignore_errors=True)
+            if snapshot is not None:
+                shutil.rmtree(str(snapshot.parent), ignore_errors=True)
+            shutil.rmtree(str(assets_snapshot.parent), ignore_errors=True)
 
     print("Installation active at {}".format(plan.root / "current"))
     print("Embedding token file: {}".format(plan.root / "run" / "embedding.token"))

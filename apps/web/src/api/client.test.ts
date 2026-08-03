@@ -16,6 +16,41 @@ const fact = ProfileFactSchema.parse({
 afterEach(() => vi.unstubAllGlobals());
 
 describe("ProfileApi HTTP contract", () => {
+  it("upserts a profile field with the strict profile input contract", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
+      ...fact,
+      fieldPath: "awards[0].level",
+      value: "国家级",
+      status: "user_corrected",
+      confidence: 1
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createProfileApi().upsert("awards[0].level", "国家级");
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/profile/facts", expect.objectContaining({
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fieldPath: "awards[0].level", value: "国家级" })
+    }));
+  });
+
+  it("loads and validates the profile completeness projection", async () => {
+    const completeness = {
+      completed: 2,
+      total: 3,
+      sections: [{ id: "preferences", label: "求职偏好", completed: 2, total: 3, missing: ["preferences.targetCity"] }]
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(completeness), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createProfileApi().getCompleteness()).resolves.toEqual(completeness);
+    expect(fetchMock).toHaveBeenCalledWith("/api/profile/completeness", { method: "GET" });
+  });
+
   it("sends confirmation with no body and parses the returned fact", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ...fact, status: "user_confirmed" }), {
       status: 200,

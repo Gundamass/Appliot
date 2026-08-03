@@ -28,9 +28,9 @@ describe("SelfEvaluationReview promotion", () => {
     render(<SelfEvaluationReview draft={approved} onApprove={vi.fn()} onKeepOriginal={vi.fn()} onPromote={promote} />);
 
     expect(screen.getByText("React platform role")).toBeVisible();
-    await user.click(screen.getByRole("button", { name: "Promote to profile" }));
+    await user.click(screen.getByRole("button", { name: "推广到长期资料" }));
 
     expect(promote).toHaveBeenCalledOnce();
-    expect(await screen.findByRole("status")).toHaveTextContent("Promoted to profile");
+    expect(await screen.findByRole("status")).toHaveTextContent("已推广到长期资料");
   });
 });

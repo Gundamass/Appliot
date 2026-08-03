@@ -1,5 +1,27 @@
 import { describe, expect, it } from "vitest";
-import { ProfileFactSchema } from "./profile.js";
+import { ProfileCompletenessSchema, ProfileFactUpsertInputSchema, ProfileFactSchema } from "./profile.js";
+
+describe("ProfileFactUpsertInputSchema", () => {
+  it("rejects an empty field path", () => {
+    expect(ProfileFactUpsertInputSchema.safeParse({ fieldPath: "", value: "深圳" }).success).toBe(false);
+  });
+});
+
+describe("ProfileCompletenessSchema", () => {
+  it("accepts a stable completeness projection", () => {
+    expect(ProfileCompletenessSchema.parse({
+      completed: 1,
+      total: 2,
+      sections: [{
+        id: "preferences",
+        label: "求职偏好",
+        completed: 0,
+        total: 1,
+        missing: ["preferences.targetCity"]
+      }]
+    }).sections[0]?.missing).toEqual(["preferences.targetCity"]);
+  });
+});
 
 describe("ProfileFactSchema", () => {
   it("rejects an extracted fact without source evidence", () => {
