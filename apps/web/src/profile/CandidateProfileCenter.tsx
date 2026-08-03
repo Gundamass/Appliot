@@ -13,13 +13,14 @@ import { RepeatedEntryEditor, type RepeatedEntry } from "./RepeatedEntryEditor.j
 interface CandidateProfileCenterProps {
   api: ProfileApi;
   facts: ProfileFact[];
-  completeness: ProfileCompleteness;
+  completeness: ProfileCompleteness | undefined;
   onFactsChanged(): void | Promise<void>;
 }
 
 export function CandidateProfileCenter({ api, facts, completeness, onFactsChanged }: CandidateProfileCenterProps) {
   const factValues = useMemo(() => activeFactValues(facts), [facts]);
-  const percentage = Math.round((completeness.completed / Math.max(1, completeness.total)) * 100);
+  const percentage = completeness && Math.round((completeness.completed / Math.max(1, completeness.total)) * 100);
+  const sectionProgress = completeness?.sections ?? [];
 
   const saveValues = async (values: Record<string, string>) => {
     await Promise.all(Object.entries(values).map(([path, value]) => api.upsert(path, value)));
@@ -34,18 +35,19 @@ export function CandidateProfileCenter({ api, facts, completeness, onFactsChange
           <h2 id="candidate-profile-title">完整候选人档案</h2>
           <p>一次补全，后续投递优先精确映射，剩余空字段再进行语义匹配。</p>
         </div>
-        <div className="profile-completeness" aria-label={`档案完整度 ${percentage}%`}>
-          <strong>{percentage}%</strong>
-          <span>{completeness.completed}/{completeness.total} 个字段已确认</span>
+        <div className="profile-completeness" aria-label={completeness ? `档案完整度 ${percentage}%` : "档案完整度暂不可用"}>
+          <strong>{completeness ? `${percentage}%` : "--"}</strong>
+          <span>{completeness ? `${completeness.completed}/${completeness.total} 个字段已确认` : "档案完整度暂不可用"}</span>
         </div>
       </header>
 
       <div className="profile-center-layout">
         <div className="profile-section-navigation" role="group" aria-label="档案栏目">
           {PROFILE_SECTION_DEFINITIONS.map((section) => {
-            const progress = completeness.sections.find((item) => item.id === section.id);
+            const progress = sectionProgress.find((item) => item.id === section.id);
             const missing = progress?.missing.length ?? 0;
-            return <a key={section.id} href={`#profile-section-${section.id}`}><span>{section.label}</span><small className={missing > 0 ? "missing" : "complete"}>{missing > 0 ? `缺 ${missing}` : "完整"}</small></a>;
+            const unavailable = completeness === undefined;
+            return <a key={section.id} href={`#profile-section-${section.id}`}><span>{section.label}</span><small className={unavailable || missing > 0 ? "missing" : "complete"}>{unavailable ? "待评估" : missing > 0 ? `缺 ${missing}` : "完整"}</small></a>;
           })}
         </div>
 
@@ -58,7 +60,8 @@ export function CandidateProfileCenter({ api, facts, completeness, onFactsChange
               repeatable={section.repeatable}
               facts={facts}
               factValues={factValues}
-              missing={completeness.sections.find((item) => item.id === section.id)?.missing ?? []}
+              missing={sectionProgress.find((item) => item.id === section.id)?.missing ?? []}
+              completenessAvailable={completeness !== undefined}
               onSave={saveValues}
             />
           ))}
@@ -75,6 +78,7 @@ function ProfileSection({
   facts,
   factValues,
   missing,
+  completenessAvailable,
   onSave
 }: {
   section: FieldSection;
@@ -83,6 +87,7 @@ function ProfileSection({
   facts: ProfileFact[];
   factValues: Map<string, string>;
   missing: string[];
+  completenessAvailable: boolean;
   onSave(values: Record<string, string>): Promise<void>;
 }) {
   const fields = FIELD_DEFINITIONS.filter((field) => field.sections.includes(section));
@@ -90,8 +95,8 @@ function ProfileSection({
   return (
     <section className="profile-section" id={`profile-section-${section}`} aria-labelledby={`profile-section-title-${section}`}>
       <header>
-        <div><h3 id={`profile-section-title-${section}`}>{label}</h3><p>{missing.length > 0 ? `${missing.length} 个字段建议补全` : "已具备可用资料"}</p></div>
-        {missing.length > 0 ? <CircleAlert aria-hidden="true" size={18} /> : <CheckCircle2 aria-hidden="true" size={18} />}
+        <div><h3 id={`profile-section-title-${section}`}>{label}</h3><p>{!completenessAvailable ? "完整度待评估" : missing.length > 0 ? `${missing.length} 个字段建议补全` : "已具备可用资料"}</p></div>
+        {!completenessAvailable || missing.length > 0 ? <CircleAlert aria-hidden="true" size={18} /> : <CheckCircle2 aria-hidden="true" size={18} />}
       </header>
       {repeatable ? (
         <RepeatedEntryEditor section={section} entries={entries} onSave={async (_entryPath, values) => onSave(values)} />

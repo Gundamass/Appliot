@@ -168,6 +168,25 @@ describe("application progress coordinator", () => {
     expect(coordinator.snapshot(taskId)).toMatchObject({ status: "paused", busy: false, retryCount: 1 });
   });
 
+  it("安全重试的第一次失败不应对外发布暂停", async () => {
+    const persisted: import("./application-progress.js").ApplicationProgressSnapshot[] = [];
+    const coordinator = createApplicationProgressCoordinator({
+      persist: (_taskId, snapshot) => persisted.push(snapshot)
+    });
+    const operation = vi.fn(() => new Promise<never>(() => undefined));
+    const pending = coordinator.runWithPolicy({
+      taskId, kind: "fill", fieldId: "field-phone", displayCategory: "联系方式",
+      current: 1, total: 1, timeoutMs: 100
+    }, operation, { canRetry: () => true });
+
+    await vi.advanceTimersByTimeAsync(101);
+
+    expect(operation).toHaveBeenCalledTimes(2);
+    expect(persisted.some((snapshot) => snapshot.status === "paused")).toBe(false);
+    coordinator.dispose(taskId);
+    await expect(pending).rejects.toThrow("operation_cancelled");
+  });
+
   it("每个新字段分别拥有一次安全重试机会", async () => {
     const coordinator = createApplicationProgressCoordinator({ now: () => Date.now() });
     const firstOperation = vi.fn()

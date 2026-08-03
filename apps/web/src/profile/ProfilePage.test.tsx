@@ -177,6 +177,18 @@ describe("self-evaluation review view", () => {
 });
 
 describe("ProfilePage loading states", () => {
+  it("keeps the long-form candidate profile ahead of PDF review when completeness is unavailable", async () => {
+    const api = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "何庆" })]);
+    vi.mocked(api.getCompleteness).mockRejectedValueOnce(new Error("completeness unavailable"));
+    render(<ProfilePage api={api} embedded />);
+
+    const profileTitle = await screen.findByRole("heading", { name: "完整候选人档案" });
+    expect(screen.getByText("档案完整度暂不可用")).toBeVisible();
+    expect(screen.getAllByText("待评估").length).toBeGreaterThan(0);
+    const uploadTitle = screen.getByRole("heading", { name: "简历资料" });
+    expect(profileTitle.compareDocumentPosition(uploadTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+  });
+
   it("shows initial loading without an empty-state flash", async () => {
     const pending = deferred<ProfileFact[]>();
     const api = fakeProfileApi();

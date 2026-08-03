@@ -564,7 +564,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
 
       <main>
         <nav className="view-switch" aria-label="工作区视图">
-          <button type="button" aria-pressed={view === "profile"} onClick={() => setView("profile")}>资料审核</button>
+          <button type="button" aria-pressed={view === "profile"} onClick={() => setView("profile")}>候选人档案</button>
           <button type="button" aria-pressed={view === "self-evaluation"} onClick={() => setView("self-evaluation")}>自我评价审核</button>
           <button type="button" aria-pressed={view === "rag"} onClick={() => setView("rag")}>字段证据</button>
         </nav>
@@ -581,6 +581,16 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
         ) : view === "self-evaluation" ? (
           <section className="review-band"><p className="inline-error" role="alert">审核服务不可用</p></section>
         ) : <>
+        <CandidateProfileCenter
+          api={api}
+          facts={facts}
+          completeness={completeness}
+          onFactsChanged={async () => {
+            await loadFacts();
+            await loadCompleteness();
+          }}
+        />
+
         <section className="upload-band" aria-labelledby="upload-title">
           <div className="section-heading">
             <div>
@@ -633,18 +643,6 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
             </div>
           )}
         </section>
-
-        {completeness && (
-          <CandidateProfileCenter
-            api={api}
-            facts={facts}
-            completeness={completeness}
-            onFactsChanged={async () => {
-              await loadFacts();
-              await loadCompleteness();
-            }}
-          />
-        )}
 
         <section className="review-band" aria-labelledby="review-title">
           <div className="review-heading">

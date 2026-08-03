@@ -83,7 +83,11 @@ export interface ApplicationProgressCoordinator {
   pause(taskId: string, reason: "user_activity" | "operation_failed" | "worker_disconnected" | "page_unstable"): void;
   resumeIfCheckpointMatches(taskId: string, matches: boolean): boolean;
   handleUserActivity(taskId: string, fieldId: string): void;
-  runOperation<T>(input: StartOperationInput, operation: () => Promise<T>): Promise<T>;
+  runOperation<T>(
+    input: StartOperationInput,
+    operation: () => Promise<T>,
+    failureMode?: "pause" | "defer"
+  ): Promise<T>;
   runWithPolicy<T>(input: StartOperationInput, operation: () => Promise<T>, options?: RunPolicyOptions): Promise<T>;
 }
 
@@ -143,7 +147,8 @@ export function createApplicationProgressCoordinator(
     taskId: string,
     generation: number,
     status: "succeeded" | "failed" | "timed_out",
-    errorCode?: ApplicationOperationErrorCode
+    errorCode?: ApplicationOperationErrorCode,
+    failureMode: "pause" | "defer" = "pause"
   ): ActiveOperation | undefined => {
     const task = requireTask(taskId);
     const active = task.active;
@@ -157,7 +162,7 @@ export function createApplicationProgressCoordinator(
       task.stalledFieldId = undefined;
       task.recovery = [];
       emit(taskId, { type: "operation_completed", progress: active.progress, operation });
-    } else {
+    } else if (failureMode === "pause") {
       task.status = "paused";
       task.stalledFieldId = active.progress.fieldId;
       task.recovery = ["retry_current", "manual_done", "cancel"];
@@ -166,9 +171,31 @@ export function createApplicationProgressCoordinator(
         type: "task_paused",
         activity: activity("user_activity", active.progress.fieldId, active.progress.displayCategory)
       });
+    } else {
+      task.status = "idle";
+      task.stalledFieldId = undefined;
+      task.recovery = [];
     }
     persist(taskId, task);
     return active;
+  };
+
+  const publishDeferredFailure = (taskId: string): void => {
+    const task = requireTask(taskId);
+    const lastResult = task.lastResult;
+    if (!lastResult || (lastResult.operation.status !== "failed" && lastResult.operation.status !== "timed_out")) {
+      return;
+    }
+    task.status = "paused";
+    task.stalledFieldId = lastResult.fieldId;
+    task.recovery = ["retry_current", "manual_done", "cancel"];
+    const { operation, ...progress } = lastResult;
+    emit(taskId, { type: "operation_failed", progress, operation });
+    emit(taskId, {
+      type: "task_paused",
+      activity: activity("user_activity", lastResult.fieldId, lastResult.displayCategory)
+    });
+    persist(taskId, task);
   };
 
   const coordinator: ApplicationProgressCoordinator = {
@@ -329,7 +356,11 @@ export function createApplicationProgressCoordinator(
       coordinator.pause(taskId, "user_activity");
     },
 
-    async runOperation<T>(input: StartOperationInput, operation: () => Promise<T>): Promise<T> {
+    async runOperation<T>(
+      input: StartOperationInput,
+      operation: () => Promise<T>,
+      failureMode: "pause" | "defer" = "pause"
+    ): Promise<T> {
       const { generation } = coordinator.startOperation(input);
       const task = requireTask(input.taskId);
       const active = task.active!;
@@ -338,7 +369,7 @@ export function createApplicationProgressCoordinator(
       });
       const timeout = new Promise<never>((_resolve, reject) => {
         active.timeout = setTimeout(() => {
-          coordinator.failOperation(input.taskId, generation, "TIMEOUT");
+          settle(input.taskId, generation, "timed_out", "TIMEOUT", failureMode);
           reject(new Error("operation_timeout"));
         }, input.timeoutMs);
       });
@@ -348,7 +379,7 @@ export function createApplicationProgressCoordinator(
         return result;
       } catch (error) {
         if (task.active?.generation === generation) {
-          coordinator.failOperation(input.taskId, generation, "PAGE_ERROR");
+          settle(input.taskId, generation, "failed", "PAGE_ERROR", failureMode);
         }
         throw error;
       }
@@ -359,17 +390,28 @@ export function createApplicationProgressCoordinator(
       operation: () => Promise<T>,
       policy: RunPolicyOptions = {}
     ): Promise<T> {
+      const task = requireTask(input.taskId);
+      const safeEdit = input.kind === "fill" || input.kind === "select";
+      const fieldRetryCount = task.retryCountsByField.get(input.fieldId) ?? 0;
+      const canAttemptAutomaticRetry = safeEdit && fieldRetryCount < 1 && policy.canRetry !== undefined;
       try {
-        return await coordinator.runOperation(input, operation);
+        return await coordinator.runOperation(input, operation, canAttemptAutomaticRetry ? "defer" : "pause");
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("operation_cancelled")) throw error;
-        const safeEdit = input.kind === "fill" || input.kind === "select";
-        const task = requireTask(input.taskId);
-        const fieldRetryCount = task.retryCountsByField.get(input.fieldId) ?? 0;
-        if (!safeEdit || fieldRetryCount >= 1 || !(await policy.canRetry?.())) throw error;
+        if (!canAttemptAutomaticRetry) throw error;
+        let canRetry: boolean;
+        try {
+          canRetry = await policy.canRetry!();
+        } catch {
+          publishDeferredFailure(input.taskId);
+          throw error;
+        }
+        if (!canRetry) {
+          publishDeferredFailure(input.taskId);
+          throw error;
+        }
         task.retryCount = fieldRetryCount + 1;
         task.retryCountsByField.set(input.fieldId, task.retryCount);
-        coordinator.resumeIfCheckpointMatches(input.taskId, true);
         return coordinator.runOperation(input, operation);
       }
     }
