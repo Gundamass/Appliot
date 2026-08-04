@@ -122,6 +122,38 @@ function tableCount(database: InstanceType<typeof Database>, table: "documents" 
 }
 
 describe("profile routes", () => {
+  it("returns no latest profile document before a resume is imported", async () => {
+    const app = await buildTestApp();
+
+    const response = await app.inject({ method: "GET", url: "/api/profile/documents/latest" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({ document: null });
+  });
+
+  it("returns the latest imported resume summary without exposing its local path", async () => {
+    const { app } = await buildTestContext();
+    const upload = await app.inject({
+      method: "POST",
+      url: "/api/documents",
+      ...multipartPdf(pdfBytes(), "application/pdf", "何庆-简历.pdf")
+    });
+    const imported = DocumentResponseSchema.parse(upload.json());
+
+    const response = await app.inject({ method: "GET", url: "/api/profile/documents/latest" });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toEqual({
+      document: {
+        documentId: imported.documentId,
+        filename: "何庆-简历.pdf",
+        importedAt: expect.any(String),
+        extractedFactCount: 1
+      }
+    });
+    expect(JSON.stringify(response.json())).not.toContain("sourcePath");
+  });
+
   it("imports facts as extracted and requires explicit confirmation", async () => {
     const app = await buildTestApp();
     const bytes = pdfBytes();

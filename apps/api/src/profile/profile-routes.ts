@@ -6,6 +6,7 @@ import { z } from "zod";
 import {
   DocumentResponseSchema,
   JsonValueSchema,
+  LatestProfileDocumentResponseSchema,
   ProfileCompletenessSchema,
   ProfileFactSchema,
   ProfileFactUpsertInputSchema
@@ -92,6 +93,24 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
     return reply.code(200).send(ProfileCompletenessSchema.parse(
       calculateProfileCompleteness(dependencies.profileRepository.listActive())
     ));
+  });
+
+  app.get("/api/profile/documents/latest", async (_request, reply) => {
+    const document = documents.findLatestCompleted();
+    if (!document) {
+      return reply.code(200).send(LatestProfileDocumentResponseSchema.parse({ document: null }));
+    }
+    const extractedFactCount = dependencies.profileRepository.listActive().filter((fact) =>
+      fact.scope === "profile" && fact.evidence.some((evidence) => evidence.documentId === document.fingerprint)
+    ).length;
+    return reply.code(200).send(LatestProfileDocumentResponseSchema.parse({
+      document: {
+        documentId: document.id,
+        filename: document.filename,
+        importedAt: document.createdAt,
+        extractedFactCount
+      }
+    }));
   });
 
   app.get("/api/profile/documents/:fingerprint/pdf", async (request, reply) => {

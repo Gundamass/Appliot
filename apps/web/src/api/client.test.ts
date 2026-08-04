@@ -51,6 +51,32 @@ describe("ProfileApi HTTP contract", () => {
     expect(fetchMock).toHaveBeenCalledWith("/api/profile/completeness", { method: "GET" });
   });
 
+  it("loads the latest imported resume summary", async () => {
+    const document = {
+      documentId: "0f8fad5b-d9cb-469f-a165-70867728950e",
+      filename: "何庆-简历.pdf",
+      importedAt: "2026-08-04T06:32:00.000Z",
+      extractedFactCount: 46
+    };
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ document }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createProfileApi().getLatestDocument()).resolves.toEqual(document);
+    expect(fetchMock).toHaveBeenCalledWith("/api/profile/documents/latest", { method: "GET" });
+  });
+
+  it("returns undefined when no resume has been imported", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ document: null }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    })));
+
+    await expect(createProfileApi().getLatestDocument()).resolves.toBeUndefined();
+  });
+
   it("sends confirmation with no body and parses the returned fact", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ ...fact, status: "user_confirmed" }), {
       status: 200,

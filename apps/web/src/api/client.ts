@@ -1,6 +1,7 @@
 import {
   DocumentResponseSchema,
   ErrorResponseSchema,
+  LatestProfileDocumentResponseSchema,
   ProfileCompletenessSchema,
   ProfileFactSchema,
   ProfileFactUpsertInputSchema,
@@ -14,7 +15,8 @@ import {
   type RagFieldRequest,
   type SelfEvaluationReview,
   type ProfileFact,
-  type ProfileCompleteness
+  type ProfileCompleteness,
+  type ProfileDocumentSummary
 } from "@resume/contracts";
 import { z } from "zod";
 
@@ -25,6 +27,7 @@ export interface ProfileApi {
   listFacts(): Promise<ProfileFact[]>;
   upsert(fieldPath: string, value: unknown): Promise<ProfileFact>;
   getCompleteness(): Promise<ProfileCompleteness>;
+  getLatestDocument(): Promise<ProfileDocumentSummary | undefined>;
   confirm(factId: string): Promise<ProfileFact>;
   correct(factId: string, value: unknown): Promise<ProfileFact>;
 }
@@ -58,6 +61,11 @@ export function createProfileApi(baseUrl = ""): ProfileApi {
     async getCompleteness() {
       const response = await fetch(`${baseUrl}/api/profile/completeness`, { method: "GET" });
       return ProfileCompletenessSchema.parse(await readResponse(response));
+    },
+
+    async getLatestDocument() {
+      const response = await fetch(`${baseUrl}/api/profile/documents/latest`, { method: "GET" });
+      return LatestProfileDocumentResponseSchema.parse(await readResponse(response)).document ?? undefined;
     },
 
     async confirm(factId) {
