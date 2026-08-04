@@ -35,7 +35,11 @@ vi.mock("./db/migrate.js", async (importOriginal) => {
   };
 });
 
-const { createProductionDependencies, createProductionFieldResolver } = await import("./production-dependencies.js");
+const {
+  createProductionDependencies,
+  createProductionFieldResolver,
+  fieldPathForApplicationAnswer
+} = await import("./production-dependencies.js");
 
 const QWEN_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af";
 const OCR_REVISION = "aaa02f3811945a91062062994c5c4a3f4c0af2b0";
@@ -153,6 +157,215 @@ describe("production dependency composition", () => {
     }));
   });
 
+  it("preserves DJI catalog provenance in production field assessments", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "education[0].institution",
+        source: "exact_alias" as const,
+        confidence: 1
+      }))
+    };
+    const ragService = {
+      resolveField: vi.fn(async () => ({
+        fieldId: "field-1",
+        status: "verified_auto" as const,
+        value: "Test University",
+        evidence: [],
+        confidence: 1,
+        validators: []
+      }))
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService,
+      profileRepository: { resolveForTask: vi.fn() }
+    });
+    const field = applicationField("School", {
+      semanticHint: "education[0].institution",
+      semanticSource: "dji_catalog"
+    });
+
+    await expect(resolveField("task-1", field, "deterministic")).resolves.toMatchObject({
+      assessment: {
+        semantic: "education[0].institution",
+        status: "ready",
+        source: "dji_catalog",
+        confidence: 1
+      }
+    });
+  });
+
+  it("persists question answers at their approved paths and consumes them before re-asking", async () => {
+    const reviewField = applicationField("专业方向", { id: "field-review" });
+    const unknownField = applicationField("未命名字段", { id: "field-unknown" });
+    const answers = new Map<string, string>();
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async (field) => field.id === "field-review"
+        ? {
+            status: "review" as const,
+            reason: "similarity_below_threshold" as const,
+            candidates: [{
+              semantic: "education[0].major",
+              label: "专业",
+              similarity: 0.89,
+              risk: "normal" as const
+            }]
+          }
+        : { status: "unresolved" as const, reason: "embedding_unavailable" as const })
+    };
+    const ragService = { resolveField: vi.fn() };
+    const resolveForTask = vi.fn((_taskId: string, fieldPath: string) => {
+      const value = answers.get(fieldPath);
+      return value === undefined ? undefined : {
+        id: `answer-${fieldPath}`,
+        fieldPath,
+        value,
+        status: "user_confirmed" as const,
+        confidence: 1,
+        scope: "application" as const,
+        taskId: "task-1",
+        evidence: [{ documentId: "user", page: 1, text: value, extraction: "user" as const }],
+        revision: 1
+      };
+    });
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService,
+      profileRepository: { resolveForTask }
+    });
+    const reviewQuestion = await resolveField("task-1", reviewField, "semantic");
+    const unknownQuestion = await resolveField("task-1", unknownField, "semantic");
+    expect(reviewQuestion.status).toBe("needs_question");
+    expect(unknownQuestion.status).toBe("needs_question");
+    if (!reviewQuestion.fieldPath || !unknownQuestion.fieldPath) throw new Error("question path missing");
+    const reviewPath = reviewQuestion.fieldPath;
+    const unknownPath = unknownQuestion.fieldPath;
+    const questionPaths = [
+      { id: reviewField.id, fieldPath: reviewPath },
+      { id: unknownField.id, fieldPath: unknownPath }
+    ];
+    expect(fieldPathForApplicationAnswer(reviewField, questionPaths)).toBe(reviewPath);
+    expect(fieldPathForApplicationAnswer(unknownField, questionPaths)).toBe(unknownPath);
+    answers.set(reviewPath, "Computer Science");
+    answers.set(unknownPath, "Manual answer");
+
+    await expect(resolveField("task-1", reviewField, "semantic")).resolves.toMatchObject({
+      status: "verified",
+      value: "Computer Science",
+      fieldPath: reviewPath,
+      assessment: { status: "ready", source: "user", confidence: 1 }
+    });
+    await expect(resolveField("task-1", unknownField, "semantic")).resolves.toMatchObject({
+      status: "verified",
+      value: "Manual answer",
+      fieldPath: unknownPath,
+      assessment: { status: "ready", source: "user", confidence: 1 }
+    });
+    expect(ragService.resolveField).not.toHaveBeenCalled();
+  });
+
+  it("isolates unresolved answers with stable field signatures instead of DOM ids or context-only hints", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({ status: "unresolved" as const, reason: "embedding_unavailable" as const }))
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService: { resolveField: vi.fn() },
+      profileRepository: { resolveForTask: vi.fn() }
+    });
+    const first = applicationField("Research direction", { id: "dom-before", semanticHint: "education[0]" });
+    const reordered = applicationField("Research direction", { id: "dom-after", semanticHint: "education[0]" });
+    const second = applicationField("Advisor name", { id: "dom-other", semanticHint: "education[0]" });
+
+    const [firstDecision, reorderedDecision, secondDecision] = await Promise.all([
+      resolveField("task-1", first, "semantic"),
+      resolveField("task-1", reordered, "semantic"),
+      resolveField("task-1", second, "semantic")
+    ]);
+
+    expect(firstDecision).toMatchObject({ status: "needs_question" });
+    expect(reorderedDecision).toMatchObject({ status: "needs_question" });
+    expect(secondDecision).toMatchObject({ status: "needs_question" });
+    expect(firstDecision.fieldPath).toBe(reorderedDecision.fieldPath);
+    expect(firstDecision.fieldPath).not.toBe(secondDecision.fieldPath);
+    expect(firstDecision.fieldPath).not.toBe("education[0]");
+    expect(firstDecision.fieldPath).not.toContain("dom-");
+  });
+
+  it("does not let two reviewed fields share the first semantic candidate answer path", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "review" as const,
+        reason: "similarity_below_threshold" as const,
+        candidates: [{
+          semantic: "education[0].major",
+          label: "Major",
+          similarity: 0.89,
+          risk: "normal" as const
+        }]
+      }))
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService: { resolveField: vi.fn() },
+      profileRepository: { resolveForTask: vi.fn() }
+    });
+    const first = await resolveField("task-1", applicationField("Research direction", { id: "field-a" }), "semantic");
+    const second = await resolveField("task-1", applicationField("Discipline category", { id: "field-b" }), "semantic");
+
+    expect(first.fieldPath).not.toBe(second.fieldPath);
+    expect(first.fieldPath).not.toBe("education[0].major");
+    expect(second.fieldPath).not.toBe("education[0].major");
+    expect(first.assessment).toMatchObject({ semantic: "education[0].major", confidence: 0 });
+    expect(second.assessment).toMatchObject({ semantic: "education[0].major", confidence: 0 });
+  });
+
+  it("reports the final value validation confidence instead of a semantic-only full score", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "basics.phone",
+        source: "exact_alias" as const,
+        confidence: 1
+      }))
+    };
+    const missingResolver = createProductionFieldResolver({
+      semanticResolver,
+      ragService: {
+        resolveField: vi.fn(async () => ({
+          fieldId: "field-1",
+          status: "needs_question" as const,
+          evidence: [],
+          confidence: 1,
+          validators: []
+        }))
+      },
+      profileRepository: { resolveForTask: vi.fn() }
+    });
+    await expect(missingResolver("task-1", applicationField("Phone"), "deterministic")).resolves.toMatchObject({
+      assessment: { status: "missing", confidence: 0 }
+    });
+
+    const reviewResolver = createProductionFieldResolver({
+      semanticResolver,
+      ragService: {
+        resolveField: vi.fn(async () => ({
+          fieldId: "field-1",
+          status: "needs_review" as const,
+          value: "13800000000",
+          evidence: [],
+          confidence: 1,
+          validators: []
+        }))
+      },
+      profileRepository: { resolveForTask: vi.fn() }
+    });
+    await expect(reviewResolver("task-1", applicationField("Phone"), "deterministic")).resolves.toMatchObject({
+      assessment: { status: "review", confidence: 0.89 }
+    });
+  });
+
   it("hands semantic risk decisions to the user without querying or auto-filling profile data", async () => {
     const semanticResolver: FieldSemanticResolver = {
       resolve: vi.fn(async () => ({
@@ -178,11 +391,11 @@ describe("production dependency composition", () => {
       options: ["是", "否"]
     }), "semantic")).resolves.toMatchObject({
       status: "needs_question",
-      fieldPath: "preferences.willingToTravel",
       assessment: {
+        semantic: "preferences.willingToTravel",
         status: "review",
         source: "semantic",
-        confidence: 0.96
+        confidence: 0
       }
     });
     expect(ragService.resolveField).not.toHaveBeenCalled();

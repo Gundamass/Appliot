@@ -12,6 +12,9 @@ export interface SyntheticDraft {
   position?: string;
   projectName?: string;
   projectDescription?: string;
+  awardLevel?: string;
+  unknownField?: string;
+  majorDirection?: string;
 }
 
 export interface SyntheticTaskState {
@@ -70,6 +73,10 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
       }
       if (request.method === "GET" && url.pathname === "/mokahr") {
         sendHtml(response, mokahrPage(taskId));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/dji") {
+        sendHtml(response, djiPage(taskId));
         return;
       }
       if (request.method === "POST" && url.pathname === "/api/mokahr-state") {
@@ -257,6 +264,56 @@ function mokahrPage(taskId: string): string {
           '<form method="post" action="/submit?taskId=' + taskId + '"><button type="submit" aria-label="预览并提交">预览并提交</button></form>'); bind(); }
       });
     </script></main></body></html>`;
+}
+
+function djiPage(taskId: string): string {
+  const encodedTaskId = encodeURIComponent(taskId);
+  return `<!doctype html>
+  <html lang="zh-CN">
+  <head>
+    <meta charset="utf-8">
+    <title>大疆校园招聘申请</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 0; background: #f4f6f8; color: #1f2933; }
+      main { width: min(760px, calc(100% - 32px)); margin: 32px auto; background: white; padding: 28px; }
+      form { display: grid; gap: 18px; }
+      section { display: grid; gap: 14px; border-top: 1px solid #dde3e8; padding-top: 18px; }
+      label { display: grid; gap: 7px; font-weight: 650; }
+      input { border: 1px solid #aeb8c2; min-height: 38px; padding: 0 10px; }
+      button { justify-self: end; min-height: 40px; padding: 0 18px; }
+    </style>
+  </head>
+  <body><main><h1>申请信息</h1>
+    <form method="post" action="/submit?taskId=${encodedTaskId}">
+      <section aria-labelledby="education-title"><h2 id="education-title">教育经历</h2>
+        <label for="school">毕业院校<input id="school" name="education[0].institution" data-key="school" required></label>
+        <label for="major-direction">研究方向<input id="major-direction" name="application.majorDirection" data-key="majorDirection" required></label>
+      </section>
+      <section aria-labelledby="project-title"><h2 id="project-title">项目经历</h2>
+        <label for="project-name">项目名称<input id="project-name" name="projects[0].name" data-key="projectName" required></label>
+      </section>
+      <section aria-labelledby="award-title"><h2 id="award-title">获奖经历</h2>
+        <label for="award-level">获奖级别<select id="award-level" name="awards[0].level" data-key="awardLevel" required><option value="">请选择</option><option value="国家级">国家级</option><option value="省级">省级</option><option value="校级">校级</option></select></label>
+      </section>
+      <section aria-labelledby="extra-title"><h2 id="extra-title">补充信息</h2>
+        <label for="unknown-field">未命名字段<input id="unknown-field" name="application.jobSpecific" data-key="unknownField" required></label>
+      </section>
+      <button type="submit">提交申请</button>
+    </form>
+    <script>
+      const taskId = ${JSON.stringify(encodedTaskId)};
+      const draft = {};
+      const sync = () => fetch('/api/mokahr-state?taskId=' + taskId, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ draft })
+      });
+      document.querySelectorAll('input, select').forEach((field) => field.addEventListener('change', () => {
+        draft[field.dataset.key] = field.value;
+        sync();
+      }));
+    </script>
+  </main></body></html>`;
 }
 
 function escapeHtml(value: string): string {

@@ -2085,4 +2085,46 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("replaces a prior missing assessment after the user fills the field in the controlled browser", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{ id: "field-manual", label: "Manual field", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ id: "review", text: "Review", class: "terminal_submit" }]
+    };
+    const manuallyFilled: FormSnapshot = {
+      ...form,
+      id: "snapshot-manual",
+      fields: [{ ...form.fields[0]!, currentValue: "user value" }]
+    };
+    const observe = vi.fn()
+      .mockResolvedValueOnce(form)
+      .mockResolvedValue(manuallyFilled);
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute: vi.fn() },
+      resolveField: async () => ({
+        status: "needs_question" as const,
+        assessment: {
+          fieldId: "field-manual", label: "Manual field", status: "missing" as const,
+          source: "none" as const, confidence: 0, reason: "missing", evidence: []
+        }
+      }),
+      approve: () => "unused"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+    expect(service.fieldCoverage("task-1")?.fields).toContainEqual(expect.objectContaining({
+      fieldId: "field-manual", status: "missing"
+    }));
+
+    await service.resumeWithProfile("task-1");
+
+    expect(service.fieldCoverage("task-1")?.fields).toContainEqual(expect.objectContaining({
+      fieldId: "field-manual", status: "filled", source: "user", confidence: 1
+    }));
+    database.close();
+  });
+
 });

@@ -138,6 +138,29 @@ describe("browser command contracts", () => {
     }).success).toBe(true);
   });
 
+  it("accepts only the closed DJI semantic source marker", () => {
+    expect(FormFieldSchema.safeParse({
+      id: "field-school",
+      label: "School",
+      type: "text",
+      required: true,
+      options: [],
+      currentValue: "",
+      semanticHint: "education[0].institution",
+      semanticSource: "dji_catalog"
+    }).success).toBe(true);
+    expect(FormFieldSchema.safeParse({
+      id: "field-school",
+      label: "School",
+      type: "text",
+      required: true,
+      options: [],
+      currentValue: "",
+      semanticHint: "education[0].institution",
+      semanticSource: "other_catalog"
+    }).success).toBe(false);
+  });
+
   it("rejects terminal submit because it is not executable", () => {
     expect(ExecutableCommandSchema.safeParse({
       type: "submit",

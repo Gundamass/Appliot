@@ -14,12 +14,12 @@ describe("DJI field catalog", () => {
       selectField("获奖级别", ["国家级", "省级", "校级"])
     ]));
 
-    expect(snapshot.fields.map(({ label, semanticHint }) => ({ label, semanticHint }))).toEqual([
-      { label: "姓名", semanticHint: "basics.name" },
-      { label: "手机号码", semanticHint: "basics.phone" },
-      { label: "毕业院校", semanticHint: "education[0].institution" },
-      { label: "项目名称", semanticHint: "projects[0].name" },
-      { label: "获奖级别", semanticHint: "awards[0].level" }
+    expect(snapshot.fields.map(({ label, semanticHint, semanticSource }) => ({ label, semanticHint, semanticSource }))).toEqual([
+      { label: "姓名", semanticHint: "basics.name", semanticSource: "dji_catalog" },
+      { label: "手机号码", semanticHint: "basics.phone", semanticSource: "dji_catalog" },
+      { label: "毕业院校", semanticHint: "education[0].institution", semanticSource: "dji_catalog" },
+      { label: "项目名称", semanticHint: "projects[0].name", semanticSource: "dji_catalog" },
+      { label: "获奖级别", semanticHint: "awards[0].level", semanticSource: "dji_catalog" }
     ]);
   });
 

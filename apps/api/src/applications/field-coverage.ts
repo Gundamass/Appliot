@@ -2,8 +2,8 @@ import type { ApplicationFieldAssessment, ApplicationFieldCoverage } from "@resu
 
 export interface FieldCoverageStore {
   record(taskId: string, assessment: ApplicationFieldAssessment): void;
-  has(taskId: string, fieldId: string): boolean;
   markFilled(taskId: string, fieldId: string): void;
+  markUserFilled(taskId: string, field: Pick<ApplicationFieldAssessment, "fieldId" | "label" | "semantic">): void;
   restore(taskId: string, coverage: ApplicationFieldCoverage): void;
   retain(taskId: string, fieldIds: ReadonlySet<string>): void;
   snapshot(taskId: string): ApplicationFieldCoverage | undefined;
@@ -37,12 +37,23 @@ export function createFieldCoverageStore(): FieldCoverageStore {
     record(taskId, assessment) {
       requireTask(taskId).set(assessment.fieldId, assessment);
     },
-    has(taskId, fieldId) {
-      return tasks.get(taskId)?.has(fieldId) ?? false;
-    },
     markFilled(taskId, fieldId) {
       const current = tasks.get(taskId)?.get(fieldId);
       if (current) requireTask(taskId).set(fieldId, { ...current, status: "filled", reason: "页面回读确认填写成功" });
+    },
+    markUserFilled(taskId, field) {
+      const current = tasks.get(taskId)?.get(field.fieldId);
+      if (current?.status === "filled") return;
+      requireTask(taskId).set(field.fieldId, {
+        fieldId: field.fieldId,
+        label: field.label,
+        ...(field.semantic === undefined ? {} : { semantic: field.semantic }),
+        status: "filled",
+        source: "user",
+        confidence: 1,
+        reason: "页面已存在用户填写值",
+        evidence: []
+      });
     },
     restore(taskId, coverage) {
       tasks.set(taskId, new Map(coverage.fields.map((field) => [field.fieldId, field])));

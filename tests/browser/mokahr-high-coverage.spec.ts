@@ -47,6 +47,16 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
       return {
         status: decision.status === "verified_auto" || decision.status === "needs_review" ? "verified" : decision.status,
         fieldPath: semantic,
+        assessment: {
+          fieldId: field.id,
+          label: field.label,
+          semantic,
+          status: decision.status === "verified_auto" ? "ready" as const : decision.status === "needs_review" ? "review" as const : "missing" as const,
+          source: "exact" as const,
+          confidence: decision.confidence,
+          reason: decision.status === "verified_auto" ? "字段映射和资料值均已通过验证" : "字段需要进一步确认",
+          evidence: decision.evidence
+        },
         ...(decision.value === undefined ? {} : { value: decision.value }),
         ...(decision.question === undefined ? {} : { question: decision.question })
       };
@@ -62,6 +72,7 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
 
     const machineState = service.state(taskId);
     expect(machineState.value, JSON.stringify({ context: machineState.context, remote: server.state(taskId) }, null, 2)).toBe("review_locked");
+    expect(service.fieldCoverage(taskId)).toMatchObject({ missing: 0, review: 0, filled: 7 });
     expect(server.state(taskId)).toMatchObject({
       uploadCount: 1,
       submissionCount: 0,

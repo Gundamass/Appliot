@@ -101,7 +101,8 @@ interface ApplicationServiceDependencies {
   applyAnswers?: (
     taskId: string,
     answers: Record<string, unknown>,
-    fields: FormField[]
+    fields: FormField[],
+    questions?: ApplicationQuestion[]
   ) => Promise<void> | void;
   validateContentReview?: (review: ContentReview, editedValue: string) => string[];
   resolveFileId?: (taskId: string, field: FormField) => string | undefined;
@@ -176,16 +177,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     const taskId = machineState.context.taskId;
     fieldCoverageStore.retain(taskId, new Set(snapshot.fields.map((field) => field.id)));
     for (const field of snapshot.fields) {
-      if (hasUserValue(field.currentValue) && !fieldCoverageStore.has(taskId, field.id)) {
-        fieldCoverageStore.record(taskId, {
+      if (hasUserValue(field.currentValue)) {
+        fieldCoverageStore.markUserFilled(taskId, {
           fieldId: field.id,
           label: field.label,
-          ...(field.semanticHint === undefined ? {} : { semantic: field.semanticHint }),
-          status: "filled",
-          source: "user",
-          confidence: 1,
-          reason: "页面已存在用户填写值",
-          evidence: []
+          ...(field.semanticHint === undefined ? {} : { semantic: field.semanticHint })
         });
       }
     }
@@ -393,7 +389,12 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         throw new Error("incomplete_question_answers");
       }
       try {
-        await dependencies.applyAnswers(taskId, answers, snapshot.fields);
+        await dependencies.applyAnswers(
+          taskId,
+          answers,
+          snapshot.fields,
+          actor.getSnapshot().context.questions
+        );
       } catch {
         throw new Error("answer_persistence_failed");
       }

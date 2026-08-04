@@ -36,7 +36,11 @@ export function annotateDjiFields(snapshot: FormSnapshot): FormSnapshot {
     ...snapshot,
     fields: snapshot.fields.map((field) => {
       const match = matchDjiField(field);
-      return match === undefined ? field : { ...field, semanticHint: match.semantic };
+      return match === undefined ? field : {
+        ...field,
+        semanticHint: match.semantic,
+        semanticSource: match.source
+      };
     })
   };
 }

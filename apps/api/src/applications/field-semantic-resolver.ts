@@ -53,7 +53,7 @@ export interface FieldSemanticResolverOptions {
   minimumMargin?: number;
 }
 
-const DEFAULT_MINIMUM_SIMILARITY = 0.82;
+const DEFAULT_MINIMUM_SIMILARITY = 0.9;
 const DEFAULT_MINIMUM_MARGIN = 0.08;
 
 export function createFieldSemanticResolver(options: FieldSemanticResolverOptions = {}): FieldSemanticResolver {

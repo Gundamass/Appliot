@@ -2,7 +2,6 @@ import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ActionPolicy } from "@resume/action-policy";
-import type { ApplicationFieldAssessment, FormField } from "@resume/contracts";
 import {
   DeepSeekStructuredModelProvider,
   EMBEDDING_INSTRUCTION_VERSION,
@@ -11,18 +10,17 @@ import {
 import { RemoteOcrEngine } from "@resume/profile-domain/src/pdf/remote-ocr-engine.js";
 import {
   createRagService,
-  validateEditedSelfEvaluation,
-  type ProfileRepositoryPort,
-  type RagService
+  validateEditedSelfEvaluation
 } from "@resume/rag";
 import { createApplicationService } from "./applications/application-service.js";
 import { createCheckpointRepository } from "./applications/checkpoint-repository.js";
 import {
-  createFieldSemanticResolver,
-  type FieldResolutionPhase,
-  type FieldSemanticContext,
-  type FieldSemanticResolver
+  createFieldSemanticResolver
 } from "./applications/field-semantic-resolver.js";
+import {
+  createProductionFieldResolver,
+  fieldPathForApplicationAnswer
+} from "./applications/production-field-resolver.js";
 import { createTaskEventBus } from "./applications/task-events.js";
 import { BrowserWorkerClient } from "./browser/worker-client.js";
 import { createFactEmbeddingSearch } from "./rag/fact-embedding-search.js";
@@ -155,12 +153,12 @@ export function createProductionDependencies(
       approve(input, snapshot) {
         return actionPolicy.approve(input, snapshot).token;
       },
-      async applyAnswers(taskId, answers, fields) {
+      async applyAnswers(taskId, answers, fields, questions = []) {
         profileRepository.transaction(() => {
           for (const [fieldId, value] of Object.entries(answers)) {
             const field = fields.find((candidate) => candidate.id === fieldId);
             if (!field) throw new Error("answer_field_not_found");
-            const fieldPath = semanticForField(field.semanticHint, field.label);
+            const fieldPath = fieldPathForApplicationAnswer(field, questions);
             profileRepository.putTaskAnswer(taskId, fieldPath, value as never, [{
               documentId: "user",
               page: 1,
@@ -204,172 +202,6 @@ export function createProductionDependencies(
   }
 }
 
-interface ProductionFieldResolverDependencies {
-  semanticResolver: FieldSemanticResolver;
-  ragService: Pick<RagService, "resolveField">;
-  profileRepository: Pick<ProfileRepositoryPort, "resolveForTask">;
-}
-
-export function createProductionFieldResolver(dependencies: ProductionFieldResolverDependencies) {
-  return async (
-    taskId: string,
-    field: FormField,
-    phase: FieldResolutionPhase = "deterministic"
-  ) => {
-    const semanticDecision = await dependencies.semanticResolver.resolve(
-      field,
-      semanticContextForField(field),
-      phase
-    );
-    if (semanticDecision.status === "unresolved") {
-      const assessment = fieldAssessment(field, {
-        status: phase === "deterministic" ? "unsupported" : "missing",
-        source: "none",
-        confidence: 0,
-        reason: phase === "deterministic" ? "尚未找到确定性字段映射" : "未找到可安全使用的字段映射"
-      });
-      if (phase === "deterministic" && semanticDecision.reason === "exact_match_not_found") {
-        return { status: "deferred" as const, assessment };
-      }
-      return {
-        status: "needs_question" as const,
-        fieldPath: field.semanticHint ?? field.id,
-        question: `请补充“${field.label}”，系统未找到可安全使用的字段映射。`,
-        assessment
-      };
-    }
-    if (semanticDecision.status === "review") {
-      const candidate = semanticDecision.candidates[0];
-      return {
-        status: "needs_question" as const,
-        fieldPath: candidate?.semantic ?? field.semanticHint ?? field.id,
-        question: semanticReviewQuestion(field.label, semanticDecision.reason),
-        assessment: fieldAssessment(field, {
-          ...(candidate === undefined ? {} : { semantic: candidate.semantic }),
-          status: "review",
-          source: "semantic",
-          confidence: candidate?.similarity ?? 0,
-          reason: semanticReviewQuestion(field.label, semanticDecision.reason)
-        })
-      };
-    }
-
-    const semantic = semanticDecision.semantic;
-    const existing = dependencies.profileRepository.resolveForTask(taskId, semantic);
-    const decision = await dependencies.ragService.resolveField({
-      taskId,
-      fieldId: field.id,
-      semantic,
-      label: field.label,
-      type: fieldTypeForRag(field.type),
-      ...(field.options.length === 0 ? {} : { options: field.options }),
-      validators: field.required ? ["required"] : []
-    });
-    const requiresContentReview = decision.status === "needs_review"
-      || (semantic === "selfEvaluation" && existing?.scope !== "application");
-    const assessmentStatus = requiresContentReview
-      ? "review" as const
-      : decision.status === "verified_auto"
-        ? "ready" as const
-        : decision.status === "blocked"
-          ? "unsupported" as const
-          : "missing" as const;
-    return {
-      status: decision.status === "verified_auto" || decision.status === "needs_review"
-        ? "verified" as const
-        : decision.status,
-      ...(decision.value === undefined ? {} : { value: decision.value }),
-      ...(decision.question === undefined ? {} : { question: decision.question }),
-      fieldPath: semantic,
-      requiresContentReview,
-      assessment: fieldAssessment(field, {
-        semantic,
-        status: assessmentStatus,
-        source: semanticDecision.source === "embedding" ? "semantic" : "exact",
-        confidence: semanticDecision.confidence,
-        reason: assessmentReason(assessmentStatus),
-        evidence: decision.evidence
-      }),
-      ...(!requiresContentReview ? {} : {
-        contentReview: {
-          original: typeof existing?.value === "string" ? existing.value : JSON.stringify(existing?.value ?? ""),
-          reasons: [semantic === "selfEvaluation"
-            ? "自我评价来自长期资料，填写前需要确认是否适合当前岗位。"
-            : "该候选值尚未达到自动填写条件，需要你核对后采用。"],
-          evidence: decision.evidence,
-          unsupportedClaims: [],
-          status: "needs_review" as const
-        }
-      })
-    };
-  };
-}
-
-function fieldAssessment(
-  field: FormField,
-  input: Omit<ApplicationFieldAssessment, "fieldId" | "label" | "evidence"> & {
-    evidence?: ApplicationFieldAssessment["evidence"];
-  }
-): ApplicationFieldAssessment {
-  return {
-    fieldId: field.id,
-    label: field.label,
-    ...input,
-    evidence: input.evidence ?? []
-  };
-}
-
-function assessmentReason(status: ApplicationFieldAssessment["status"]): string {
-  if (status === "ready") return "字段映射和资料值均已通过验证";
-  if (status === "review") return "该字段需要用户审核后才能填写";
-  if (status === "missing") return "档案中没有可安全使用的已确认资料";
-  return "当前字段不支持安全自动填写";
-}
-
-function semanticContextForField(field: FormField): FieldSemanticContext {
-  const entryContext = field.semanticHint
-    ?.match(/^(education|work|projects|campus|awards|publications|certificates)\[\d+\]/u)?.[0];
-  const root = (entryContext ?? field.semanticHint)?.split(/[.[\]]/u, 1)[0];
-  const section = root === "identity"
-    ? "basics"
-    : root === "selfEvaluation"
-      ? "self"
-      : root && [
-        "basics", "preferences", "education", "work", "projects", "campus",
-        "awards", "publications", "certificates"
-      ].includes(root)
-        ? root
-        : undefined;
-  const context: FieldSemanticContext = {};
-  if (section !== undefined) {
-    context.section = section as NonNullable<FieldSemanticContext["section"]>;
-  }
-  if (entryContext !== undefined) context.entryContext = entryContext;
-  return context;
-}
-
-function semanticReviewQuestion(
-  label: string,
-  reason: "similarity_below_threshold" | "ambiguous_candidates" | "risk_requires_review"
-): string {
-  if (reason === "risk_requires_review") return `请确认“${label}”，该字段涉及敏感信息或求职承诺。`;
-  if (reason === "ambiguous_candidates") return `请确认“${label}”，系统找到了多个含义接近的档案字段。`;
-  return `请补充“${label}”，当前字段映射置信度不足。`;
-}
-
-function fieldTypeForRag(type: "text" | "textarea" | "select" | "radio" | "checkbox" | "date" | "file") {
-  if (type === "checkbox") return "boolean" as const;
-  if (type === "radio") return "select" as const;
-  if (type === "file") return "text" as const;
-  return type;
-}
-
-function semanticForField(hint: string | undefined, label: string): string {
-  const value = `${hint ?? ""} ${label}`.toLocaleLowerCase();
-  if (/e-?mail|邮箱/u.test(value)) return "basics.email";
-  if (/city|城市/u.test(value)) return "preferences.city";
-  if (/self.?evaluation|自我评价/u.test(value)) return "selfEvaluation";
-  return hint?.includes(".") ? hint : `application.${hint || "jobSpecific"}`;
-}
-
 function noop(): void {}
+
+export { createProductionFieldResolver, fieldPathForApplicationAnswer } from "./applications/production-field-resolver.js";

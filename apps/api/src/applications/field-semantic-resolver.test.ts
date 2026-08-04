@@ -127,6 +127,35 @@ describe("字段语义解析器", () => {
     if (decision.status === "review") expect(decision.candidates).toHaveLength(2);
   });
 
+  it("默认安全阈值在 0.89 时待审核，在 0.90 时允许映射", async () => {
+    const resolveAt = async (similarity: number) => {
+      const resolver = createFieldSemanticResolver({
+        embeddingProvider: new StubEmbeddingProvider(
+          [[1, 0]],
+          [similarity, Math.sqrt(1 - similarity ** 2)]
+        ),
+        definitions: [definitions[0]!]
+      });
+      return resolver.resolve({
+        label: "培养方式",
+        type: "select",
+        options: ["统招"]
+      }, {
+        section: "education",
+        entryContext: "education[0]"
+      }, "semantic");
+    };
+
+    await expect(resolveAt(0.89)).resolves.toMatchObject({
+      status: "review",
+      reason: "similarity_below_threshold"
+    });
+    await expect(resolveAt(0.9)).resolves.toMatchObject({
+      status: "mapped",
+      confidence: 0.9
+    });
+  });
+
   it("承诺类字段即使相似度足够也不得自动映射", async () => {
     const embedding = new StubEmbeddingProvider(
       [[1, 0], [0, 1], [0.99, 0.01]],
