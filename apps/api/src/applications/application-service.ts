@@ -32,6 +32,7 @@ import {
   type StartOperationInput
 } from "./application-progress.js";
 import { deriveEntrySemanticHints } from "./entry-field-semantics.js";
+import { annotateDjiFields } from "./dji-field-catalog.js";
 
 type ExecutionResult = Extract<WorkerResponse, { type: "execution_result" }>;
 
@@ -948,7 +949,8 @@ function questionInputType(type: FormField["type"]): ApplicationQuestion["inputT
 }
 
 function withDerivedEntrySemantics(snapshot: FormSnapshot): FormSnapshot {
-  return { ...snapshot, fields: deriveEntrySemanticHints(snapshot.fields) };
+  const catalogued = annotateDjiFields(snapshot);
+  return { ...catalogued, fields: deriveEntrySemanticHints(catalogued.fields) };
 }
 
 function restoreActor(
