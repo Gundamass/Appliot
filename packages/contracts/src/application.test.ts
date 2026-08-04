@@ -11,6 +11,23 @@ import {
 const taskId = "91dc4bd6-425a-4cab-a38d-d13e33cda771";
 
 describe("application contracts", () => {
+  it("accepts a field coverage report on a task", () => {
+    const task = ApplicationTaskSchema.parse({
+      id: "734b72a5-bb6b-4946-b5cc-cfe8419bd0eb",
+      applicationUrl: "https://apply.careers.dji.com/campus-recruitment/dji/143359#/apply",
+      state: "needs_questions",
+      commands: ["cancel", "answer_questions"],
+      fieldCoverage: {
+        total: 2, ready: 0, review: 1, missing: 1, unsupported: 0, filled: 0,
+        fields: [{
+          fieldId: "field-school", label: "毕业院校", semantic: "education[0].institution",
+          status: "missing", source: "none", confidence: 0, reason: "档案中没有可验证的资料", evidence: []
+        }]
+      }
+    });
+
+    expect(task.fieldCoverage?.fields[0]?.status).toBe("missing");
+  });
   it("accepts the guarded profile resumption command", () => {
     expect(ApplicationCommandSchema.parse({ type: "resume_with_profile" })).toEqual({ type: "resume_with_profile" });
   });

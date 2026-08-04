@@ -37,6 +37,34 @@ describe("application task repository", () => {
     database.close();
   });
 
+  it("persists field coverage with a checkpoint", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const taskId = "91dc4bd6-425a-4cab-a38d-d13e33cda771";
+    const checkpoints = createCheckpointRepository(database);
+    checkpoints.save({
+      taskId,
+      state: "observing",
+      url: "https://example.com/application",
+      stage: "application_form",
+      snapshotId: "snapshot-coverage",
+      fieldIds: ["field-school"],
+      questions: [],
+      fieldCoverage: {
+        total: 1, ready: 1, review: 0, missing: 0, unsupported: 0, filled: 0,
+        fields: [{
+          fieldId: "field-school", label: "毕业院校", semantic: "education[0].institution",
+          status: "ready", source: "exact", confidence: 1, reason: "精确路径匹配", evidence: []
+        }]
+      }
+    });
+
+    expect(checkpoints.latest(taskId)?.fieldCoverage?.fields[0]).toMatchObject({
+      fieldId: "field-school", status: "ready"
+    });
+    database.close();
+  });
+
   it("deletes task checkpoints and events together with failed task metadata", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

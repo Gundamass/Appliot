@@ -1,6 +1,8 @@
 import {
   ApplicationQuestionSchema,
+  ApplicationFieldCoverageSchema,
   type ApplicationContentReview,
+  type ApplicationFieldCoverage,
   type ApplicationQuestion,
   type FormSnapshot
 } from "@resume/contracts";
@@ -19,6 +21,7 @@ export interface ApplicationCheckpointInput {
   questions: ApplicationQuestion[];
   snapshot?: FormSnapshot;
   contentReview?: StoredContentReview;
+  fieldCoverage?: ApplicationFieldCoverage;
 }
 
 export interface StoredContentReview {
@@ -50,6 +53,7 @@ interface CheckpointRow {
   questions_json: string;
   snapshot_json: string | null;
   content_review_json: string | null;
+  field_coverage_json: string | null;
   created_at: string;
 }
 
@@ -77,8 +81,8 @@ export function createCheckpointRepository(database: SqliteDatabase): Checkpoint
   const insert = database.prepare(`
     INSERT INTO application_checkpoints (
       task_id, sequence, state, url, stage, snapshot_id, field_ids_json, questions_json,
-      snapshot_json, content_review_json, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      snapshot_json, content_review_json, field_coverage_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const nextSequence = database.prepare(`
     SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
@@ -104,6 +108,7 @@ export function createCheckpointRepository(database: SqliteDatabase): Checkpoint
       JSON.stringify(checkpoint.questions),
       checkpoint.snapshot === undefined ? null : JSON.stringify(checkpoint.snapshot),
       checkpoint.contentReview === undefined ? null : JSON.stringify(checkpoint.contentReview),
+      checkpoint.fieldCoverage === undefined ? null : JSON.stringify(checkpoint.fieldCoverage),
       createdAt
     );
     return { ...checkpoint, sequence, createdAt };
@@ -149,9 +154,12 @@ function fromRow(row: CheckpointRow): ApplicationCheckpoint {
     fieldIds: JSON.parse(row.field_ids_json) as string[],
     questions: z.array(ApplicationQuestionSchema).parse(JSON.parse(row.questions_json)),
     ...(row.snapshot_json === null ? {} : { snapshot: JSON.parse(row.snapshot_json) as FormSnapshot }),
-    ...(row.content_review_json === null
-      ? {}
-      : { contentReview: JSON.parse(row.content_review_json) as StoredContentReview }),
+      ...(row.content_review_json === null
+        ? {}
+        : { contentReview: JSON.parse(row.content_review_json) as StoredContentReview }),
+      ...(row.field_coverage_json === null
+        ? {}
+        : { fieldCoverage: ApplicationFieldCoverageSchema.parse(JSON.parse(row.field_coverage_json)) }),
     createdAt: row.created_at
   };
 }

@@ -105,6 +105,27 @@ export const ApplicationTaskAnswerSchema = z.object({
   value: JsonValueSchema
 }).strict();
 
+export const ApplicationFieldAssessmentSchema = z.object({
+  fieldId: z.string().min(1).max(128),
+  label: z.string().min(1).max(500),
+  semantic: z.string().min(1).max(512).optional(),
+  status: z.enum(["ready", "review", "missing", "unsupported", "filled"]),
+  source: z.enum(["dji_catalog", "exact", "semantic", "user", "none"]),
+  confidence: z.number().min(0).max(1),
+  reason: z.string().min(1).max(2_000),
+  evidence: z.array(EvidenceSchema).max(50)
+}).strict();
+
+export const ApplicationFieldCoverageSchema = z.object({
+  total: z.number().int().nonnegative(),
+  ready: z.number().int().nonnegative(),
+  review: z.number().int().nonnegative(),
+  missing: z.number().int().nonnegative(),
+  unsupported: z.number().int().nonnegative(),
+  filled: z.number().int().nonnegative(),
+  fields: z.array(ApplicationFieldAssessmentSchema).max(500)
+}).strict();
+
 export const ApplicationTaskSchema = z.object({
   id: z.string().uuid(),
   applicationUrl: ApplicationTaskInputSchema.shape.applicationUrl,
@@ -113,6 +134,7 @@ export const ApplicationTaskSchema = z.object({
   recoveryCommands: z.array(ApplicationRecoveryCommandSchema).default([]),
   questions: z.array(ApplicationQuestionSchema).default([]),
   taskAnswers: z.array(ApplicationTaskAnswerSchema).default([]),
+  fieldCoverage: ApplicationFieldCoverageSchema.optional(),
   contentReview: ApplicationContentReviewSchema.optional()
 }).strict();
 
@@ -261,6 +283,8 @@ export type ApplicationCommandType = z.infer<typeof ApplicationCommandTypeSchema
 export type ApplicationRecoveryCommand = z.infer<typeof ApplicationRecoveryCommandSchema>;
 export type ApplicationContentReview = z.infer<typeof ApplicationContentReviewSchema>;
 export type ApplicationTaskAnswer = z.infer<typeof ApplicationTaskAnswerSchema>;
+export type ApplicationFieldAssessment = z.infer<typeof ApplicationFieldAssessmentSchema>;
+export type ApplicationFieldCoverage = z.infer<typeof ApplicationFieldCoverageSchema>;
 export type ApplicationTask = z.infer<typeof ApplicationTaskSchema>;
 export type ActivityKind = z.infer<typeof ApplicationActivityKindSchema>;
 export type OperationKind = z.infer<typeof ApplicationOperationKindSchema>;

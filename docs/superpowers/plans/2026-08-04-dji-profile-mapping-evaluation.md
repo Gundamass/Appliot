@@ -118,7 +118,7 @@ rtk git commit -m "feat: annotate dji application fields"
 - Modify: `packages/contracts/src/application.test.ts`
 - Modify: `apps/api/src/db/migrate.ts`
 - Modify: `apps/api/src/applications/checkpoint-repository.ts`
-- Modify: `apps/api/src/applications/checkpoint-repository.test.ts`
+- Modify: `apps/api/src/applications/application-task-repository.test.ts`
 
 **Interfaces:**
 - Produces: `ApplicationFieldAssessmentSchema`
@@ -158,7 +158,7 @@ const ApplicationFieldCoverageSchema = z.object({
 
 Run: `rtk pnpm --filter @resume/contracts exec vitest run src/application.test.ts`
 
-Run: `rtk pnpm --filter @resume/api exec vitest run src/applications/checkpoint-repository.test.ts`
+Run: `rtk pnpm --filter @resume/api exec vitest run src/applications/application-task-repository.test.ts`
 
 Expected: FAIL，因为合同字段和数据库列尚不存在。
 
@@ -176,14 +176,14 @@ ALTER TABLE application_checkpoints ADD COLUMN field_coverage_json TEXT;
 
 Run: `rtk pnpm --filter @resume/contracts exec vitest run src/application.test.ts`
 
-Run: `rtk pnpm --filter @resume/api exec vitest run src/applications/checkpoint-repository.test.ts`
+Run: `rtk pnpm --filter @resume/api exec vitest run src/applications/application-task-repository.test.ts`
 
 Expected: PASS。
 
 - [ ] **Step 5: 提交任务**
 
 ```powershell
-rtk git add packages/contracts/src/application.ts packages/contracts/src/application.test.ts apps/api/src/db/migrate.ts apps/api/src/applications/checkpoint-repository.ts apps/api/src/applications/checkpoint-repository.test.ts
+rtk git add packages/contracts/src/application.ts packages/contracts/src/application.test.ts apps/api/src/db/migrate.ts apps/api/src/applications/checkpoint-repository.ts apps/api/src/applications/application-task-repository.test.ts
 rtk git commit -m "feat: persist application field coverage"
 ```
 
@@ -379,4 +379,3 @@ Expected: 所有命令以 `0` 退出；端到端输出显示全部通过；任�
 rtk git add apps/synthetic-ats/src/server.ts tests/browser/dji-coverage.spec.ts tests/browser/mokahr-high-coverage.spec.ts README.md
 rtk git commit -m "test: cover dji field mapping review flow"
 ```
-

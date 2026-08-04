@@ -123,6 +123,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
       questions_json TEXT NOT NULL CHECK (json_valid(questions_json) AND json_type(questions_json) = 'array'),
       snapshot_json TEXT CHECK (snapshot_json IS NULL OR json_valid(snapshot_json)),
       content_review_json TEXT CHECK (content_review_json IS NULL OR json_valid(content_review_json)),
+      field_coverage_json TEXT CHECK (field_coverage_json IS NULL OR json_valid(field_coverage_json)),
       created_at TEXT NOT NULL,
       PRIMARY KEY (task_id, sequence)
     );
@@ -179,6 +180,9 @@ export function migrateDatabase(database: SqliteDatabase): void {
   }
   if (!checkpointColumns.some((column) => column.name === "content_review_json")) {
     database.exec("ALTER TABLE application_checkpoints ADD COLUMN content_review_json TEXT");
+  }
+  if (!checkpointColumns.some((column) => column.name === "field_coverage_json")) {
+    database.exec("ALTER TABLE application_checkpoints ADD COLUMN field_coverage_json TEXT");
   }
 
   upgradeFactForeignKeys(database);
