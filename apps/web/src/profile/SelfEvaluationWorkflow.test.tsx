@@ -28,6 +28,7 @@ describe("self-evaluation workflow", () => {
       listFacts: vi.fn(async () => []),
       upsert: vi.fn(),
       getCompleteness: vi.fn(async () => ({ completed: 0, total: 1, sections: [] })),
+      getLatestDocument: vi.fn(async () => undefined),
       confirm: vi.fn(),
       correct: vi.fn()
     };

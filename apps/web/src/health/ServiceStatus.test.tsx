@@ -18,6 +18,7 @@ const profileApi: ProfileApi = {
   listFacts: vi.fn(async () => []),
   upsert: vi.fn(),
   getCompleteness: vi.fn(async () => ({ completed: 0, total: 1, sections: [] })),
+  getLatestDocument: vi.fn(async () => undefined),
   confirm: vi.fn(),
   correct: vi.fn()
 };
@@ -43,10 +44,10 @@ describe("ServiceStatus", () => {
     const { container } = render(<ProfilePage api={profileApi} healthApi={healthApi} />);
 
     const offline = await screen.findByText("OCR 离线");
-    const uploadBand = container.querySelector(".upload-band");
+    const parseRegion = container.querySelector(".resume-parse-region");
     const fileInput = container.querySelector<HTMLInputElement>('input[type="file"]');
-    expect(uploadBand).not.toBeNull();
-    expect(within(uploadBand as HTMLElement).getByText("OCR 离线")).toBe(offline);
+    expect(parseRegion).not.toBeNull();
+    expect(within(parseRegion as HTMLElement).getByText("OCR 离线")).toBe(offline);
     expect(fileInput).toBeEnabled();
   });
 

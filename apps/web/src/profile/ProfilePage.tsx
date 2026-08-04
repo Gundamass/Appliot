@@ -1,5 +1,5 @@
-import { SelfEvaluationReviewSchema, type AdapterId, type AdapterStatus, type FactStatus, type JsonValue, type ProfileCompleteness, type ProfileFact, type SelfEvaluationReview as SelfEvaluationReviewModel } from "@resume/contracts";
-import { FileText, Plus, RefreshCw, ShieldCheck, Upload } from "lucide-react";
+import { SelfEvaluationReviewSchema, type AdapterId, type AdapterStatus, type FactStatus, type JsonValue, type ProfileCompleteness, type ProfileDocumentSummary, type ProfileFact, type SelfEvaluationReview as SelfEvaluationReviewModel } from "@resume/contracts";
+import { FileText, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ProfileApi, RagApi, SelfEvaluationReviewApi } from "../api/client.js";
 import type { HealthApi } from "../api/health-client.js";
@@ -9,6 +9,8 @@ import { SelfEvaluationReview } from "../reviews/SelfEvaluationReview.js";
 import { RagWorkspace } from "../rag/RagWorkspace.js";
 import { ServiceStatus } from "../health/ServiceStatus.js";
 import { CandidateProfileCenter } from "./CandidateProfileCenter.js";
+import { ProfileSummaryBar } from "./ProfileSummaryBar.js";
+import { ResumeParsePanel } from "./ResumeParsePanel.js";
 
 type ReviewStatus = Exclude<FactStatus, "superseded">;
 type Filter = "all" | ReviewStatus;
@@ -69,6 +71,8 @@ interface ProfilePageProps {
 export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplication, embedded = false }: ProfilePageProps) {
   const [facts, setFacts] = useState<ProfileFact[]>([]);
   const [completeness, setCompleteness] = useState<ProfileCompleteness>();
+  const [latestDocument, setLatestDocument] = useState<ProfileDocumentSummary>();
+  const [parseOpen, setParseOpen] = useState(true);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [filter, setFilter] = useState<Filter>("all");
@@ -277,6 +281,14 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     }
   }, [api]);
 
+  const loadLatestDocument = useCallback(async () => {
+    try {
+      setLatestDocument(await api.getLatestDocument());
+    } catch {
+      setLatestDocument(undefined);
+    }
+  }, [api]);
+
   useEffect(() => {
     const context = ++contextGeneration.current;
     readGeneration.current += 1;
@@ -285,6 +297,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     acceptedUploadPhase.current = "none";
     mutationOwner.current = null;
     setFacts([]);
+    setLatestDocument(undefined);
     setLoading(true);
     setLoadError(false);
     setSelectedFile(undefined);
@@ -298,6 +311,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     if (fileInputRef.current) fileInputRef.current.value = "";
     void requestFacts(api, context, true);
     void loadCompleteness();
+    void loadLatestDocument();
     return () => {
       if (contextGeneration.current === context) contextGeneration.current += 1;
       readGeneration.current += 1;
@@ -306,7 +320,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
       acceptedUploadPhase.current = "none";
       mutationOwner.current = null;
     };
-  }, [api, loadCompleteness, requestFacts]);
+  }, [api, loadCompleteness, loadLatestDocument, requestFacts]);
 
   useEffect(() => {
     if (!focusRequest) return;
@@ -481,6 +495,9 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
   const deepseekAvailable = healthApi === undefined || deepseek?.state === "configured" || deepseek?.state === "ready";
   const ocr = adapterStatus("ocr");
   const embedding = adapterStatus("embedding");
+  const candidateName = factText(facts, ["name"]) ?? "候选人";
+  const targetRole = factText(facts, ["targetrole"]);
+  const missingCount = completeness?.sections.reduce((total, section) => total + section.missing.length, 0) ?? 0;
 
   const renderFact = (fact: ProfileFact, entryFacts: ProfileFact[] = []) => {
     const fieldLabel = labelFor(fact.fieldPath);
@@ -581,6 +598,50 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
         ) : view === "self-evaluation" ? (
           <section className="review-band"><p className="inline-error" role="alert">审核服务不可用</p></section>
         ) : <>
+        <ProfileSummaryBar
+          candidateName={candidateName}
+          {...(targetRole ? { targetRole } : {})}
+          completeness={completeness}
+          missingCount={missingCount}
+          latestDocument={latestDocument}
+          saveState="saved"
+          onSave={() => undefined}
+          onOpenParser={() => setParseOpen(true)}
+          onFillMissing={() => {
+            const firstMissing = completeness?.sections.find((section) => section.missing.length > 0);
+            document.getElementById(`profile-section-${firstMissing?.id ?? "basics"}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
+          }}
+        />
+        <div className="resume-parse-region">
+          <div className="resume-parse-service-bar">
+            {ocr && <ServiceStatus statuses={[ocr]} />}
+            <button
+              className="icon-button"
+              type="button"
+              aria-label="刷新资料"
+              title="刷新资料"
+              disabled={loading || controlsLocked}
+              onClick={() => { void loadFacts(); void refreshAdapterStatuses(); void loadLatestDocument(); }}
+            >
+              <RefreshCw aria-hidden="true" size={18} />
+            </button>
+          </div>
+          <ResumeParsePanel
+            open={parseOpen}
+            selectedFile={selectedFile}
+            uploadState={uploadState}
+            uploadMessage={uploadMessage}
+            latestDocument={latestDocument}
+            onSelectFile={selectFile}
+            onUpload={() => void uploadFile()}
+            onRetry={() => {
+              if (acceptedUploadOwner.current !== null) {
+                void refreshAcceptedUpload(acceptedUploadOwner.current, contextGeneration.current, api);
+              }
+            }}
+            onClose={() => setParseOpen(false)}
+          />
+        </div>
         <CandidateProfileCenter
           api={api}
           facts={facts}
@@ -590,59 +651,6 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
             await loadCompleteness();
           }}
         />
-
-        <section className="upload-band" aria-labelledby="upload-title">
-          <div className="section-heading">
-            <div>
-              <h2 id="upload-title">简历资料</h2>
-              <p>{facts.length} 条资料</p>
-            </div>
-            <div className="section-operations">
-              {ocr && <ServiceStatus statuses={[ocr]} />}
-              <button className="icon-button" type="button" aria-label="刷新资料" title="刷新资料" disabled={loading || controlsLocked} onClick={() => { void loadFacts(); void refreshAdapterStatuses(); }}>
-                <RefreshCw aria-hidden="true" size={18} />
-              </button>
-            </div>
-          </div>
-          <div className="upload-controls">
-            <label className={`file-picker${controlsLocked ? " disabled" : ""}`}>
-              <Upload aria-hidden="true" size={18} />
-              <span>选择 PDF</span>
-              <input
-                ref={fileInputRef}
-                type="file"
-                accept=".pdf"
-                aria-label="选择 PDF 简历"
-                disabled={controlsLocked}
-                onChange={(event) => selectFile(event.target.files?.[0])}
-              />
-            </label>
-            <span className="filename" title={selectedFile?.name}>{selectedFile?.name ?? "未选择文件"}</span>
-            <button className="button primary upload-button" type="button" disabled={!selectedFile || controlsLocked} onClick={() => void uploadFile()}>
-              {uploading ? "上传中" : "上传并提取"}
-            </button>
-          </div>
-          {uploading && selectedFile && (
-            <div className="upload-progress" role="progressbar" aria-label={`正在上传 ${selectedFile.name}`}>
-              <span />
-            </div>
-          )}
-          {uploadMessage && (
-            <div
-              className={`upload-message ${uploadState}`}
-              role={uploadState === "error" || uploadState === "accepted_refresh_error" ? "alert" : "status"}
-            >
-              <span>{uploadMessage}</span>
-              {uploadState === "accepted_refresh_error" && acceptedUploadOwner.current !== null && (
-                <button
-                  className="button secondary"
-                  type="button"
-                  onClick={() => void refreshAcceptedUpload(acceptedUploadOwner.current!, contextGeneration.current, api)}
-                >重新加载资料</button>
-              )}
-            </div>
-          )}
-        </section>
 
         <section className="review-band" aria-labelledby="review-title">
           <div className="review-heading">

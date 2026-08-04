@@ -45,6 +45,7 @@ function api(): ProfileApi {
     listFacts: vi.fn(async () => []),
     upsert: vi.fn(async (fieldPath, value) => fact(fieldPath, value, "user_corrected")),
     getCompleteness: vi.fn(async () => complete),
+    getLatestDocument: vi.fn(async () => undefined),
     confirm: vi.fn(),
     correct: vi.fn()
   };

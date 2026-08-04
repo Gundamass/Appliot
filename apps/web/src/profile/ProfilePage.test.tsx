@@ -43,6 +43,7 @@ function fakeProfileApi(initialFacts: ProfileFact[] = []) {
     listFacts: vi.fn(async () => facts),
     upsert: vi.fn(async (fieldPath, value) => makeFact({ fieldPath, value: value as JsonValue, status: "user_corrected" })),
     getCompleteness: vi.fn(async () => ({ completed: 0, total: 1, sections: [] })),
+    getLatestDocument: vi.fn(async () => undefined),
     confirm: vi.fn(async (factId) => {
       const updated = { ...facts.find((fact) => fact.id === factId)!, status: "user_confirmed" as const };
       facts = facts.map((fact) => fact.id === factId ? updated : fact);
@@ -61,6 +62,27 @@ function fakeProfileApi(initialFacts: ProfileFact[] = []) {
   };
   return api;
 }
+
+describe("global profile summary", () => {
+  it("loads the latest resume and opens a single global parser", async () => {
+    const user = userEvent.setup();
+    const api = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "何庆" })]);
+    vi.mocked(api.getLatestDocument).mockResolvedValue({
+      documentId: "0f8fad5b-d9cb-469f-a165-70867728950e",
+      filename: "何庆-简历.pdf",
+      importedAt: "2026-08-04T06:32:00.000Z",
+      extractedFactCount: 46
+    });
+
+    render(<ProfilePage api={api} />);
+
+    expect(await screen.findAllByText("何庆-简历.pdf")).toHaveLength(2);
+    expect(screen.getAllByRole("button", { name: "简历解析" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "简历解析" }));
+    expect(screen.getByRole("heading", { name: "简历解析" })).toBeVisible();
+    expect(api.getLatestDocument).toHaveBeenCalledTimes(1);
+  });
+});
 
 function fakeReviewApi(): SelfEvaluationReviewApi {
   const review = {
@@ -177,7 +199,7 @@ describe("self-evaluation review view", () => {
 });
 
 describe("ProfilePage loading states", () => {
-  it("keeps the long-form candidate profile ahead of PDF review when completeness is unavailable", async () => {
+  it("keeps the global parser ahead of the long-form profile when completeness is unavailable", async () => {
     const api = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "何庆" })]);
     vi.mocked(api.getCompleteness).mockRejectedValueOnce(new Error("completeness unavailable"));
     render(<ProfilePage api={api} embedded />);
@@ -185,8 +207,8 @@ describe("ProfilePage loading states", () => {
     const profileTitle = await screen.findByRole("heading", { name: "完整候选人档案" });
     expect(screen.getByText("档案完整度暂不可用")).toBeVisible();
     expect(screen.getAllByText("待评估").length).toBeGreaterThan(0);
-    const uploadTitle = screen.getByRole("heading", { name: "简历资料" });
-    expect(profileTitle.compareDocumentPosition(uploadTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
+    const parserTitle = screen.getByRole("heading", { name: "简历解析" });
+    expect(parserTitle.compareDocumentPosition(profileTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
 
   it("shows initial loading without an empty-state flash", async () => {
@@ -811,12 +833,13 @@ describe("PDF upload", () => {
     expect(screen.getByText("resume.pdf")).toBeVisible();
     await user.click(screen.getByRole("button", { name: "上传并提取" }));
     expect(screen.getByRole("progressbar", { name: "正在上传 resume.pdf" })).toBeVisible();
-    expect(screen.getByRole("button", { name: "上传中" })).toBeDisabled();
+    expect(screen.getByRole("button", { name: "上传并提取" })).toHaveTextContent("正在上传");
+    expect(screen.getByRole("button", { name: "上传并提取" })).toBeDisabled();
     expect(screen.getByLabelText("选择 PDF 简历")).toBeDisabled();
 
     await act(async () => upload.resolve({ documentId: "document-1" }));
     expect(await screen.findByText("简历已导入，资料已刷新")).toBeVisible();
-    expect(screen.getByText("Ada")).toBeVisible();
+    expect((await screen.findAllByText("Ada")).length).toBeGreaterThan(0);
     expect(api.listFacts).toHaveBeenCalledTimes(2);
   });
 
@@ -848,12 +871,12 @@ describe("PDF upload", () => {
 
     expect(await screen.findByRole("alert")).toHaveTextContent("简历已导入，但资料刷新失败");
     expect(fileInput.files).toHaveLength(0);
-    expect(screen.getByText("未选择文件")).toBeVisible();
+    expect(screen.getByText("选择 PDF 简历")).toBeVisible();
     expect(screen.getByRole("button", { name: "上传并提取" })).toBeDisabled();
     expect(api.upload).toHaveBeenCalledOnce();
 
-    await user.click(screen.getByRole("button", { name: "重新加载资料" }));
-    expect(await screen.findByText("Ada")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "重新刷新资料" }));
+    expect((await screen.findAllByText("Ada")).length).toBeGreaterThan(0);
     expect(screen.getByText("简历已导入，资料已刷新")).toBeVisible();
     expect(api.upload).toHaveBeenCalledOnce();
     expect(api.listFacts).toHaveBeenCalledTimes(3);
@@ -908,7 +931,7 @@ describe("PDF upload", () => {
 
     await user.click(screen.getByRole("button", { name: "刷新资料" }));
 
-    expect(await screen.findByText("Ada")).toBeVisible();
+    expect((await screen.findAllByText("Ada")).length).toBeGreaterThan(0);
     expect(screen.getByText("简历已导入，资料已刷新")).toBeVisible();
     expect(screen.queryByRole("alert")).not.toBeInTheDocument();
     expect(api.upload).toHaveBeenCalledOnce();
@@ -930,7 +953,7 @@ describe("PDF upload", () => {
 
     uploadRefresh.resolve([importedFact]);
 
-    expect(await screen.findByText("Ada")).toBeVisible();
+    expect((await screen.findAllByText("Ada")).length).toBeGreaterThan(0);
     expect(screen.getByText("简历已导入，资料已刷新")).toBeVisible();
     expect(screen.queryByText("简历已导入，正在刷新资料")).not.toBeInTheDocument();
   });
