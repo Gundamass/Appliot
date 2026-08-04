@@ -1,10 +1,11 @@
-import type { JsonValue, ProfileFact } from "@resume/contracts";
+import type { Evidence, JsonValue } from "@resume/contracts";
 import { ExternalLink, FileSearch, Link2, X } from "lucide-react";
 import { useEffect, useId, useRef, useState } from "react";
 
 interface EvidenceDrawerProps {
-  fact: ProfileFact;
   fieldLabel: string;
+  value: JsonValue;
+  evidence: Evidence[];
   returnFocusTo: HTMLElement | null;
   onClose(): void;
 }
@@ -21,17 +22,17 @@ interface GroundingState {
   boxes: EvidenceBox[];
 }
 
-export function EvidenceDrawer({ fact, fieldLabel, returnFocusTo, onClose }: EvidenceDrawerProps) {
+export function EvidenceDrawer({ fieldLabel, value, evidence, returnFocusTo, onClose }: EvidenceDrawerProps) {
   const titleId = useId();
   const closeRef = useRef<HTMLButtonElement>(null);
   const dialogRef = useRef<HTMLElement>(null);
   const [selectedIndex, setSelectedIndex] = useState(0);
   const [grounding, setGrounding] = useState<GroundingState>({ status: "idle", boxes: [] });
-  const selectedEvidence = fact.evidence[selectedIndex] ?? fact.evidence[0];
+  const selectedEvidence = evidence[selectedIndex] ?? evidence[0];
 
   useEffect(() => {
     setSelectedIndex(0);
-  }, [fact.id]);
+  }, [fieldLabel]);
 
   useEffect(() => {
     closeRef.current?.focus();
@@ -104,7 +105,7 @@ export function EvidenceDrawer({ fact, fieldLabel, returnFocusTo, onClose }: Evi
       >
         <header className="drawer-header">
           <div>
-            <p className="drawer-kicker">知识字段与原文核对</p>
+            <p className="drawer-kicker">字段与原文核对</p>
             <h2 id={titleId}>证据映射</h2>
           </div>
           <button ref={closeRef} className="icon-button" type="button" aria-label="关闭来源" title="关闭来源" onClick={onClose}>
@@ -113,38 +114,38 @@ export function EvidenceDrawer({ fact, fieldLabel, returnFocusTo, onClose }: Evi
         </header>
 
         <div className={`drawer-content ${userEvidence ? "user-evidence-view" : "document-evidence-view"}`}>
-          <section className="evidence-sidebar" aria-label="知识字段和证据列表">
+          <section className="evidence-sidebar" aria-label="当前字段和证据列表">
             <div className="knowledge-field">
-              <p>知识库字段</p>
+              <p>当前字段</p>
               <h3>{fieldLabel}</h3>
-              <div className="knowledge-value">{displayValue(fact.value)}</div>
+              <div className="knowledge-value">{displayValue(value)}</div>
             </div>
 
             <div className="evidence-list-block">
               <div className="evidence-section-title">
                 <FileSearch aria-hidden="true" size={16} />
                 <h3>证据记录</h3>
-                <span>{fact.evidence.length}</span>
+                <span>{evidence.length}</span>
               </div>
               <div className="evidence-list">
-                {fact.evidence.map((evidence, index) => {
-                  const isUserEvidence = evidence.extraction === "user";
+                {evidence.map((item, index) => {
+                  const isUserEvidence = item.extraction === "user";
                   const label = isUserEvidence
-                    ? "用户更正"
-                    : `${sourceLabel(evidence.extraction)}，第 ${evidence.page} 页`;
+                    ? "用户提供"
+                    : `${sourceLabel(item.extraction)}，第 ${item.page} 页`;
                   return (
                     <button
                       className="evidence-option"
                       type="button"
                       aria-label={label}
                       aria-pressed={selectedIndex === index}
-                      key={`${evidence.documentId}-${evidence.page}-${index}`}
+                      key={`${item.documentId}-${item.page}-${index}`}
                       onClick={() => setSelectedIndex(index)}
                     >
                       <span className="evidence-option-source">
-                        {isUserEvidence ? `更正记录 ${index + 1}` : `证据 ${index + 1}`}
+                        {isUserEvidence ? `用户提供记录 ${index + 1}` : `证据 ${index + 1}`}
                       </span>
-                      {!isUserEvidence && <span>第 {evidence.page} 页</span>}
+                      {!isUserEvidence && <span>第 {item.page} 页</span>}
                     </button>
                   );
                 })}
@@ -221,10 +222,10 @@ export function EvidenceDrawer({ fact, fieldLabel, returnFocusTo, onClose }: Evi
               </section>
             </>
           ) : selectedEvidence ? (
-            <section className="correction-evidence" aria-label="用户更正记录">
-              <p className="correction-source">用户更正</p>
+            <section className="correction-evidence" aria-label="用户提供记录">
+              <p className="correction-source">用户提供</p>
               <div className="quote-block">
-                <h3>更正记录</h3>
+                <h3>用户提供记录</h3>
                 <blockquote>{selectedEvidence.text}</blockquote>
               </div>
             </section>
@@ -237,10 +238,10 @@ export function EvidenceDrawer({ fact, fieldLabel, returnFocusTo, onClose }: Evi
   );
 }
 
-function sourceLabel(source: ProfileFact["evidence"][number]["extraction"]): string {
+function sourceLabel(source: Evidence["extraction"]): string {
   if (source === "pdf_text") return "PDF 文本提取";
   if (source === "ocr") return "OCR 识别";
-  return "用户更正";
+  return "用户提供";
 }
 
 function displayValue(value: JsonValue): string {
@@ -251,7 +252,7 @@ function displayValue(value: JsonValue): string {
 }
 
 function locationLabel(
-  extraction: ProfileFact["evidence"][number]["extraction"],
+  extraction: Evidence["extraction"],
   status: GroundingState["status"]
 ): string {
   if (extraction !== "ocr") return "PDF 文本证据";

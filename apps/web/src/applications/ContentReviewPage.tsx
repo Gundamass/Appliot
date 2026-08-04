@@ -1,6 +1,7 @@
 import type { ApplicationContentReview } from "@resume/contracts";
 import { AlertTriangle, Check, FileDiff, RotateCcw, X } from "lucide-react";
 import { useEffect, useRef, useState } from "react";
+import { ApplicationEvidenceDrawer } from "./ApplicationEvidenceDrawer.js";
 import { EvidenceList } from "./EvidenceList.js";
 
 interface ContentReviewPageProps {
@@ -14,6 +15,7 @@ interface ContentReviewPageProps {
 
 export function ContentReviewPage({ review, busy, canApprove, canReject, onApprove, onReject }: ContentReviewPageProps) {
   const [finalValue, setFinalValue] = useState(review.draft);
+  const [evidenceTrigger, setEvidenceTrigger] = useState<HTMLButtonElement>();
   const blocked = review.status === "blocked" || review.unsupportedClaims.length > 0;
   const reviewSignature = `${review.id}\u0000${review.draft}`;
   const previousReviewSignature = useRef(reviewSignature);
@@ -22,6 +24,7 @@ export function ContentReviewPage({ review, busy, canApprove, canReject, onAppro
     if (previousReviewSignature.current === reviewSignature) return;
     previousReviewSignature.current = reviewSignature;
     setFinalValue(review.draft);
+    setEvidenceTrigger(undefined);
   }, [review.draft, reviewSignature]);
 
   return (
@@ -39,7 +42,7 @@ export function ContentReviewPage({ review, busy, canApprove, canReject, onAppro
 
       <div className="content-review-details">
         <section aria-labelledby="content-review-reasons"><h3 id="content-review-reasons">调整与审核理由</h3>{review.reasons.length === 0 ? <p className="empty-review-detail">该字段需要你确认后才能填写</p> : <ul>{review.reasons.map((reason) => <li key={reason}>{reason}</li>)}</ul>}</section>
-        <EvidenceList evidence={review.evidence} />
+        <EvidenceList evidence={review.evidence} onInspect={setEvidenceTrigger} />
       </div>
 
       {blocked && <div className="content-review-warning" role="alert"><AlertTriangle aria-hidden="true" size={18} /><div><strong>草稿未通过事实校验</strong><p>{review.unsupportedClaims.join("；") || "当前内容无法安全采用"}</p></div></div>}
@@ -51,6 +54,7 @@ export function ContentReviewPage({ review, busy, canApprove, canReject, onAppro
         </>}
         {canReject && <button className="button quiet danger" type="button" disabled={busy} onClick={() => void onReject()}><X aria-hidden="true" size={16} />拒绝并停止</button>}
       </div>}
+      {evidenceTrigger && <ApplicationEvidenceDrawer review={review} returnFocusTo={evidenceTrigger} onClose={() => setEvidenceTrigger(undefined)} />}
     </section>
   );
 }

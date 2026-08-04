@@ -1,21 +1,22 @@
 import type { Evidence } from "@resume/contracts";
-import { ExternalLink, FileSearch } from "lucide-react";
+import { FileSearch } from "lucide-react";
 
-interface EvidenceListProps { evidence: Evidence[]; }
+interface EvidenceListProps {
+  evidence: Evidence[];
+  onInspect?(trigger: HTMLButtonElement): void;
+}
 
-export function EvidenceList({ evidence }: EvidenceListProps) {
+export function EvidenceList({ evidence, onInspect }: EvidenceListProps) {
   return (
     <section className="application-evidence" aria-labelledby="application-evidence-title">
-      <h3 id="application-evidence-title"><FileSearch aria-hidden="true" size={16} />支持证据</h3>
+      <div className="application-evidence-heading">
+        <h3 id="application-evidence-title"><FileSearch aria-hidden="true" size={16} />支持证据</h3>
+        {evidence.length > 0 && onInspect && <button className="button quiet" type="button" onClick={(event) => onInspect(event.currentTarget)}>查看原文</button>}
+      </div>
       {evidence.length === 0 ? <p className="empty-review-detail">暂无可核对的支持证据</p> : <ol>
         {evidence.map((item, index) => <li key={`${item.documentId}-${item.page}-${index}`}>
           <div><strong>{sourceLabel(item.extraction)}</strong><span>{item.text}</span></div>
-          {item.extraction === "user" ? <span className="evidence-page-label">用户确认</span> : <a
-            href={`/api/profile/documents/${encodeURIComponent(item.documentId)}/pdf#page=${item.page}`}
-            target="_blank"
-            rel="noreferrer"
-            aria-label={`查看第 ${item.page} 页证据`}
-          >第 {item.page} 页<ExternalLink aria-hidden="true" size={13} /></a>}
+          <span className="evidence-page-label">{item.extraction === "user" ? "用户确认" : `第 ${item.page} 页`}</span>
         </li>)}
       </ol>}
     </section>
