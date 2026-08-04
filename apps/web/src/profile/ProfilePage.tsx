@@ -380,11 +380,11 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
       </header>}
 
       <main>
-        <nav className="view-switch" aria-label="工作区视图">
+        {!embedded && <nav className="view-switch" aria-label="工作区视图">
           <button type="button" aria-pressed={view === "profile"} onClick={() => setView("profile")}>候选人档案</button>
           <button type="button" aria-pressed={view === "self-evaluation"} onClick={() => setView("self-evaluation")}>自我评价审核</button>
           <button type="button" aria-pressed={view === "rag"} onClick={() => setView("rag")}>字段检索</button>
-        </nav>
+        </nav>}
         {view === "rag" && ragApi ? <RagWorkspace api={ragApi} {...(embedding ? { embeddingStatus: embedding } : {})} /> : view === "rag" ? (
           <section className="review-band"><p className="inline-error" role="alert">RAG 服务不可用</p></section>
         ) : view === "self-evaluation" && reviewApi ? (

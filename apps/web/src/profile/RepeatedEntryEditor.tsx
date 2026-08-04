@@ -14,7 +14,10 @@ interface RepeatedEntryEditorProps {
   onChange(values: Record<string, string>): void;
   onAdd(): void;
   onRemove(index: number): void;
+  onControl?(path: string, control: ProfileControlElement | null): void;
 }
+
+type ProfileControlElement = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
 const SECTION_NAMES: Partial<Record<FieldSection, string>> = {
   education: "教育经历",
@@ -34,7 +37,7 @@ const FIELD_ORDERS: Partial<Record<FieldSection, readonly string[]>> = {
 
 const AWARD_LEVELS = ["国家级", "省级", "市级", "校级", "院级", "其他"];
 
-export function RepeatedEntryEditor({ section, entries, disabled = false, onChange, onAdd, onRemove }: RepeatedEntryEditorProps) {
+export function RepeatedEntryEditor({ section, entries, disabled = false, onChange, onAdd, onRemove, onControl = () => undefined }: RepeatedEntryEditorProps) {
   const fields = useMemo(() => orderedFields(section), [section]);
   const name = SECTION_NAMES[section] ?? "经历";
   const visibleEntries = entries.slice().sort((left, right) => left.index - right.index);
@@ -73,6 +76,7 @@ export function RepeatedEntryEditor({ section, entries, disabled = false, onChan
                     value={entry.values[path] ?? ""}
                     disabled={disabled}
                     onChange={(value) => onChange({ ...entry.values, [path]: value })}
+                    onControl={(control) => onControl(path, control)}
                   />
                 );
               })}
@@ -84,7 +88,7 @@ export function RepeatedEntryEditor({ section, entries, disabled = false, onChan
   );
 }
 
-function ProfileControl({ field, value, disabled, onChange }: { field: FieldDefinition; value: string; disabled: boolean; onChange(value: string): void }) {
+function ProfileControl({ field, value, disabled, onChange, onControl }: { field: FieldDefinition; value: string; disabled: boolean; onChange(value: string): void; onControl(control: ProfileControlElement | null): void }) {
   const multiline = field.types[0] === "textarea";
   const date = field.types[0] === "date";
   const booleanChoice = field.types.includes("checkbox") || field.types.includes("radio");
@@ -93,18 +97,18 @@ function ProfileControl({ field, value, disabled, onChange }: { field: FieldDefi
     <label className={multiline ? "profile-field profile-field-wide" : "profile-field"}>
       <span>{field.label}</span>
       {awardLevel ? (
-        <select aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
+        <select ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
           <option value="">请选择</option>
           {AWARD_LEVELS.map((option) => <option key={option} value={option}>{option}</option>)}
         </select>
       ) : booleanChoice ? (
-        <select aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
+        <select ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
           <option value="">请选择</option><option value="是">是</option><option value="否">否</option>
         </select>
       ) : multiline ? (
-        <textarea aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+        <textarea ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
       ) : (
-        <input aria-label={field.label} type={date ? "date" : "text"} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+        <input ref={onControl} aria-label={field.label} type={date ? "date" : "text"} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
       )}
     </label>
   );

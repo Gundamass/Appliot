@@ -34,6 +34,15 @@ const incompletePreferences: ProfileCompleteness = {
   ]
 };
 
+const incompleteProject: ProfileCompleteness = {
+  completed: 1,
+  total: 2,
+  sections: [
+    { id: "basics", label: "基本信息", completed: 1, total: 1, missing: [] },
+    { id: "projects", label: "项目经历", completed: 0, total: 1, missing: ["projects[0].name"] }
+  ]
+};
+
 const emptyCompleteness: ProfileCompleteness = {
   completed: 0,
   total: 1,
@@ -54,6 +63,32 @@ function api(): ProfileApi {
 }
 
 describe("CandidateProfileCenter", () => {
+  it("moves focus to the first missing field when the completion action is requested", async () => {
+    const ref = createRef<CandidateProfileCenterHandle>();
+    render(<CandidateProfileCenter ref={ref} api={api()} facts={[fact("basics.name", "陈同学")]} completeness={incompletePreferences} onFactsChanged={vi.fn()} />);
+
+    ref.current?.focusFirstMissing();
+
+    const missingField = await screen.findByLabelText("期望工作地点");
+    await waitFor(() => expect(missingField).toHaveFocus());
+  });
+
+  it("moves focus to a missing field inside an existing repeated entry", async () => {
+    const ref = createRef<CandidateProfileCenterHandle>();
+    render(<CandidateProfileCenter
+      ref={ref}
+      api={api()}
+      facts={[fact("projects[0].description", "负责后端服务") ]}
+      completeness={incompleteProject}
+      onFactsChanged={vi.fn()}
+    />);
+
+    ref.current?.focusFirstMissing();
+
+    const missingField = await screen.findByLabelText("项目名称");
+    await waitFor(() => expect(missingField).toHaveFocus());
+  });
+
   it("keeps scalar edits as drafts until the profile is saved", async () => {
     const user = userEvent.setup();
     const profileApi = api();

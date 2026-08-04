@@ -56,6 +56,33 @@ function deferred<T>() {
 }
 
 describe("ApplicationTaskPage", () => {
+  it("opens review evidence without exposing profile field-source controls", async () => {
+    const user = userEvent.setup();
+    const events = eventHarness();
+    const reviewTask: ApplicationTask = {
+      ...task,
+      state: "awaiting_content_review",
+      commands: ["cancel", "open_browser", "approve_content", "reject_content"],
+      contentReview: {
+        id: "review-evidence",
+        fieldId: "self",
+        fieldLabel: "自我评价",
+        original: "原始自我评价",
+        draft: "岗位微调稿",
+        reasons: ["突出相关经验"],
+        evidence: [{ documentId: "a".repeat(64), page: 1, text: "具备相关项目经验", extraction: "pdf_text" }],
+        unsupportedClaims: [],
+        status: "needs_review"
+      }
+    };
+    render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(reviewTask), command: vi.fn() }} connectEvents={events.connect} />);
+
+    await user.click(await screen.findByRole("button", { name: "查看原文" }));
+
+    expect((await screen.findAllByText("具备相关项目经验")).length).toBeGreaterThan(1);
+    expect(screen.queryByRole("button", { name: "查看来源" })).not.toBeInTheDocument();
+  });
+
   it("renders the workbench structure with four stages, browser status, attention, and compact activity", async () => {
     const events = eventHarness();
     render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(task), command: vi.fn() }} connectEvents={events.connect} />);

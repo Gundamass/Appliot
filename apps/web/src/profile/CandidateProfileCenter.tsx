@@ -25,6 +25,7 @@ interface CandidateProfileCenterProps {
 }
 
 type AddedEntryIndexes = Partial<Record<FieldSection, number[]>>;
+type ProfileControlElement = HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement;
 
 export const CandidateProfileCenter = forwardRef<CandidateProfileCenterHandle, CandidateProfileCenterProps>(function CandidateProfileCenter(
   { api, facts, completeness, onFactsChanged, onSaveStateChange },
@@ -42,6 +43,8 @@ export const CandidateProfileCenter = forwardRef<CandidateProfileCenterHandle, C
   const [addedEntryIndexes, setAddedEntryIndexes] = useState<AddedEntryIndexes>({});
   const [saveError, setSaveError] = useState<string>();
   const [saving, setSaving] = useState(false);
+  const controlsByPath = useRef<Record<string, ProfileControlElement | null>>({});
+  const [focusPath, setFocusPath] = useState<string>();
   const sectionProgress = completeness?.sections ?? [];
   const percentage = completeness && Math.round((completeness.completed / Math.max(1, completeness.total)) * 100);
   const saveState: ProfileSaveState = saving ? "saving" : dirtyPaths.size > 0 || removedPaths.size > 0 ? "dirty" : "saved";
@@ -61,6 +64,14 @@ export const CandidateProfileCenter = forwardRef<CandidateProfileCenterHandle, C
   useEffect(() => {
     onSaveStateChange?.(saveState);
   }, [onSaveStateChange, saveState]);
+
+  useEffect(() => {
+    if (!focusPath) return;
+    const control = controlsByPath.current[focusPath];
+    if (!control) return;
+    control.focus();
+    setFocusPath(undefined);
+  }, [activeSection, focusPath]);
 
   const changeValue = useCallback((path: string, value: string) => {
     setDraftValues((current) => {
@@ -135,8 +146,9 @@ export const CandidateProfileCenter = forwardRef<CandidateProfileCenterHandle, C
   }, [api, onFactsChanged]);
 
   const focusFirstMissing = useCallback(() => {
-    const firstMissing = completeness?.sections.find((section) => section.missing.length > 0)?.id as FieldSection | undefined;
-    setActiveSection(firstMissing ?? "basics");
+    const firstMissing = completeness?.sections.find((section) => section.missing.length > 0);
+    setActiveSection(firstMissing?.id as FieldSection ?? "basics");
+    setFocusPath(firstMissing?.missing.find((path) => !path.includes("[]")));
   }, [completeness]);
 
   useImperativeHandle(ref, () => ({ save: saveDrafts, focusFirstMissing }), [focusFirstMissing, saveDrafts]);
@@ -260,6 +272,7 @@ export const CandidateProfileCenter = forwardRef<CandidateProfileCenterHandle, C
             onEntryChange={(values) => Object.entries(values).forEach(([path, value]) => changeValue(path, value))}
             onAdd={addEntry}
             onRemove={removeEntry}
+            onControl={(path, control) => { controlsByPath.current[path] = control; }}
           />
         </div>
       </div>
@@ -279,7 +292,8 @@ function ProfileSection({
   onScalarChange,
   onEntryChange,
   onAdd,
-  onRemove
+  onRemove,
+  onControl
 }: {
   section: FieldSection;
   label: string;
@@ -293,6 +307,7 @@ function ProfileSection({
   onEntryChange(values: Record<string, string>): void;
   onAdd(): void;
   onRemove(index: number): void;
+  onControl(path: string, control: ProfileControlElement | null): void;
 }) {
   const fields = FIELD_DEFINITIONS.filter((field) => field.sections.includes(section) && !field.semantic.includes("[]"));
   const filledCount = repeatable ? entries.length : fields.filter((field) => (draftValues[field.semantic] ?? "").trim().length > 0).length;
@@ -306,7 +321,7 @@ function ProfileSection({
         {!completenessAvailable || missing.length > 0 ? <CircleAlert aria-hidden="true" size={18} /> : <CheckCircle2 aria-hidden="true" size={18} />}
       </header>
       {repeatable ? (
-        <RepeatedEntryEditor section={section} entries={entries} disabled={saving} onChange={onEntryChange} onAdd={onAdd} onRemove={onRemove} />
+        <RepeatedEntryEditor section={section} entries={entries} disabled={saving} onChange={onEntryChange} onAdd={onAdd} onRemove={onRemove} onControl={onControl} />
       ) : (
         <div className="profile-form-grid">
           {fields.map((field) => (
@@ -317,6 +332,7 @@ function ProfileSection({
               missing={missing.includes(field.semantic)}
               disabled={saving}
               onChange={(value) => onScalarChange(field.semantic, value)}
+              onControl={(control) => onControl(field.semantic, control)}
             />
           ))}
         </div>
@@ -325,7 +341,7 @@ function ProfileSection({
   );
 }
 
-function ScalarField({ field, value, missing, disabled, onChange }: { field: FieldDefinition; value: string; missing: boolean; disabled: boolean; onChange(value: string): void }) {
+function ScalarField({ field, value, missing, disabled, onChange, onControl }: { field: FieldDefinition; value: string; missing: boolean; disabled: boolean; onChange(value: string): void; onControl(control: ProfileControlElement | null): void }) {
   const multiline = field.types[0] === "textarea";
   const date = field.types[0] === "date";
   const booleanChoice = field.types.includes("checkbox") || field.types.includes("radio");
@@ -333,11 +349,11 @@ function ScalarField({ field, value, missing, disabled, onChange }: { field: Fie
     <label className={multiline ? "profile-field profile-field-wide" : "profile-field"}>
       <span>{field.label}{missing && <small>缺失，可减少追问</small>}</span>
       {booleanChoice ? (
-        <select aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}><option value="">请选择</option><option value="是">是</option><option value="否">否</option></select>
+        <select ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}><option value="">请选择</option><option value="是">是</option><option value="否">否</option></select>
       ) : multiline ? (
-        <textarea aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+        <textarea ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
       ) : (
-        <input aria-label={field.label} type={date ? "date" : "text"} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
+        <input ref={onControl} aria-label={field.label} type={date ? "date" : "text"} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
       )}
     </label>
   );

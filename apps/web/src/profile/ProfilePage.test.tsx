@@ -65,6 +65,29 @@ function fakeProfileApi(initialFacts: ProfileFact[] = []) {
 }
 
 describe("global profile summary", () => {
+  it("keeps summary information readable and focuses the first missing field", async () => {
+    const user = userEvent.setup();
+    const api = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "何庆" })]);
+    vi.mocked(api.getCompleteness).mockResolvedValue({
+      completed: 1,
+      total: 2,
+      sections: [
+        { id: "basics", label: "基本信息", completed: 1, total: 1, missing: [] },
+        { id: "preferences", label: "求职偏好", completed: 0, total: 1, missing: ["preferences.targetCity"] }
+      ]
+    });
+
+    render(<ProfilePage api={api} />);
+
+    const summary = await screen.findByRole("region", { name: "档案全局信息" });
+    expect(within(summary).getByText("何庆")).toBeVisible();
+    expect(within(summary).getByText("1 项待补全")).toBeVisible();
+    await user.click(within(summary).getByRole("button", { name: "补全资料" }));
+
+    expect(await screen.findByLabelText("期望工作地点")).toHaveFocus();
+    expect(screen.queryByRole("button", { name: "查看来源" })).not.toBeInTheDocument();
+  });
+
   it("loads the latest resume and opens a single global parser", async () => {
     const user = userEvent.setup();
     const api = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "何庆" })]);
