@@ -35,6 +35,7 @@ export interface ProfileRepository {
   transaction<T>(operation: () => T): T;
   createExtracted(fact: ProfileFact): ProfileFact;
   upsertUserFact(input: ProfileFactUpsertInput): ProfileFact;
+  removeProfileFacts(fieldPaths: string[]): number;
   confirm(factId: string): ProfileFact;
   correct(factId: string, value: JsonValue, evidence: Evidence[]): ProfileFact;
   putTaskAnswer(taskId: string, fieldPath: string, value: JsonValue, evidence: Evidence[]): ProfileFact;
@@ -122,6 +123,10 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
   const findReviewedProfileFacts = database.prepare(`
     SELECT * FROM profile_facts
     WHERE scope = 'profile' AND field_path = ? AND status IN ('user_confirmed', 'user_corrected')
+  `);
+  const findActiveProfileFacts = database.prepare(`
+    SELECT * FROM profile_facts
+    WHERE scope = 'profile' AND field_path = ? AND status != 'superseded'
   `);
   const insertTaskAnswer = database.prepare(`
     INSERT INTO application_answers (
@@ -271,6 +276,26 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
         );
         supersedeReviewedAlternatives(created, timestamp);
         return created;
+      })();
+    },
+
+    removeProfileFacts(fieldPaths) {
+      return database.transaction(() => {
+        const matches = new Map<string, ProfileFact>();
+        for (const fieldPath of fieldPaths) {
+          for (const lookupPath of semanticLookupPaths(fieldPath)) {
+            for (const row of findActiveProfileFacts.all(lookupPath) as FactRow[]) {
+              const fact = parseFact(row);
+              matches.set(fact.id, fact);
+            }
+          }
+        }
+        const timestamp = now();
+        for (const fact of matches.values()) {
+          snapshot(fact, timestamp);
+          supersedeFact.run(fact.revision + 1, timestamp, fact.id);
+        }
+        return matches.size;
       })();
     },
 

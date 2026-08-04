@@ -35,6 +35,22 @@ describe("ProfileApi HTTP contract", () => {
     }));
   });
 
+  it("removes profile fields in one strict batch request", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ removed: 2 }), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createProfileApi().remove(["work[0].position", "work[0].title"]);
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/profile/facts", expect.objectContaining({
+      method: "DELETE",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ fieldPaths: ["work[0].position", "work[0].title"] })
+    }));
+  });
+
   it("loads and validates the profile completeness projection", async () => {
     const completeness = {
       completed: 2,

@@ -371,6 +371,31 @@ describe("profile routes", () => {
     ]));
   });
 
+  it("removes active profile facts through one strict batch request", async () => {
+    const app = await buildTestApp();
+    await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) });
+
+    const removed = await app.inject({
+      method: "DELETE",
+      url: "/api/profile/facts",
+      payload: { fieldPaths: ["basics.email"] }
+    });
+
+    expect(removed.statusCode).toBe(200);
+    expect(removed.json()).toEqual({ removed: 1 });
+    expect((await app.inject({ method: "GET", url: "/api/profile/facts" })).json()).toEqual([]);
+  });
+
+  it("rejects malformed profile fact removal bodies", async () => {
+    const app = await buildTestApp();
+
+    for (const payload of [{ fieldPaths: [] }, { fieldPaths: ["basics.email"], extra: true }]) {
+      const response = await app.inject({ method: "DELETE", url: "/api/profile/facts", payload });
+      expect(response.statusCode).toBe(400);
+      expect(response.json()).toEqual({ error: "Invalid request" });
+    }
+  });
+
   it("rejects malformed profile fact upserts", async () => {
     const app = await buildTestApp();
     const response = await app.inject({

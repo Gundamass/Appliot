@@ -8,6 +8,8 @@ import {
   JsonValueSchema,
   LatestProfileDocumentResponseSchema,
   ProfileCompletenessSchema,
+  ProfileFactRemovalInputSchema,
+  ProfileFactRemovalResultSchema,
   ProfileFactSchema,
   ProfileFactUpsertInputSchema
 } from "@resume/contracts";
@@ -87,6 +89,14 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
     return reply.code(200).send(ProfileFactSchema.parse(
       dependencies.profileRepository.upsertUserFact(body.data)
     ));
+  });
+
+  app.delete("/api/profile/facts", async (request, reply) => {
+    const body = ProfileFactRemovalInputSchema.safeParse(request.body);
+    if (!body.success) return sendError(reply, 400, "Invalid request");
+    return reply.code(200).send(ProfileFactRemovalResultSchema.parse({
+      removed: dependencies.profileRepository.removeProfileFacts(body.data.fieldPaths)
+    }));
   });
 
   app.get("/api/profile/completeness", async (_request, reply) => {

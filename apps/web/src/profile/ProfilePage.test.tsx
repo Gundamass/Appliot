@@ -42,6 +42,7 @@ function fakeProfileApi(initialFacts: ProfileFact[] = []) {
     upload: vi.fn(async () => ({ documentId: "document-1" })),
     listFacts: vi.fn(async () => facts),
     upsert: vi.fn(async (fieldPath, value) => makeFact({ fieldPath, value: value as JsonValue, status: "user_corrected" })),
+    remove: vi.fn(async () => undefined),
     getCompleteness: vi.fn(async () => ({ completed: 0, total: 1, sections: [] })),
     getLatestDocument: vi.fn(async () => undefined),
     confirm: vi.fn(async (factId) => {
@@ -78,9 +79,43 @@ describe("global profile summary", () => {
 
     expect(await screen.findAllByText("何庆-简历.pdf")).toHaveLength(2);
     expect(screen.getAllByRole("button", { name: "简历解析" })).toHaveLength(1);
+    await user.click(screen.getByRole("button", { name: "收起简历解析" }));
+    expect(screen.queryByRole("heading", { name: "简历解析" })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "简历解析" }));
     expect(screen.getByRole("heading", { name: "简历解析" })).toBeVisible();
     expect(api.getLatestDocument).toHaveBeenCalledTimes(1);
+  });
+
+  it("saves candidate drafts only from the global save action", async () => {
+    const user = userEvent.setup();
+    const api = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "何庆" })]);
+    render(<ProfilePage api={api} />);
+
+    const name = await screen.findByLabelText("姓名");
+    await waitFor(() => expect(name).toHaveValue("何庆"));
+    await user.clear(name);
+    await user.type(name, "何清");
+
+    expect(api.upsert).not.toHaveBeenCalled();
+    expect(screen.getByText("有未保存的更改")).toBeVisible();
+    await user.click(screen.getByRole("button", { name: "保存档案" }));
+    expect(api.upsert).toHaveBeenCalledWith("basics.name", "何清");
+  });
+
+  it("shows when saved profile data cannot be refreshed", async () => {
+    const user = userEvent.setup();
+    const api = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "何庆" })]);
+    vi.mocked(api.listFacts)
+      .mockResolvedValueOnce([makeFact({ fieldPath: "basics.name", value: "何庆" })])
+      .mockRejectedValueOnce(new Error("refresh unavailable"));
+    render(<ProfilePage api={api} />);
+
+    const name = await screen.findByLabelText("姓名");
+    await user.clear(name);
+    await user.type(name, "何清");
+    await user.click(screen.getByRole("button", { name: "保存档案" }));
+
+    expect(await screen.findByText("档案已保存，但资料刷新失败")).toBeVisible();
   });
 });
 
@@ -199,6 +234,30 @@ describe("self-evaluation review view", () => {
 });
 
 describe("ProfilePage loading states", () => {
+  it("ignores stale completeness after the profile API changes", async () => {
+    const oldCompleteness = deferred<Awaited<ReturnType<ProfileApi["getCompleteness"]>>>();
+    const firstApi = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "旧候选人" })]);
+    const secondApi = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "新候选人" })]);
+    vi.mocked(firstApi.getCompleteness).mockReturnValueOnce(oldCompleteness.promise);
+    vi.mocked(secondApi.getCompleteness).mockResolvedValueOnce({
+      completed: 1,
+      total: 2,
+      sections: [{ id: "basics", label: "基本信息", completed: 1, total: 2, missing: ["basics.email"] }]
+    });
+    const { rerender } = render(<ProfilePage api={firstApi} embedded />);
+
+    rerender(<ProfilePage api={secondApi} embedded />);
+    expect((await screen.findAllByText("50%")).length).toBeGreaterThan(0);
+    await act(async () => oldCompleteness.resolve({
+      completed: 2,
+      total: 2,
+      sections: [{ id: "basics", label: "基本信息", completed: 2, total: 2, missing: [] }]
+    }));
+
+    expect(screen.getAllByText("50%").length).toBeGreaterThan(0);
+    expect(screen.queryAllByText("100%")).toHaveLength(0);
+  });
+
   it("keeps the global parser ahead of the long-form profile when completeness is unavailable", async () => {
     const api = fakeProfileApi([makeFact({ fieldPath: "basics.name", value: "何庆" })]);
     vi.mocked(api.getCompleteness).mockRejectedValueOnce(new Error("completeness unavailable"));
@@ -206,7 +265,8 @@ describe("ProfilePage loading states", () => {
 
     const profileTitle = await screen.findByRole("heading", { name: "完整候选人档案" });
     expect(screen.getByText("档案完整度暂不可用")).toBeVisible();
-    expect(screen.getAllByText("待评估").length).toBeGreaterThan(0);
+    expect(screen.queryByText("待评估")).not.toBeInTheDocument();
+    expect(screen.getAllByText("未统计").length).toBeGreaterThan(0);
     const parserTitle = screen.getByRole("heading", { name: "简历解析" });
     expect(parserTitle.compareDocumentPosition(profileTitle) & Node.DOCUMENT_POSITION_FOLLOWING).toBeTruthy();
   });
@@ -285,6 +345,32 @@ describe("ProfilePage loading states", () => {
     expect(screen.getByText("new-api@example.com")).toBeVisible();
     expect(screen.queryByText(/简历已导入/)).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "上传并提取" })).toBeDisabled();
+  });
+
+  it("ignores an old latest-document response after the profile API changes", async () => {
+    const oldDocument = deferred<Awaited<ReturnType<ProfileApi["getLatestDocument"]>>>();
+    const oldApi = fakeProfileApi();
+    vi.mocked(oldApi.getLatestDocument).mockReturnValueOnce(oldDocument.promise);
+    const newApi = fakeProfileApi();
+    vi.mocked(newApi.getLatestDocument).mockResolvedValueOnce({
+      documentId: "new-document",
+      filename: "新简历.pdf",
+      importedAt: "2026-08-04T08:00:00.000Z",
+      extractedFactCount: 52
+    });
+    const { rerender } = render(<ProfilePage api={oldApi} />);
+
+    rerender(<ProfilePage api={newApi} />);
+    expect((await screen.findAllByText("新简历.pdf")).length).toBeGreaterThan(0);
+    oldDocument.resolve({
+      documentId: "old-document",
+      filename: "旧简历.pdf",
+      importedAt: "2026-08-04T07:00:00.000Z",
+      extractedFactCount: 40
+    });
+    await act(async () => { await oldDocument.promise; });
+
+    expect(screen.queryByText("旧简历.pdf")).not.toBeInTheDocument();
   });
 });
 
@@ -825,6 +911,12 @@ describe("PDF upload", () => {
     const api = fakeProfileApi();
     vi.mocked(api.upload).mockReturnValueOnce(upload.promise);
     vi.mocked(api.listFacts).mockResolvedValueOnce([]).mockResolvedValueOnce([importedFact]);
+    vi.mocked(api.getLatestDocument).mockResolvedValueOnce(undefined).mockResolvedValueOnce({
+      documentId: "document-1",
+      filename: "resume.pdf",
+      importedAt: "2026-08-04T08:00:00.000Z",
+      extractedFactCount: 1
+    });
     const user = userEvent.setup();
     render(<ProfilePage api={api} />);
     const file = new File(["%PDF-1.7"], "resume.pdf", { type: "application/pdf" });
@@ -840,6 +932,8 @@ describe("PDF upload", () => {
     await act(async () => upload.resolve({ documentId: "document-1" }));
     expect(await screen.findByText("简历已导入，资料已刷新")).toBeVisible();
     expect((await screen.findAllByText("Ada")).length).toBeGreaterThan(0);
+    expect((await screen.findAllByText("resume.pdf")).length).toBeGreaterThan(0);
+    expect(api.getLatestDocument).toHaveBeenCalledTimes(2);
     expect(api.listFacts).toHaveBeenCalledTimes(2);
   });
 

@@ -63,6 +63,25 @@ describe("ProfileRepository", () => {
     )).toHaveLength(1);
   });
 
+  it("supersedes active semantic equivalents while retaining extracted history", () => {
+    const repository = createTestProfileRepository();
+    repository.createExtracted(makeFact("Java backend intern", "work[0].title", "work-title"));
+
+    expect(repository.removeProfileFacts(["work[0].position"])).toBe(1);
+    expect(repository.listActive()).toEqual([]);
+    expect(repository.history("work-title")).toMatchObject([
+      { status: "extracted", revision: 1 },
+      { status: "superseded", revision: 2 }
+    ]);
+  });
+
+  it("treats removal of an absent field path as an idempotent no-op", () => {
+    const repository = createTestProfileRepository();
+
+    expect(repository.removeProfileFacts(["projects[99].name"])).toBe(0);
+    expect(repository.listActive()).toEqual([]);
+  });
+
   it("keeps revisions and resolves task answers before profile defaults", () => {
     const repository = createTestProfileRepository();
     repository.createExtracted(makeFact("Hangzhou"));

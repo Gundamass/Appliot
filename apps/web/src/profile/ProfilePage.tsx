@@ -8,8 +8,8 @@ import { FactEditor } from "./FactEditor.js";
 import { SelfEvaluationReview } from "../reviews/SelfEvaluationReview.js";
 import { RagWorkspace } from "../rag/RagWorkspace.js";
 import { ServiceStatus } from "../health/ServiceStatus.js";
-import { CandidateProfileCenter } from "./CandidateProfileCenter.js";
-import { ProfileSummaryBar } from "./ProfileSummaryBar.js";
+import { CandidateProfileCenter, type CandidateProfileCenterHandle } from "./CandidateProfileCenter.js";
+import { ProfileSummaryBar, type ProfileSaveState } from "./ProfileSummaryBar.js";
 import { ResumeParsePanel } from "./ResumeParsePanel.js";
 
 type ReviewStatus = Exclude<FactStatus, "superseded">;
@@ -86,6 +86,8 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
   const [focusRequest, setFocusRequest] = useState<{ factId: string; control: FocusControl }>();
   const contextGeneration = useRef(0);
   const readGeneration = useRef(0);
+  const completenessReadGeneration = useRef(0);
+  const latestDocumentReadGeneration = useRef(0);
   const operationSequence = useRef(0);
   const uploadOwner = useRef<number | null>(null);
   const acceptedUploadOwner = useRef<number | null>(null);
@@ -93,6 +95,8 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
   const mutationOwner = useRef<number | null>(null);
   const fileInputRef = useRef<HTMLInputElement>(null);
   const reviewTitleRef = useRef<HTMLHeadingElement>(null);
+  const profileCenterRef = useRef<CandidateProfileCenterHandle>(null);
+  const [profileSaveState, setProfileSaveState] = useState<ProfileSaveState>("saved");
   const [view, setView] = useState<"profile" | "self-evaluation" | "rag">("profile");
   const [taskId, setTaskId] = useState("task-1");
   const [jobDescription, setJobDescription] = useState("");
@@ -268,35 +272,54 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     }
   }, [isCurrentContext, settleAcceptedUploadSuccess]);
 
-  const loadFacts = useCallback(async () => {
-    if (acceptedUploadPhase.current === "refreshing") return;
-    await requestFacts(api, contextGeneration.current, true);
+  const loadFacts = useCallback(async (): Promise<ReadResult> => {
+    if (acceptedUploadPhase.current === "refreshing") return "stale";
+    return requestFacts(api, contextGeneration.current, true);
   }, [api, requestFacts]);
 
-  const loadCompleteness = useCallback(async () => {
+  const loadCompleteness = useCallback(async (
+    requestApi: ProfileApi = api,
+    context: number = contextGeneration.current
+  ): Promise<ReadResult> => {
+    const request = ++completenessReadGeneration.current;
     try {
-      setCompleteness(await api.getCompleteness());
+      const nextCompleteness = await requestApi.getCompleteness();
+      if (!isCurrentContext(context) || completenessReadGeneration.current !== request) return "stale";
+      setCompleteness(nextCompleteness);
+      return "success";
     } catch {
+      if (!isCurrentContext(context) || completenessReadGeneration.current !== request) return "stale";
       setCompleteness(undefined);
+      return "error";
     }
-  }, [api]);
+  }, [api, isCurrentContext]);
 
-  const loadLatestDocument = useCallback(async () => {
+  const loadLatestDocument = useCallback(async (
+    requestApi: ProfileApi = api,
+    context: number = contextGeneration.current
+  ) => {
+    const request = ++latestDocumentReadGeneration.current;
     try {
-      setLatestDocument(await api.getLatestDocument());
+      const document = await requestApi.getLatestDocument();
+      if (!isCurrentContext(context) || latestDocumentReadGeneration.current !== request) return;
+      setLatestDocument(document);
     } catch {
+      if (!isCurrentContext(context) || latestDocumentReadGeneration.current !== request) return;
       setLatestDocument(undefined);
     }
-  }, [api]);
+  }, [api, isCurrentContext]);
 
   useEffect(() => {
     const context = ++contextGeneration.current;
     readGeneration.current += 1;
+    completenessReadGeneration.current += 1;
+    latestDocumentReadGeneration.current += 1;
     uploadOwner.current = null;
     acceptedUploadOwner.current = null;
     acceptedUploadPhase.current = "none";
     mutationOwner.current = null;
     setFacts([]);
+    setCompleteness(undefined);
     setLatestDocument(undefined);
     setLoading(true);
     setLoadError(false);
@@ -310,11 +333,13 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     setFocusRequest(undefined);
     if (fileInputRef.current) fileInputRef.current.value = "";
     void requestFacts(api, context, true);
-    void loadCompleteness();
-    void loadLatestDocument();
+    void loadCompleteness(api, context);
+    void loadLatestDocument(api, context);
     return () => {
       if (contextGeneration.current === context) contextGeneration.current += 1;
       readGeneration.current += 1;
+      completenessReadGeneration.current += 1;
+      latestDocumentReadGeneration.current += 1;
       uploadOwner.current = null;
       acceptedUploadOwner.current = null;
       acceptedUploadPhase.current = "none";
@@ -450,6 +475,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
       if (fileInputRef.current) fileInputRef.current.value = "";
       acceptedUploadOwner.current = owner;
       uploadOwner.current = null;
+      void loadLatestDocument(api, context);
       void refreshAcceptedUpload(owner, context, api);
     } catch {
       if (!isCurrentContext(context) || uploadOwner.current !== owner) return;
@@ -604,13 +630,10 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
           completeness={completeness}
           missingCount={missingCount}
           latestDocument={latestDocument}
-          saveState="saved"
-          onSave={() => undefined}
+          saveState={profileSaveState}
+          onSave={() => { void profileCenterRef.current?.save(); }}
           onOpenParser={() => setParseOpen(true)}
-          onFillMissing={() => {
-            const firstMissing = completeness?.sections.find((section) => section.missing.length > 0);
-            document.getElementById(`profile-section-${firstMissing?.id ?? "basics"}`)?.scrollIntoView({ behavior: "smooth", block: "start" });
-          }}
+          onFillMissing={() => profileCenterRef.current?.focusFirstMissing()}
         />
         <div className="resume-parse-region">
           <div className="resume-parse-service-bar">
@@ -621,7 +644,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
               aria-label="刷新资料"
               title="刷新资料"
               disabled={loading || controlsLocked}
-              onClick={() => { void loadFacts(); void refreshAdapterStatuses(); void loadLatestDocument(); }}
+              onClick={() => { void loadFacts(); void loadCompleteness(api, contextGeneration.current); void refreshAdapterStatuses(); void loadLatestDocument(api, contextGeneration.current); }}
             >
               <RefreshCw aria-hidden="true" size={18} />
             </button>
@@ -643,13 +666,19 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
           />
         </div>
         <CandidateProfileCenter
+          ref={profileCenterRef}
           api={api}
           facts={facts}
           completeness={completeness}
-          onFactsChanged={async () => {
-            await loadFacts();
-            await loadCompleteness();
-          }}
+            onSaveStateChange={setProfileSaveState}
+            onFactsChanged={async () => {
+              const context = contextGeneration.current;
+              const [factsResult, completenessResult] = await Promise.all([
+                requestFacts(api, context, false),
+                loadCompleteness(api, context)
+              ]);
+              if (factsResult === "error" || completenessResult === "error") throw new Error("profile refresh failed");
+            }}
         />
 
         <section className="review-band" aria-labelledby="review-title">

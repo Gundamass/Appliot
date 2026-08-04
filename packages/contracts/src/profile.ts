@@ -88,6 +88,14 @@ export const ProfileFactUpsertInputSchema = z.object({
   value: JsonValueSchema
 }).strict();
 
+export const ProfileFactRemovalInputSchema = z.object({
+  fieldPaths: z.array(z.string().min(1).max(256)).min(1)
+}).strict();
+
+export const ProfileFactRemovalResultSchema = z.object({
+  removed: z.number().int().nonnegative()
+}).strict();
+
 export const ProfileCompletenessSectionSchema = z.object({
   id: z.string().min(1),
   label: z.string().min(1),
@@ -104,6 +112,8 @@ export const ProfileCompletenessSchema = z.object({
 
 export type ProfileFact = z.infer<typeof ProfileFactSchema>;
 export type ProfileFactUpsertInput = z.infer<typeof ProfileFactUpsertInputSchema>;
+export type ProfileFactRemovalInput = z.infer<typeof ProfileFactRemovalInputSchema>;
+export type ProfileFactRemovalResult = z.infer<typeof ProfileFactRemovalResultSchema>;
 export type ProfileCompletenessSection = z.infer<typeof ProfileCompletenessSectionSchema>;
 export type ProfileCompleteness = z.infer<typeof ProfileCompletenessSchema>;
 export type Evidence = z.infer<typeof EvidenceSchema>;

@@ -16,7 +16,9 @@ import {
   type SelfEvaluationReview,
   type ProfileFact,
   type ProfileCompleteness,
-  type ProfileDocumentSummary
+  type ProfileDocumentSummary,
+  ProfileFactRemovalInputSchema,
+  ProfileFactRemovalResultSchema
 } from "@resume/contracts";
 import { z } from "zod";
 
@@ -26,6 +28,7 @@ export interface ProfileApi {
   upload(file: File): Promise<{ documentId: string }>;
   listFacts(): Promise<ProfileFact[]>;
   upsert(fieldPath: string, value: unknown): Promise<ProfileFact>;
+  remove(fieldPaths: string[]): Promise<void>;
   getCompleteness(): Promise<ProfileCompleteness>;
   getLatestDocument(): Promise<ProfileDocumentSummary | undefined>;
   confirm(factId: string): Promise<ProfileFact>;
@@ -56,6 +59,16 @@ export function createProfileApi(baseUrl = ""): ProfileApi {
         body: JSON.stringify(payload)
       });
       return ProfileFactSchema.parse(await readResponse(response));
+    },
+
+    async remove(fieldPaths) {
+      const payload = ProfileFactRemovalInputSchema.parse({ fieldPaths });
+      const response = await fetch(`${baseUrl}/api/profile/facts`, {
+        method: "DELETE",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify(payload)
+      });
+      ProfileFactRemovalResultSchema.parse(await readResponse(response));
     },
 
     async getCompleteness() {

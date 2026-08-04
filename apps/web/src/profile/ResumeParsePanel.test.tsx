@@ -54,6 +54,19 @@ describe("ResumeParsePanel", () => {
     expect(onRetry).toHaveBeenCalledTimes(1);
   });
 
+  it("locks file controls while uploading and while imported facts refresh", () => {
+    const file = new File(["%PDF"], "resume.pdf", { type: "application/pdf" });
+    const { rerender } = render(<ResumeParsePanel open selectedFile={file} uploadState="uploading" onSelectFile={vi.fn()} onUpload={vi.fn()} onRetry={vi.fn()} onClose={vi.fn()} />);
+
+    expect(screen.getByLabelText("选择 PDF 简历")).toBeDisabled();
+    expect(screen.getByRole("button", { name: "上传并提取" })).toHaveTextContent("正在上传");
+    expect(screen.getByRole("progressbar", { name: "正在上传 resume.pdf" })).toBeVisible();
+
+    rerender(<ResumeParsePanel open uploadState="accepted_refreshing" uploadMessage="简历已导入，正在刷新资料" onSelectFile={vi.fn()} onUpload={vi.fn()} onRetry={vi.fn()} onClose={vi.fn()} />);
+    expect(screen.getByLabelText("选择 PDF 简历")).toBeDisabled();
+    expect(screen.getByText("简历已导入，正在刷新资料")).toBeVisible();
+  });
+
   it("renders nothing while closed", () => {
     const { container } = render(<ResumeParsePanel open={false} uploadState="idle" onSelectFile={vi.fn()} onUpload={vi.fn()} onRetry={vi.fn()} onClose={vi.fn()} />);
     expect(container).toBeEmptyDOMElement();

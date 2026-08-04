@@ -1,9 +1,33 @@
 import { describe, expect, it } from "vitest";
-import { ProfileCompletenessSchema, ProfileFactUpsertInputSchema, ProfileFactSchema } from "./profile.js";
+import {
+  ProfileCompletenessSchema,
+  ProfileFactRemovalInputSchema,
+  ProfileFactRemovalResultSchema,
+  ProfileFactUpsertInputSchema,
+  ProfileFactSchema
+} from "./profile.js";
 
 describe("ProfileFactUpsertInputSchema", () => {
   it("rejects an empty field path", () => {
     expect(ProfileFactUpsertInputSchema.safeParse({ fieldPath: "", value: "深圳" }).success).toBe(false);
+  });
+});
+
+describe("ProfileFactRemoval schemas", () => {
+  it("accepts a non-empty strict batch of field paths", () => {
+    expect(ProfileFactRemovalInputSchema.parse({ fieldPaths: ["work[0].position"] }))
+      .toEqual({ fieldPaths: ["work[0].position"] });
+    expect(ProfileFactRemovalResultSchema.parse({ removed: 2 })).toEqual({ removed: 2 });
+  });
+
+  it("rejects empty paths, empty batches, and unexpected keys", () => {
+    for (const input of [
+      { fieldPaths: [] },
+      { fieldPaths: [""] },
+      { fieldPaths: ["basics.email"], extra: true }
+    ]) {
+      expect(ProfileFactRemovalInputSchema.safeParse(input).success).toBe(false);
+    }
   });
 });
 
