@@ -4,6 +4,7 @@ import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApplicationApi, ApplicationRecoveryCommand } from "./api.js";
 import { ContentReviewPage } from "./ContentReviewPage.js";
 import { CompactActivityFeed } from "./CompactActivityFeed.js";
+import { FieldCoveragePanel } from "./FieldCoveragePanel.js";
 import { deriveAttentionItems, deriveDisplayPhase } from "./application-workbench.js";
 import { LiveBrowserStatus } from "./LiveBrowserStatus.js";
 import { QuestionPanel, type QuestionSubmission } from "./QuestionPanel.js";
@@ -236,6 +237,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
               busy={busyCommand !== undefined || busyRecovery !== undefined}
               onRecovery={(command) => void runRecovery(command)}
             />
+            {currentTask.fieldCoverage && <FieldCoveragePanel coverage={currentTask.fieldCoverage} />}
             <div className="task-workbench-grid">
               <TaskAttentionList items={attentionItems} selectedId={selectedAttentionId} onSelect={setSelectedAttentionId} />
               <section className="task-attention-detail" aria-label="处理详情">

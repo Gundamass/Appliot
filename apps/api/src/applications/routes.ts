@@ -33,6 +33,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
   const taskResponse = (task: StoredApplicationTask): ApplicationTask => {
     const state = toApiState(dependencies.applicationService.state(task.id).value);
     const contentReview = dependencies.applicationService.contentReview(task.id);
+    const fieldCoverage = dependencies.applicationService.fieldCoverage(task.id);
     const commands = dependencies.applicationService.requiresRecovery(task.id)
       ? ["cancel", "resume"] as ApplicationTask["commands"]
       : commandsForState(state);
@@ -59,6 +60,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
         fieldPath: answer.fieldPath,
         value: answer.value
       })),
+      ...(fieldCoverage === undefined ? {} : { fieldCoverage }),
       ...(contentReview === undefined ? {} : {
         contentReview: {
           id: contentReview.id,

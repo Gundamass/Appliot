@@ -883,6 +883,38 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
 .application-shell .progress-result { color: #36705d; margin-left: 60px; }
 .application-shell .progress-result.stalled { border-left-color: var(--workbench-warning); }
 
+.application-shell .field-coverage { background: var(--workbench-surface); border: 1px solid var(--workbench-line); border-radius: 8px; margin-top: 16px; overflow: hidden; }
+.application-shell .field-coverage-header { align-items: center; display: flex; gap: 20px; justify-content: space-between; padding: 15px 18px; }
+.application-shell .field-coverage-heading { align-items: center; display: flex; gap: 11px; min-width: 0; }
+.application-shell .field-coverage-icon { align-items: center; background: var(--workbench-accent-soft); border-radius: 6px; color: var(--workbench-accent); display: flex; flex: 0 0 auto; height: 34px; justify-content: center; width: 34px; }
+.application-shell .field-coverage-heading h2 { color: var(--workbench-ink); font-size: 15px; margin: 0; }
+.application-shell .field-coverage-heading p { color: var(--workbench-muted); font-size: 11px; line-height: 1.4; margin: 2px 0 0; }
+.application-shell .coverage-summary { align-items: center; display: flex; flex-wrap: wrap; gap: 7px; justify-content: flex-end; }
+.application-shell .coverage-summary span { align-items: center; background: #f2f5f4; border: 1px solid #e0e7e4; border-radius: 6px; color: #53615d; display: inline-flex; font-size: 11px; font-weight: 700; gap: 5px; min-height: 27px; padding: 4px 8px; white-space: nowrap; }
+.application-shell .coverage-summary .filled { background: #eaf5f0; border-color: #cae3d8; color: #23664f; }
+.application-shell .coverage-summary .review { background: var(--workbench-warning-soft); border-color: #efd1ad; color: #8c5825; }
+.application-shell .coverage-summary .missing { background: #fff0ee; border-color: #efd0cb; color: #9a4b42; }
+.application-shell .field-coverage-toggle { align-items: center; background: #fafcfb; border: 0; border-top: 1px solid var(--workbench-line); color: #3f514c; display: grid; font-size: 12px; font-weight: 700; gap: 8px; grid-template-columns: 18px minmax(0, 1fr) auto 18px; min-height: 42px; padding: 0 18px; text-align: left; width: 100%; }
+.application-shell .field-coverage-toggle:hover { background: #f3f8f6; }
+.application-shell .field-coverage-toggle > span { color: var(--workbench-muted); font-size: 11px; font-weight: 600; }
+.application-shell .field-coverage-toggle[aria-expanded="true"] > svg:last-child { transform: rotate(180deg); }
+.application-shell .field-coverage-list { border-top: 1px solid var(--workbench-line); list-style: none; margin: 0; padding: 0 18px; }
+.application-shell .field-coverage-item { border-left: 3px solid #aeb9b5; padding: 16px 0 16px 14px; }
+.application-shell .field-coverage-item + .field-coverage-item { border-top: 1px solid #e7ecea; }
+.application-shell .field-coverage-item.review { border-left-color: var(--workbench-warning); }
+.application-shell .field-coverage-item.missing { border-left-color: #bd6258; }
+.application-shell .field-coverage-item > header { align-items: center; display: flex; gap: 12px; justify-content: space-between; }
+.application-shell .field-coverage-item > header > div { align-items: center; display: flex; flex-wrap: wrap; gap: 8px; min-width: 0; }
+.application-shell .field-coverage-item > header strong { font-size: 14px; overflow-wrap: anywhere; }
+.application-shell .field-coverage-item > header span { color: var(--workbench-muted); font-size: 11px; }
+.application-shell .field-coverage-item > header small { color: var(--workbench-muted); font-size: 11px; font-variant-numeric: tabular-nums; }
+.application-shell .field-coverage-details { display: grid; gap: 7px; margin: 12px 0; }
+.application-shell .field-coverage-details > div { display: grid; gap: 10px; grid-template-columns: 72px minmax(0, 1fr); }
+.application-shell .field-coverage-details dt { color: var(--workbench-muted); font-size: 11px; font-weight: 700; }
+.application-shell .field-coverage-details dd { font-size: 12px; line-height: 1.5; margin: 0; overflow-wrap: anywhere; }
+.application-shell .field-coverage-item .application-evidence { border-top: 1px dashed #dce5e1; padding-top: 11px; }
+.application-shell .field-coverage-complete { align-items: center; border-top: 1px solid var(--workbench-line); color: #36705d; display: flex; font-size: 12px; gap: 7px; margin: 0; padding: 12px 18px; }
+
 .application-shell .task-workbench-grid { display: grid; gap: 16px; grid-template-columns: minmax(240px, 0.78fr) minmax(0, 2fr); margin-top: 16px; }
 
 .application-shell .task-attention-list,
@@ -977,6 +1009,10 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
   .application-shell .progress-primary .task-state-mark { height: 42px; width: 42px; }
   .application-shell .progress-metrics { gap: 12px; grid-column: 2; }
   .application-shell .progress-result { margin-left: 0; }
+  .application-shell .field-coverage-header { align-items: flex-start; flex-direction: column; gap: 12px; padding: 14px; }
+  .application-shell .coverage-summary { justify-content: flex-start; }
+  .application-shell .field-coverage-toggle { padding-left: 14px; padding-right: 14px; }
+  .application-shell .field-coverage-list { padding: 0 14px; }
   .application-shell .task-attention-detail { padding: 16px; }
   .application-shell .detail-empty { min-height: 160px; }
   .application-shell .compact-activity-feed li { align-items: flex-start; flex-direction: column; gap: 2px; }
@@ -990,5 +1026,8 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
   .application-shell .task-stage-stepper li { gap: 6px; grid-template-columns: 26px minmax(0, 1fr); }
   .application-shell .task-stage-stepper li > span { height: 26px; width: 26px; }
   .application-shell .task-attention-list li > button { padding-left: 12px; padding-right: 12px; }
+  .application-shell .coverage-summary { align-items: stretch; display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); width: 100%; }
+  .application-shell .coverage-summary span { justify-content: center; min-width: 0; white-space: normal; }
+  .application-shell .field-coverage-details > div { gap: 3px; grid-template-columns: minmax(0, 1fr); }
   .application-shell .task-actions .button { flex: 1 1 100%; justify-content: center; }
 }

@@ -68,6 +68,31 @@ describe("ApplicationTaskPage", () => {
     expect(screen.queryByRole("button", { name: submissionActionName })).not.toBeInTheDocument();
   });
 
+  it("shows field coverage inside the task workspace", async () => {
+    const events = eventHarness();
+    const coveredTask: ApplicationTask = {
+      ...task,
+      fieldCoverage: {
+        total: 2,
+        ready: 0,
+        review: 1,
+        missing: 0,
+        unsupported: 0,
+        filled: 1,
+        fields: [
+          { fieldId: "name", label: "姓名", semantic: "basics.name", status: "filled", source: "exact", confidence: 1, reason: "页面回读确认填写成功", evidence: [] },
+          { fieldId: "degree", label: "最高学历", semantic: "education[0].degree", status: "review", source: "semantic", confidence: 0.8, reason: "需要确认", evidence: [] }
+        ]
+      }
+    };
+    render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(coveredTask), command: vi.fn() }} connectEvents={events.connect} />);
+
+    expect(await screen.findByRole("heading", { name: "字段匹配" })).toBeVisible();
+    expect(screen.getByText("已填写 1")).toBeVisible();
+    expect(screen.getByText("待审核 1")).toBeVisible();
+    expect(screen.queryByRole("button", { name: submissionActionName })).not.toBeInTheDocument();
+  });
+
   it("shows manual login and advances from task events without exposing submission", async () => {
     const events = eventHarness();
     const get = vi.fn().mockResolvedValue(task);

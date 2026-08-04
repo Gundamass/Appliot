@@ -775,6 +775,40 @@ describe("application task routes", () => {
     expect(rejected.json().contentReview).toBeUndefined();
   });
 
+  it("returns persisted field coverage for one task", async () => {
+    const { app, applicationService } = await buildApp();
+    const created = await app.inject({
+      method: "POST", url: "/api/applications", payload: { applicationUrl: "https://jobs.example.test/apply" }
+    });
+    const taskId = created.json().id as string;
+    vi.spyOn(applicationService, "fieldCoverage").mockReturnValue({
+      total: 1,
+      ready: 0,
+      review: 0,
+      missing: 1,
+      unsupported: 0,
+      filled: 0,
+      fields: [{
+        fieldId: "unknown-field",
+        label: "未命名字段",
+        status: "missing",
+        source: "none",
+        confidence: 0,
+        reason: "档案中没有可安全使用的已确认资料",
+        evidence: []
+      }]
+    });
+
+    const loaded = await app.inject({ method: "GET", url: `/api/applications/${taskId}` });
+
+    expect(loaded.statusCode).toBe(200);
+    expect(loaded.json().fieldCoverage).toMatchObject({
+      total: 1,
+      missing: 1,
+      fields: [expect.objectContaining({ fieldId: "unknown-field", status: "missing" })]
+    });
+  });
+
   it("gets one task and returns stable errors for malformed and missing task ids", async () => {
     const { app, applicationService } = await buildApp();
     const created = await app.inject({
