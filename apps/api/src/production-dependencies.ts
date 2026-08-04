@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ActionPolicy } from "@resume/action-policy";
-import type { FormField } from "@resume/contracts";
+import type { ApplicationFieldAssessment, FormField } from "@resume/contracts";
 import {
   DeepSeekStructuredModelProvider,
   EMBEDDING_INSTRUCTION_VERSION,
@@ -222,13 +222,20 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
       phase
     );
     if (semanticDecision.status === "unresolved") {
+      const assessment = fieldAssessment(field, {
+        status: phase === "deterministic" ? "unsupported" : "missing",
+        source: "none",
+        confidence: 0,
+        reason: phase === "deterministic" ? "尚未找到确定性字段映射" : "未找到可安全使用的字段映射"
+      });
       if (phase === "deterministic" && semanticDecision.reason === "exact_match_not_found") {
-        return { status: "deferred" as const };
+        return { status: "deferred" as const, assessment };
       }
       return {
         status: "needs_question" as const,
         fieldPath: field.semanticHint ?? field.id,
-        question: `请补充“${field.label}”，系统未找到可安全使用的字段映射。`
+        question: `请补充“${field.label}”，系统未找到可安全使用的字段映射。`,
+        assessment
       };
     }
     if (semanticDecision.status === "review") {
@@ -236,7 +243,14 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
       return {
         status: "needs_question" as const,
         fieldPath: candidate?.semantic ?? field.semanticHint ?? field.id,
-        question: semanticReviewQuestion(field.label, semanticDecision.reason)
+        question: semanticReviewQuestion(field.label, semanticDecision.reason),
+        assessment: fieldAssessment(field, {
+          ...(candidate === undefined ? {} : { semantic: candidate.semantic }),
+          status: "review",
+          source: "semantic",
+          confidence: candidate?.similarity ?? 0,
+          reason: semanticReviewQuestion(field.label, semanticDecision.reason)
+        })
       };
     }
 
@@ -253,6 +267,13 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
     });
     const requiresContentReview = decision.status === "needs_review"
       || (semantic === "selfEvaluation" && existing?.scope !== "application");
+    const assessmentStatus = requiresContentReview
+      ? "review" as const
+      : decision.status === "verified_auto"
+        ? "ready" as const
+        : decision.status === "blocked"
+          ? "unsupported" as const
+          : "missing" as const;
     return {
       status: decision.status === "verified_auto" || decision.status === "needs_review"
         ? "verified" as const
@@ -261,6 +282,14 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
       ...(decision.question === undefined ? {} : { question: decision.question }),
       fieldPath: semantic,
       requiresContentReview,
+      assessment: fieldAssessment(field, {
+        semantic,
+        status: assessmentStatus,
+        source: semanticDecision.source === "embedding" ? "semantic" : "exact",
+        confidence: semanticDecision.confidence,
+        reason: assessmentReason(assessmentStatus),
+        evidence: decision.evidence
+      }),
       ...(!requiresContentReview ? {} : {
         contentReview: {
           original: typeof existing?.value === "string" ? existing.value : JSON.stringify(existing?.value ?? ""),
@@ -274,6 +303,27 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
       })
     };
   };
+}
+
+function fieldAssessment(
+  field: FormField,
+  input: Omit<ApplicationFieldAssessment, "fieldId" | "label" | "evidence"> & {
+    evidence?: ApplicationFieldAssessment["evidence"];
+  }
+): ApplicationFieldAssessment {
+  return {
+    fieldId: field.id,
+    label: field.label,
+    ...input,
+    evidence: input.evidence ?? []
+  };
+}
+
+function assessmentReason(status: ApplicationFieldAssessment["status"]): string {
+  if (status === "ready") return "字段映射和资料值均已通过验证";
+  if (status === "review") return "该字段需要用户审核后才能填写";
+  if (status === "missing") return "档案中没有可安全使用的已确认资料";
+  return "当前字段不支持安全自动填写";
 }
 
 function semanticContextForField(field: FormField): FieldSemanticContext {

@@ -99,7 +99,10 @@ describe("production dependency composition", () => {
     });
 
     await expect(resolveField("task-1", applicationField("未知字段"), "deterministic"))
-      .resolves.toEqual({ status: "deferred" });
+      .resolves.toMatchObject({
+        status: "deferred",
+        assessment: { status: "unsupported", source: "none", confidence: 0 }
+      });
     expect(ragService.resolveField).not.toHaveBeenCalled();
   });
 
@@ -117,7 +120,7 @@ describe("production dependency composition", () => {
         fieldId: "field-1",
         status: "verified_auto" as const,
         value: "统招",
-        evidence: [],
+        evidence: [{ documentId: "resume", page: 1, text: "培养方式：统招", extraction: "pdf_text" as const }],
         confidence: 1,
         validators: []
       }))
@@ -136,7 +139,13 @@ describe("production dependency composition", () => {
     await expect(resolveField("task-1", field, "semantic")).resolves.toMatchObject({
       status: "verified",
       value: "统招",
-      fieldPath: "education[0].enrollmentType"
+      fieldPath: "education[0].enrollmentType",
+      assessment: {
+        semantic: "education[0].enrollmentType",
+        status: "ready",
+        source: "semantic",
+        confidence: 0.93
+      }
     });
     expect(ragService.resolveField).toHaveBeenCalledWith(expect.objectContaining({
       semantic: "education[0].enrollmentType",
@@ -169,7 +178,12 @@ describe("production dependency composition", () => {
       options: ["是", "否"]
     }), "semantic")).resolves.toMatchObject({
       status: "needs_question",
-      fieldPath: "preferences.willingToTravel"
+      fieldPath: "preferences.willingToTravel",
+      assessment: {
+        status: "review",
+        source: "semantic",
+        confidence: 0.96
+      }
     });
     expect(ragService.resolveField).not.toHaveBeenCalled();
   });

@@ -2032,4 +2032,57 @@ describe("application machine", () => {
     await new Promise((resolve) => setTimeout(resolve, 0));
   });
 
+  it("records a verified field as filled after successful readback", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ id: "review", text: "预览", class: "terminal_submit" }]
+    };
+    const filled: FormSnapshot = {
+      ...form,
+      id: "snapshot-filled",
+      fields: [{ ...form.fields[0]!, currentValue: "13800000000" }]
+    };
+    const checkpoints = createCheckpointRepository(database);
+    const service = createApplicationService({
+      checkpoints,
+      browser: {
+        observe: vi.fn(async () => form),
+        execute: vi.fn(async () => ({
+          type: "execution_result" as const,
+          taskId: "task-1",
+          snapshotId: filled.id,
+          commandType: "fill" as const,
+          status: "applied" as const,
+          actualValue: "13800000000",
+          snapshot: filled,
+          errors: []
+        }))
+      },
+      resolveField: async () => ({
+        status: "verified" as const,
+        value: "13800000000",
+        assessment: {
+          fieldId: "field-phone", label: "手机号码", semantic: "basics.phone",
+          status: "ready" as const, source: "exact" as const, confidence: 1,
+          reason: "精确匹配", evidence: []
+        }
+      }),
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(service.fieldCoverage("task-1")).toMatchObject({
+      total: 1,
+      filled: 1,
+      fields: [expect.objectContaining({ fieldId: "field-phone", status: "filled" })]
+    });
+    expect(checkpoints.latest("task-1")?.fieldCoverage?.filled).toBe(1);
+    database.close();
+  });
+
 });

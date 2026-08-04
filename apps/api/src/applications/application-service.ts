@@ -1,6 +1,8 @@
 import { randomUUID } from "node:crypto";
 import type {
   ApplicationContentReview,
+  ApplicationFieldAssessment,
+  ApplicationFieldCoverage,
   ApplicationQuestion,
   ApplicationDisplayPhase,
   ApplicationDisplayCategory,
@@ -33,6 +35,7 @@ import {
 } from "./application-progress.js";
 import { deriveEntrySemanticHints } from "./entry-field-semantics.js";
 import { annotateDjiFields } from "./dji-field-catalog.js";
+import { createFieldCoverageStore } from "./field-coverage.js";
 
 type ExecutionResult = Extract<WorkerResponse, { type: "execution_result" }>;
 
@@ -54,6 +57,7 @@ export interface ApplicationService {
   resumeWithProfile(taskId: string): Promise<void>;
   answerQuestions(taskId: string, answers: Record<string, unknown>): Promise<void>;
   contentReview(taskId: string): ContentReview | undefined;
+  fieldCoverage(taskId: string): ApplicationFieldCoverage | undefined;
   approveReview(taskId: string, reviewId: string, editedValue?: string): Promise<void>;
   rejectReview(taskId: string, reviewId: string): Promise<void>;
   cancel(taskId: string): void;
@@ -71,6 +75,7 @@ export type ContentReview = StoredContentReview;
 
 interface FieldResolution {
   status: "verified" | "deferred" | "needs_question" | "blocked";
+  assessment?: ApplicationFieldAssessment;
   value?: unknown;
   question?: string;
   fieldPath?: string;
@@ -134,6 +139,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
   const stableActivities = new Map<string, Promise<void>>();
   const runGenerations = new Map<string, number>();
   const executionEpochs = new Map<string, number>();
+  const fieldCoverageStore = createFieldCoverageStore();
   const progress = createApplicationProgressCoordinator({
     emit(taskId, event) {
       if (event.type !== "state_changed") dependencies.taskEvents?.emitProgress(taskId, event);
@@ -159,6 +165,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     }
     if (checkpoint.snapshot) latestSnapshots.set(taskId, checkpoint.snapshot);
     if (checkpoint.contentReview) contentReviews.set(taskId, checkpoint.contentReview);
+    if (checkpoint.fieldCoverage) fieldCoverageStore.restore(taskId, checkpoint.fieldCoverage);
     const storedProgress = dependencies.checkpoints.latestProgress(taskId);
     if (storedProgress) progress.restore(taskId, storedProgress);
     return actor;
@@ -166,8 +173,25 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
 
   const persist = (actor: ApplicationActor, snapshot: FormSnapshot): void => {
     const machineState = actor.getSnapshot();
+    const taskId = machineState.context.taskId;
+    fieldCoverageStore.retain(taskId, new Set(snapshot.fields.map((field) => field.id)));
+    for (const field of snapshot.fields) {
+      if (hasUserValue(field.currentValue) && !fieldCoverageStore.has(taskId, field.id)) {
+        fieldCoverageStore.record(taskId, {
+          fieldId: field.id,
+          label: field.label,
+          ...(field.semanticHint === undefined ? {} : { semantic: field.semanticHint }),
+          status: "filled",
+          source: "user",
+          confidence: 1,
+          reason: "页面已存在用户填写值",
+          evidence: []
+        });
+      }
+    }
+    const coverage = fieldCoverageStore.snapshot(taskId);
     dependencies.checkpoints.save({
-      taskId: machineState.context.taskId,
+      taskId,
       state: machineState.value as ApplicationStateValue,
       url: snapshot.url,
       stage: snapshot.stage,
@@ -175,6 +199,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       fieldIds: snapshot.fields.map((field) => field.id),
       questions: machineState.context.questions,
       snapshot,
+      ...(coverage === undefined ? {} : { fieldCoverage: coverage }),
       ...(contentReviews.get(machineState.context.taskId) === undefined
         ? {}
         : { contentReview: contentReviews.get(machineState.context.taskId)! })
@@ -266,6 +291,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
 
     contentReview(taskId: string) {
       return contentReviews.get(taskId);
+    },
+
+    fieldCoverage(taskId: string) {
+      requireActor(taskId);
+      return fieldCoverageStore.snapshot(taskId);
     },
 
     progress(taskId: string) {
@@ -451,6 +481,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     dispose(taskId: string): void {
       invalidateRun(taskId);
       progress.dispose(taskId);
+      fieldCoverageStore.dispose(taskId);
       actors.get(taskId)?.stop();
       actors.delete(taskId);
       latestSnapshots.delete(taskId);
@@ -538,6 +569,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         field,
         decision: await dependencies.resolveField(taskId, field, phase)
       })))).map(({ field, decision }) => {
+        if (decision.assessment) fieldCoverageStore.record(taskId, decision.assessment);
         const approvedReview = contentReviews.get(taskId);
         if (approvedReview?.status === "approved" && approvedReview.fieldId === field.id) {
           return {
@@ -639,6 +671,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
             persist(actor, current);
             return false;
           }
+          fieldCoverageStore.markFilled(taskId, field.id);
           persist(actor, current);
         }
         return true;
