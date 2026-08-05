@@ -108,7 +108,7 @@ describe("ProfileApplicationWorkspace", () => {
 
     render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} /></BrowserRouter>);
     await screen.findByText(activeTask.applicationUrl);
-    await userEvent.setup().click(screen.getByRole("button", { name: "删除任务" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
     expect(calls).toEqual(["cancel", "delete"]);
     expect(screen.queryByText(activeTask.applicationUrl)).not.toBeInTheDocument();
@@ -127,7 +127,7 @@ describe("ProfileApplicationWorkspace", () => {
 
     render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} /></BrowserRouter>);
     await screen.findByText(failedTask.applicationUrl);
-    await userEvent.setup().click(screen.getByRole("button", { name: "删除任务" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
     expect(calls).toEqual(["delete"]);
     expect(screen.queryByText(failedTask.applicationUrl)).not.toBeInTheDocument();
@@ -146,7 +146,7 @@ describe("ProfileApplicationWorkspace", () => {
 
     render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} /></BrowserRouter>);
     await screen.findByText(activeTask.applicationUrl);
-    await userEvent.setup().click(screen.getByRole("button", { name: "删除任务" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("取消失败");
     expect(screen.getByText(activeTask.applicationUrl)).toBeVisible();
@@ -165,7 +165,7 @@ describe("ProfileApplicationWorkspace", () => {
 
     render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} /></BrowserRouter>);
     await screen.findByText(failedTask.applicationUrl);
-    await userEvent.setup().click(screen.getByRole("button", { name: "删除任务" }));
+    await userEvent.setup().click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("删除失败");
     expect(screen.getByText(failedTask.applicationUrl)).toBeVisible();
