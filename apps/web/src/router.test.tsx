@@ -1,5 +1,5 @@
 import type { ApplicationTask } from "@resume/contracts";
-import { render, screen } from "@testing-library/react";
+import { render, screen, within } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "./router.js";
 
@@ -34,6 +34,13 @@ describe("AppRouter", () => {
     window.history.pushState({}, "", `/applications/${task.id}`);
     render(<AppRouter applicationApi={api} />);
     expect(await screen.findByRole("heading", { name: "请在受控浏览器中完成登录" })).toBeVisible();
+    const navigation = screen.getByRole("navigation", { name: "候选人工作台" });
+    expect(within(navigation).getAllByRole("button").map((button) => button.textContent?.trim())).toEqual([
+      "候选人档案",
+      "新建投递",
+      "投递审核"
+    ]);
+    expect(screen.queryByRole("navigation", { name: "主导航" })).not.toBeInTheDocument();
   });
 
   it("returns unknown routes to the profile workspace", async () => {

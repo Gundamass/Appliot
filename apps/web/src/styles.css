@@ -789,6 +789,8 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
   min-height: 100vh;
 }
 
+.embedded-application-shell { display: block; }
+
 .application-shell .application-rail {
   background: var(--workbench-rail);
   color: #f4fbf8;

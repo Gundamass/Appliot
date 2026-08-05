@@ -1,5 +1,5 @@
 import type { ApplicationCommand, ApplicationCommandType, ApplicationTask, ApplicationTaskProgressEvent, ApplicationTaskState } from "@resume/contracts";
-import { Activity, ArrowLeft, Check, ChevronRight, CircleAlert, ClipboardList, Database, ExternalLink, FileText, Hand, History, MonitorUp, RotateCw, ShieldCheck, X } from "lucide-react";
+import { ArrowLeft, Check, ChevronRight, CircleAlert, ExternalLink, Hand, History, MonitorUp, RotateCw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApplicationApi, ApplicationRecoveryCommand } from "./api.js";
 import { ContentReviewPage } from "./ContentReviewPage.js";
@@ -11,6 +11,7 @@ import { QuestionPanel, type QuestionSubmission } from "./QuestionPanel.js";
 import { TaskAttentionList } from "./TaskAttentionList.js";
 import { TaskStageStepper } from "./TaskStageStepper.js";
 import { useTaskEvents, type TaskEventConnection } from "./useTaskEvents.js";
+import { WorkspaceFrame, type WorkspaceView } from "../workspace/WorkspaceFrame.js";
 
 interface ApplicationTaskPageProps {
   taskId: string;
@@ -202,23 +203,18 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     });
   };
 
-  return <div className="app-shell application-shell">
-    <aside className="application-rail" aria-label="应用导航">
-      <div className="rail-brand"><FileText aria-hidden="true" size={21} /><strong>简历投递助手</strong></div>
-      <nav aria-label="主导航">
-        <button type="button" onClick={() => onNavigate?.("/")}><Database aria-hidden="true" size={17} />候选人档案</button>
-        <button className="active" type="button" aria-current="page"><ClipboardList aria-hidden="true" size={17} />投递任务</button>
-        <button type="button" onClick={() => onNavigate?.("/applications/new")}><Activity aria-hidden="true" size={17} />审核中心</button>
-      </nav>
-      <div className="rail-footer"><ShieldCheck aria-hidden="true" size={16} />仅本机运行</div>
-    </aside>
-    <div className="application-content">
-      <header className="app-header application-workbench-header">
-        <div><span>投递工作台</span><h1>实时任务控制</h1></div>
-        <div className="local-state"><ShieldCheck aria-hidden="true" size={16} />数据仅保存在本机</div>
+  const selectWorkspaceView = (view: WorkspaceView) => {
+    const destination = view === "profile" ? "/" : view === "apply" ? "/?view=apply" : "/?view=reviews";
+    onNavigate?.(destination);
+  };
+
+  return <WorkspaceFrame activeView="reviews" onSelectView={selectWorkspaceView}>
+    <section className="workspace-view application-shell embedded-application-shell" aria-labelledby="workspace-task-title">
+      <header className="workspace-view-header">
+        <div><span>投递工作台</span><h1 id="workspace-task-title">实时任务控制</h1></div>
       </header>
       <main className="application-main">
-        <button className="application-back" type="button" onClick={() => onNavigate?.("/applications/new")}><ArrowLeft aria-hidden="true" size={17} />新建任务</button>
+        <button className="application-back" type="button" onClick={() => onNavigate?.("/?view=reviews")}><ArrowLeft aria-hidden="true" size={17} />返回投递审核</button>
         {loading ? <div className="state-panel" role="status"><span className="spinner" />正在加载任务</div> : error && !currentTask ? (
           <div className="state-panel error-state" role="alert"><strong>{error}</strong><button className="button secondary" type="button" onClick={retryLoad}>重新加载</button></div>
         ) : currentTask ? <>
@@ -269,8 +265,8 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
           </section>
         </> : null}
       </main>
-    </div>
-  </div>;
+    </section>
+  </WorkspaceFrame>;
 }
 
 interface ProgressSummaryProps {

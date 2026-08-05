@@ -1,4 +1,4 @@
-import { ClipboardCheck, FilePlus2, FileUser, ShieldCheck } from "lucide-react";
+import { FilePlus2 } from "lucide-react";
 import type { ApplicationTask, ProfileCompleteness } from "@resume/contracts";
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
@@ -8,8 +8,7 @@ import type { ApplicationApi } from "../applications/api.js";
 import { ProfilePage } from "../profile/ProfilePage.js";
 import { ApplicationReviewInbox } from "../applications/ApplicationReviewInbox.js";
 import { ApplicationStartPanel } from "../applications/ApplicationStartPanel.js";
-
-type WorkspaceView = "profile" | "apply" | "reviews";
+import { WorkspaceFrame, type WorkspaceView } from "./WorkspaceFrame.js";
 
 interface ProfileApplicationWorkspaceProps {
   profileApi: ProfileApi;
@@ -18,16 +17,6 @@ interface ProfileApplicationWorkspaceProps {
   reviewApi?: SelfEvaluationReviewApi;
   ragApi?: RagApi;
 }
-
-const WORKSPACE_VIEWS: Array<{
-  id: WorkspaceView;
-  label: string;
-  icon: typeof FileUser;
-}> = [
-  { id: "profile", label: "候选人档案", icon: FileUser },
-  { id: "apply", label: "新建投递", icon: FilePlus2 },
-  { id: "reviews", label: "投递审核", icon: ClipboardCheck }
-];
 
 export function ProfileApplicationWorkspace({
   profileApi,
@@ -70,32 +59,7 @@ export function ProfileApplicationWorkspace({
   };
 
   return (
-    <div className="profile-workspace">
-      <aside className="workspace-sidebar">
-        <div className="workspace-brand">
-          <FileUser aria-hidden="true" size={22} />
-          <div><strong>简历投递助手</strong><span>候选人工作台</span></div>
-        </div>
-        <nav className="workspace-navigation" aria-label="候选人工作台">
-          {WORKSPACE_VIEWS.map((item) => {
-            const Icon = item.icon;
-            return (
-              <button
-                key={item.id}
-                type="button"
-                aria-current={view === item.id ? "page" : undefined}
-                onClick={() => selectView(item.id)}
-              >
-                <Icon aria-hidden="true" size={18} />
-                <span>{item.label}</span>
-              </button>
-            );
-          })}
-        </nav>
-        <div className="workspace-local-state"><ShieldCheck aria-hidden="true" size={16} />本地加密保存</div>
-      </aside>
-
-      <div className="workspace-content">
+    <WorkspaceFrame activeView={view} onSelectView={selectView}>
         {view === "profile" ? (
           <section className="workspace-view" aria-labelledby="workspace-profile-title">
             <header className="workspace-view-header">
@@ -134,7 +98,6 @@ export function ProfileApplicationWorkspace({
             /></div>
           </section>
         )}
-      </div>
-    </div>
+    </WorkspaceFrame>
   );
 }
