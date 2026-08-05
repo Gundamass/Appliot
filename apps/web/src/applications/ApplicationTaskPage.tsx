@@ -114,6 +114,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
   const host = useMemo(() => {
     try { return currentTask ? new URL(currentTask.applicationUrl).host : ""; } catch { return ""; }
   }, [currentTask]);
+  const taskTitle = currentTask?.name ?? (host || "投递任务");
   const attentionItems = useMemo(
     () => currentTask ? deriveAttentionItems(currentTask, activities) : [],
     [activities, currentTask]
@@ -219,7 +220,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
           <div className="state-panel error-state" role="alert"><strong>{error}</strong><button className="button secondary" type="button" onClick={retryLoad}>重新加载</button></div>
         ) : currentTask ? <>
           <section className="task-header-band">
-            <div className="task-heading"><span>投递任务</span><h2>{host || "招聘官网"}</h2><a href={currentTask.applicationUrl} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" size={14} />查看目标页面</a></div>
+            <div className="task-heading"><span>投递任务</span><h2>{taskTitle}</h2><a href={currentTask.applicationUrl} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" size={14} />查看目标页面</a></div>
             <LiveBrowserStatus connection={connection} taskState={currentTask.state} activities={activities} />
           </section>
           <h2 className="workbench-title">投递任务工作台</h2>

@@ -7,6 +7,7 @@ import { ApplicationStartPanel } from "./ApplicationStartPanel.js";
 
 const task: ApplicationTask = {
   id: "00000000-0000-4000-8000-000000000001",
+  name: "示例投递",
   applicationUrl: "https://career.example.com/jobs/1",
   state: "observing_page",
   commands: [],
@@ -48,9 +49,37 @@ describe("ApplicationStartPanel", () => {
     render(<ApplicationStartPanel profileCompleteness={complete} applicationApi={applicationApi} onTaskCreated={onTaskCreated} />);
 
     await user.type(screen.getByLabelText("投递官网链接"), task.applicationUrl);
+    await user.clear(screen.getByLabelText("任务名称"));
+    await user.type(screen.getByLabelText("任务名称"), task.name!);
     await user.click(screen.getByRole("button", { name: "开始识别并填写" }));
 
-    expect(applicationApi.create).toHaveBeenCalledWith({ applicationUrl: task.applicationUrl });
+    expect(applicationApi.create).toHaveBeenCalledWith({ name: task.name, applicationUrl: task.applicationUrl });
     expect(onTaskCreated).toHaveBeenCalledWith(task.id);
+  });
+
+  it("suggests a task name from the URL without overwriting a manual name", async () => {
+    const user = userEvent.setup();
+    render(<ApplicationStartPanel profileCompleteness={complete} applicationApi={api()} onTaskCreated={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("投递官网链接"), "https://apply.careers.dji.com/campus-recruitment/dji/143359");
+    expect(screen.getByLabelText("任务名称")).toHaveValue("大疆校招投递");
+
+    await user.clear(screen.getByLabelText("任务名称"));
+    await user.type(screen.getByLabelText("任务名称"), "大疆 Java 后端");
+    await user.clear(screen.getByLabelText("投递官网链接"));
+    await user.type(screen.getByLabelText("投递官网链接"), "https://jobs.example.com/apply/1");
+
+    expect(screen.getByLabelText("任务名称")).toHaveValue("大疆 Java 后端");
+  });
+
+  it("shows a Chinese validation error when the task name is blank", async () => {
+    const user = userEvent.setup();
+    render(<ApplicationStartPanel profileCompleteness={complete} applicationApi={api()} onTaskCreated={vi.fn()} />);
+
+    await user.type(screen.getByLabelText("投递官网链接"), task.applicationUrl);
+    await user.clear(screen.getByLabelText("任务名称"));
+    await user.click(screen.getByRole("button", { name: "开始识别并填写" }));
+
+    expect(screen.getByRole("alert")).toHaveTextContent("请输入 1–80 个字符的任务名称");
   });
 });

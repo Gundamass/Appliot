@@ -4,9 +4,10 @@ import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApplicationReviewInbox } from "./ApplicationReviewInbox.js";
 
-function task(id: string, state: ApplicationTask["state"], suffix: string): ApplicationTask {
+function task(id: string, state: ApplicationTask["state"], suffix: string, name?: string): ApplicationTask {
   return {
     id: `00000000-0000-4000-8000-${id.padStart(12, "0")}`,
+    name,
     applicationUrl: `https://career.example.com/jobs/${suffix}`,
     state,
     commands: [],
@@ -37,6 +38,15 @@ describe("ApplicationReviewInbox", () => {
     expect(screen.queryByRole("button", { name: /提交/ })).not.toBeInTheDocument();
   });
 
+  it("uses the persisted name as the card heading and falls back to the host for historical tasks", () => {
+    const namedTask = task("1", "needs_questions", "questions", "大疆 Java 后端实习");
+    const historicalTask = task("2", "review_locked", "review");
+    render(<ApplicationReviewInbox tasks={[namedTask, historicalTask]} onOpenTask={vi.fn()} onDeleteTask={vi.fn()} />);
+
+    expect(screen.getByRole("heading", { name: "大疆 Java 后端实习" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "career.example.com" })).toBeVisible();
+  });
+
   it("shows a delete action on every review task", () => {
     render(<ApplicationReviewInbox tasks={[task("1", "needs_questions", "questions")]} onOpenTask={vi.fn()} onDeleteTask={vi.fn()} />);
     expect(screen.getByRole("button", { name: "删除任务" })).toBeVisible();
@@ -63,5 +73,16 @@ describe("ApplicationReviewInbox", () => {
     await user.click(screen.getByRole("button", { name: "删除任务" }));
 
     expect(onDeleteTask).toHaveBeenCalledWith(candidate);
+  });
+
+  it("includes the displayed name in the delete confirmation", async () => {
+    const user = userEvent.setup();
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const candidate = task("1", "needs_questions", "questions", "大疆 Java 后端实习");
+    render(<ApplicationReviewInbox tasks={[candidate]} onOpenTask={vi.fn()} onDeleteTask={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: "删除任务" }));
+
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("大疆 Java 后端实习"));
   });
 });

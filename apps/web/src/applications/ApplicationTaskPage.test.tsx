@@ -95,6 +95,15 @@ describe("ApplicationTaskPage", () => {
     expect(screen.queryByRole("button", { name: submissionActionName })).not.toBeInTheDocument();
   });
 
+  it("uses the persisted task name in the task header and retains the target page link", async () => {
+    const events = eventHarness();
+    const namedTask = { ...task, name: "大疆 Java 后端实习" };
+    render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(namedTask), command: vi.fn() }} connectEvents={events.connect} />);
+
+    expect(await screen.findByRole("heading", { name: "大疆 Java 后端实习" })).toBeVisible();
+    expect(screen.getByRole("link", { name: "查看目标页面" })).toHaveAttribute("href", namedTask.applicationUrl);
+  });
+
   it("shows field coverage inside the task workspace", async () => {
     const events = eventHarness();
     const coveredTask: ApplicationTask = {

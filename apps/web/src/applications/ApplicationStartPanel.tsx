@@ -1,4 +1,4 @@
-import type { ProfileCompleteness } from "@resume/contracts";
+import { ApplicationTaskNameSchema, suggestApplicationTaskName, type ProfileCompleteness } from "@resume/contracts";
 import { FIELD_DEFINITIONS } from "@resume/form-semantics/field-registry";
 import { CheckCircle2, CircleAlert, ExternalLink, FileUser } from "lucide-react";
 import { useState, type FormEvent } from "react";
@@ -13,6 +13,8 @@ interface ApplicationStartPanelProps {
 
 export function ApplicationStartPanel({ profileCompleteness, applicationApi, onTaskCreated, onViewChange }: ApplicationStartPanelProps) {
   const [applicationUrl, setApplicationUrl] = useState("");
+  const [taskName, setTaskName] = useState("");
+  const [taskNameTouched, setTaskNameTouched] = useState(false);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [activeTaskId, setActiveTaskId] = useState<string>();
@@ -28,11 +30,16 @@ export function ApplicationStartPanel({ profileCompleteness, applicationApi, onT
       setError("请输入完整的 http 或 https 链接");
       return;
     }
+    const parsedName = ApplicationTaskNameSchema.safeParse(taskName);
+    if (!parsedName.success) {
+      setError("请输入 1–80 个字符的任务名称");
+      return;
+    }
     setBusy(true);
     setError(undefined);
     setActiveTaskId(undefined);
     try {
-      const task = await applicationApi.create({ applicationUrl: value });
+      const task = await applicationApi.create({ name: parsedName.data, applicationUrl: value });
       onTaskCreated(task.id);
     } catch (caught) {
       if (caught instanceof ApplicationApiError && caught.code === "browser_task_in_use" && caught.taskId) {
@@ -71,7 +78,18 @@ export function ApplicationStartPanel({ profileCompleteness, applicationApi, onT
         <form onSubmit={(event) => void createTask(event)}>
           <label>
             <span>投递官网链接</span>
-            <div className="application-url-field"><ExternalLink aria-hidden="true" size={18} /><input aria-label="投递官网链接" value={applicationUrl} onChange={(event) => setApplicationUrl(event.target.value)} placeholder="https://career.example.com/jobs/..." /></div>
+            <div className="application-url-field"><ExternalLink aria-hidden="true" size={18} /><input aria-label="投递官网链接" value={applicationUrl} onChange={(event) => {
+              const nextUrl = event.target.value;
+              setApplicationUrl(nextUrl);
+              if (!taskNameTouched && isHttpUrl(nextUrl)) setTaskName(suggestApplicationTaskName(nextUrl));
+            }} placeholder="https://career.example.com/jobs/..." /></div>
+          </label>
+          <label>
+            <span>任务名称</span>
+            <input className="application-name-field" aria-label="任务名称" value={taskName} onChange={(event) => {
+              setTaskNameTouched(true);
+              setTaskName(event.target.value);
+            }} placeholder="例如：大疆 Java 后端实习" />
           </label>
           <button className="button primary" type="submit" disabled={busy}>{busy ? "正在连接" : "开始识别并填写"}</button>
         </form>

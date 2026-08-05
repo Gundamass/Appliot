@@ -744,6 +744,8 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
 .application-url-field { align-items: center; background: #fbfdfc; border: 1px solid #b7c4bf; border-radius: 6px; display: flex; gap: 8px; min-height: 42px; padding: 0 11px; }
 .application-url-field svg { color: #197a63; flex: 0 0 auto; }
 .application-url-field input { background: transparent; border: 0; min-width: 0; outline: 0; padding: 9px 0; width: 100%; }
+.application-name-field { background: #fbfdfc; border: 1px solid #b7c4bf; border-radius: 6px; min-height: 42px; min-width: 0; outline: 0; padding: 0 11px; width: 100%; }
+.application-name-field:focus { border-color: #176b45; box-shadow: 0 0 0 3px rgba(23, 107, 69, 0.12); }
 .application-connect form .button { justify-content: center; min-height: 40px; }
 .application-safety-note { border-top: 1px solid #e3ebe7; color: #758180; font-size: 11px; line-height: 1.55; margin: 18px 0 0; padding-top: 15px; }
 .application-review-inbox { display: grid; gap: 16px; }

@@ -42,12 +42,13 @@ export function ApplicationReviewInbox({ tasks, onOpenTask, onDeleteTask, deleti
         {reviewTasks.map((task) => {
           const meta = STATE_META[task.state]!;
           const Icon = meta.icon;
+          const taskName = task.name ?? hostFor(task.applicationUrl);
           return (
             <article className="review-task" key={task.id}>
               <Icon aria-hidden="true" size={19} />
               <div>
                 <span>{meta.title}</span>
-                <h2>{hostFor(task.applicationUrl)}</h2>
+                <h2>{taskName}</h2>
                 <p>{task.applicationUrl}</p>
                 <small>{meta.description}</small>
               </div>
@@ -61,8 +62,8 @@ export function ApplicationReviewInbox({ tasks, onOpenTask, onDeleteTask, deleti
                   disabled={deletingTaskId === task.id}
                   onClick={() => {
                     const message = task.commands.includes("cancel")
-                      ? "该任务仍在受控浏览器中运行，删除前会先取消任务。确定删除吗？"
-                      : "确定删除这条投递任务记录吗？";
+                      ? `“${taskName}”仍在受控浏览器中运行，删除前会先取消任务。确定删除吗？`
+                      : `确定删除“${taskName}”这条投递任务记录吗？`;
                     if (window.confirm(message)) void onDeleteTask(task);
                   }}
                 >
