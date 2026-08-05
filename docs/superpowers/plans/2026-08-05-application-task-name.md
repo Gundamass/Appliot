@@ -255,4 +255,3 @@ Expected: all suites pass。
 rtk git add apps/web/src/applications/ApplicationStartPanel.tsx apps/web/src/applications/ApplicationStartPanel.test.tsx apps/web/src/applications/ApplicationReviewInbox.tsx apps/web/src/applications/ApplicationReviewInbox.test.tsx apps/web/src/applications/ApplicationTaskPage.tsx apps/web/src/applications/ApplicationTaskPage.test.tsx apps/web/src/styles.css
 rtk git commit -m "feat: name application tasks in the workspace"
 ```
-
