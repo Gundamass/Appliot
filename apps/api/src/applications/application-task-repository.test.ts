@@ -13,6 +13,7 @@ describe("application task repository", () => {
     const first = createApplicationTaskRepository(database);
     const task = first.create({
       id: "91dc4bd6-425a-4cab-a38d-d13e33cda771",
+      name: "示例投递",
       applicationUrl: "https://jobs.example.test/apply"
     });
 
@@ -28,6 +29,7 @@ describe("application task repository", () => {
     const repository = createApplicationTaskRepository(database);
     const input = {
       id: "91dc4bd6-425a-4cab-a38d-d13e33cda771",
+      name: "示例投递",
       applicationUrl: "https://jobs.example.test/apply"
     };
 
@@ -71,6 +73,7 @@ describe("application task repository", () => {
     const repository = createApplicationTaskRepository(database);
     const task = repository.create({
       id: "91dc4bd6-425a-4cab-a38d-d13e33cda771",
+      name: "示例投递",
       applicationUrl: "https://jobs.example.test/apply"
     });
     createTaskEventBus(database).emit(task.id, "observing_page");
@@ -113,6 +116,25 @@ describe("application task repository", () => {
       .toEqual({ count: 0 });
     expect(database.prepare("SELECT COUNT(*) AS count FROM profile_facts WHERE task_id = ?").get(task.id))
       .toEqual({ count: 0 });
+    database.close();
+  });
+
+  it("returns a suggested name for legacy tasks with no stored name", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    database.prepare(`
+      INSERT INTO application_tasks (id, name, application_url, created_at, updated_at)
+      VALUES (?, NULL, ?, ?, ?)
+    `).run(
+      "legacy-task",
+      "https://apply.careers.dji.com/campus-recruitment/dji/143359",
+      "2026-08-05T00:00:00.000Z",
+      "2026-08-05T00:00:00.000Z"
+    );
+
+    const repository = createApplicationTaskRepository(database);
+    expect(repository.get("legacy-task")?.name).toBe("大疆校招投递");
+    expect(repository.list()[0]?.name).toBe("大疆校招投递");
     database.close();
   });
 });

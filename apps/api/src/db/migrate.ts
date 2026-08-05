@@ -76,6 +76,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
 
     CREATE TABLE IF NOT EXISTS application_tasks (
       id TEXT PRIMARY KEY,
+      name TEXT,
       application_url TEXT NOT NULL,
       created_at TEXT NOT NULL,
       updated_at TEXT NOT NULL
@@ -173,6 +174,11 @@ export function migrateDatabase(database: SqliteDatabase): void {
       PRIMARY KEY (index_id, fact_id)
     );
   `);
+
+  const taskColumns = database.prepare("PRAGMA table_info(application_tasks)").all() as Array<{ name: string }>;
+  if (!taskColumns.some((column) => column.name === "name")) {
+    database.exec("ALTER TABLE application_tasks ADD COLUMN name TEXT");
+  }
 
   const checkpointColumns = database.prepare("PRAGMA table_info(application_checkpoints)").all() as Array<{ name: string }>;
   if (!checkpointColumns.some((column) => column.name === "snapshot_json")) {

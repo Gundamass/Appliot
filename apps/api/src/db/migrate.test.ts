@@ -3,6 +3,40 @@ import { describe, expect, it } from "vitest";
 import { migrateDatabase } from "./migrate.js";
 
 describe("migrateDatabase", () => {
+  it("creates the nullable task name column for a new database", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+
+    expect(database.prepare("PRAGMA table_info(application_tasks)").all()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "name" })])
+    );
+    database.close();
+  });
+
+  it("adds the nullable task name column to legacy tasks without losing rows", () => {
+    const database = new Database(":memory:");
+    database.exec(`
+      CREATE TABLE application_tasks (
+        id TEXT PRIMARY KEY,
+        application_url TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO application_tasks (id, application_url, created_at, updated_at)
+      VALUES ('legacy-task', 'https://jobs.example.test/apply', '2026-08-05T00:00:00.000Z', '2026-08-05T00:00:00.000Z');
+    `);
+
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    expect(database.prepare("PRAGMA table_info(application_tasks)").all()).toEqual(
+      expect.arrayContaining([expect.objectContaining({ name: "name" })])
+    );
+    expect(database.prepare("SELECT id, name FROM application_tasks WHERE id = 'legacy-task'").get())
+      .toEqual({ id: "legacy-task", name: null });
+    database.close();
+  });
+
   it("creates versioned embedding persistence tables idempotently", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
