@@ -58,6 +58,14 @@ describe("ApplicationApi", () => {
     }));
   });
 
+  it("accepts an empty 204 response when deleting a task", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createApplicationApi().delete?.(task.id)).resolves.toBeUndefined();
+    expect(fetchMock).toHaveBeenCalledWith(`/api/applications/${task.id}`, { method: "DELETE" });
+  });
+
   it("rejects malformed task responses instead of rendering untrusted commands", async () => {
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({ ...task, commands: ["submit"] }), {
       status: 200,

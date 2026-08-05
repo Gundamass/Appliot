@@ -68,6 +68,7 @@ export function createApplicationApi(baseUrl = ""): ApplicationApi {
 
 async function request(url: string, init: RequestInit): Promise<unknown> {
   const response = await fetch(url, init);
+  if (response.ok && (response.status === 204 || response.status === 205)) return undefined;
   let payload: unknown;
   try {
     payload = await response.json();
