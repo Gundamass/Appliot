@@ -111,7 +111,7 @@ export function ProfileApplicationWorkspace({
             <div className="workspace-panel-content"><ApplicationReviewInbox
               tasks={tasks}
               onDeleteTask={deleteTask}
-              deletingTaskId={deletingTaskId}
+              {...(deletingTaskId === undefined ? {} : { deletingTaskId })}
               actionError={taskActionError}
               loading={tasksLoading}
               error={tasksError}

@@ -28,7 +28,7 @@ describe("ApplicationReviewInbox", () => {
     const reviewLockedTask = task("1", "review_locked", "review");
     const fillingTask = task("2", "filling", "filling");
     const questionTask = task("3", "needs_questions", "questions");
-    render(<ApplicationReviewInbox tasks={[reviewLockedTask, fillingTask, questionTask]} onOpenTask={onOpenTask} />);
+    render(<ApplicationReviewInbox tasks={[reviewLockedTask, fillingTask, questionTask]} onOpenTask={onOpenTask} onDeleteTask={vi.fn()} />);
 
     expect(screen.getByText(reviewLockedTask.applicationUrl)).toBeVisible();
     expect(screen.getByText(questionTask.applicationUrl)).toBeVisible();
