@@ -237,25 +237,46 @@ async function buildContentReviewApp(reviewStatus: "needs_review" | "blocked" | 
 }
 
 describe("application task routes", () => {
-  it("creates a task, emits replayable state changes, and never exposes a submit command", async () => {
-    const { app, eventBus } = await buildApp();
+  it("creates a task, persists its explicit name, emits replayable state changes, and never exposes a submit command", async () => {
+    const { app, database, eventBus } = await buildApp();
 
     const response = await app.inject({
       method: "POST",
       url: "/api/applications",
-      payload: { applicationUrl: "https://jobs.example.test/apply" }
+      payload: { name: "大疆后端岗位", applicationUrl: "https://jobs.example.test/apply" }
     });
 
     expect(response.statusCode).toBe(201);
     const task = response.json();
     expect(task).toMatchObject({
       id: expect.any(String),
+      name: "大疆后端岗位",
       commands: expect.not.arrayContaining(["submit"])
+    });
+    expect(database.prepare("SELECT name FROM application_tasks WHERE id = ?").get(task.id)).toEqual({
+      name: "大疆后端岗位"
     });
     expect(eventBus.history(task.id).map((event) => event.state)).toContain("waiting_for_login");
 
     expect(eventBus.history(task.id, eventBus.history(task.id)[0]!.id))
       .toEqual([eventBus.history(task.id)[1]]);
+  });
+
+  it("suggests and persists a name when an older client only sends the application URL", async () => {
+    const { app, database } = await buildApp();
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/applications",
+      payload: { applicationUrl: "https://apply.careers.dji.com/campus-recruitment/dji/143359" }
+    });
+
+    expect(response.statusCode).toBe(201);
+    const task = response.json();
+    expect(task.name).toBe("大疆校招投递");
+    expect(database.prepare("SELECT name FROM application_tasks WHERE id = ?").get(task.id)).toEqual({
+      name: "大疆校招投递"
+    });
   });
 
   it("keeps SSE open for replay, future events, heartbeats, and cleans up on disconnect", async () => {

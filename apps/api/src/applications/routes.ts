@@ -3,6 +3,7 @@ import {
   ApplicationCommandSchema,
   ApplicationTaskInputSchema,
   ApplicationTaskSchema,
+  suggestApplicationTaskName,
   type ApplicationCommand,
   type ApplicationTask,
   type ApplicationTaskProgressEvent,
@@ -50,6 +51,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     }
     return ApplicationTaskSchema.parse({
       id: task.id,
+      name: task.name,
       applicationUrl: task.applicationUrl,
       state,
       commands,
@@ -96,7 +98,8 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       );
     }
 
-    const taskInput = { id: randomUUID(), applicationUrl: body.data.applicationUrl };
+    const name = body.data.name ?? suggestApplicationTaskName(body.data.applicationUrl);
+    const taskInput = { id: randomUUID(), name, applicationUrl: body.data.applicationUrl };
     let serviceStarted = false;
     try {
       dependencies.applicationService.start({ taskId: taskInput.id, applicationUrl: taskInput.applicationUrl });

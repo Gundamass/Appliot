@@ -34,11 +34,14 @@ describe("ApplicationApi", () => {
     vi.stubGlobal("fetch", fetchMock);
     const api = createApplicationApi();
 
-    await api.create({ applicationUrl: task.applicationUrl });
+    await api.create({ name: "示例后端岗位", applicationUrl: task.applicationUrl });
     await api.command(task.id, { type: "resume" });
 
     expect(fetchMock.mock.calls[0]?.[0]).toBe("/api/applications");
-    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({ applicationUrl: task.applicationUrl });
+    expect(JSON.parse(String((fetchMock.mock.calls[0]?.[1] as RequestInit).body))).toEqual({
+      name: "示例后端岗位",
+      applicationUrl: task.applicationUrl
+    });
     expect(fetchMock.mock.calls[1]?.[0]).toBe(`/api/applications/${task.id}/commands`);
     expect(JSON.parse(String((fetchMock.mock.calls[1]?.[1] as RequestInit).body))).toEqual({ type: "resume" });
   });
