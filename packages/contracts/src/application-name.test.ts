@@ -15,6 +15,20 @@ describe("application task names", () => {
       .toBe("jobs.example.com 投递");
   });
 
+  it("does not mistake unrelated dji substrings for DJI recruitment", () => {
+    expect(suggestApplicationTaskName("https://djinni.co/jobs/1")).toBe("djinni.co 投递");
+    expect(suggestApplicationTaskName("https://jobs.example.com/djibouti/apply"))
+      .toBe("jobs.example.com 投递");
+  });
+
+  it("preserves the task suffix when truncating a long hostname", () => {
+    const hostname = `${"a".repeat(63)}.${"b".repeat(63)}.example.com`;
+    const suggestion = suggestApplicationTaskName(`https://${hostname}/apply`);
+
+    expect(suggestion).toHaveLength(80);
+    expect(suggestion.endsWith(" 投递")).toBe(true);
+  });
+
   it("trims valid names and rejects blank or oversized names", () => {
     const applicationUrl = "https://jobs.example.com/apply/1";
     expect(ApplicationTaskInputSchema.parse({ applicationUrl, name: "  后端岗位  " }).name).toBe("后端岗位");

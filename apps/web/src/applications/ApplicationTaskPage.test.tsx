@@ -104,6 +104,33 @@ describe("ApplicationTaskPage", () => {
     expect(screen.getByRole("link", { name: "查看目标页面" })).toHaveAttribute("href", namedTask.applicationUrl);
   });
 
+  it("requires a named confirmation before deleting a terminal task", async () => {
+    const user = userEvent.setup();
+    const events = eventHarness();
+    const deleteTask = vi.fn().mockResolvedValue(undefined);
+    const confirm = vi.spyOn(window, "confirm").mockReturnValue(false);
+    const terminalTask: ApplicationTask = {
+      ...task,
+      name: "大疆 Java 后端实习",
+      state: "failed",
+      commands: []
+    };
+    render(<ApplicationTaskPage
+      taskId={task.id}
+      api={{ get: vi.fn().mockResolvedValue(terminalTask), command: vi.fn(), delete: deleteTask }}
+      connectEvents={events.connect}
+    />);
+
+    const button = await screen.findByRole("button", { name: "删除任务" });
+    await user.click(button);
+    expect(confirm).toHaveBeenCalledWith(expect.stringContaining("大疆 Java 后端实习"));
+    expect(deleteTask).not.toHaveBeenCalled();
+
+    confirm.mockReturnValue(true);
+    await user.click(button);
+    await waitFor(() => expect(deleteTask).toHaveBeenCalledWith(task.id));
+  });
+
   it("shows field coverage inside the task workspace", async () => {
     const events = eventHarness();
     const coveredTask: ApplicationTask = {

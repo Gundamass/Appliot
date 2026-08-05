@@ -183,6 +183,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
 
   const deleteTask = async () => {
     if (!api.delete) return;
+    if (!window.confirm(`确定删除“${taskTitle}”这条投递任务记录吗？`)) return;
     setError(undefined);
     try {
       await api.delete(taskId);

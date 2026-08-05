@@ -49,7 +49,7 @@ describe("ApplicationReviewInbox", () => {
 
   it("shows a delete action on every review task", () => {
     render(<ApplicationReviewInbox tasks={[task("1", "needs_questions", "questions")]} onOpenTask={vi.fn()} onDeleteTask={vi.fn()} />);
-    expect(screen.getByRole("button", { name: "删除任务" })).toBeVisible();
+    expect(screen.getByRole("button", { name: "删除任务：career.example.com" })).toBeVisible();
   });
 
   it("does not delete when the user cancels confirmation", async () => {
@@ -58,7 +58,7 @@ describe("ApplicationReviewInbox", () => {
     vi.spyOn(window, "confirm").mockReturnValue(false);
     render(<ApplicationReviewInbox tasks={[task("1", "failed", "failed")]} onOpenTask={vi.fn()} onDeleteTask={onDeleteTask} />);
 
-    await user.click(screen.getByRole("button", { name: "删除任务" }));
+    await user.click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
     expect(onDeleteTask).not.toHaveBeenCalled();
   });
@@ -70,7 +70,7 @@ describe("ApplicationReviewInbox", () => {
     const candidate = task("1", "needs_questions", "questions");
     render(<ApplicationReviewInbox tasks={[candidate]} onOpenTask={vi.fn()} onDeleteTask={onDeleteTask} />);
 
-    await user.click(screen.getByRole("button", { name: "删除任务" }));
+    await user.click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
     expect(onDeleteTask).toHaveBeenCalledWith(candidate);
   });
@@ -81,7 +81,7 @@ describe("ApplicationReviewInbox", () => {
     const candidate = task("1", "needs_questions", "questions", "大疆 Java 后端实习");
     render(<ApplicationReviewInbox tasks={[candidate]} onOpenTask={vi.fn()} onDeleteTask={vi.fn()} />);
 
-    await user.click(screen.getByRole("button", { name: "删除任务" }));
+    await user.click(screen.getByRole("button", { name: "删除任务：大疆 Java 后端实习" }));
 
     expect(confirm).toHaveBeenCalledWith(expect.stringContaining("大疆 Java 后端实习"));
   });

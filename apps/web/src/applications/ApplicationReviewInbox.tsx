@@ -57,8 +57,8 @@ export function ApplicationReviewInbox({ tasks, onOpenTask, onDeleteTask, deleti
                 <button
                   className="icon-button danger"
                   type="button"
-                  aria-label="删除任务"
-                  title="删除任务"
+                  aria-label={`删除任务：${taskName}`}
+                  title={`删除任务：${taskName}`}
                   disabled={deletingTaskId === task.id}
                   onClick={() => {
                     const message = task.commands.includes("cancel")
