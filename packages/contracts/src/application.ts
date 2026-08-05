@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { EvidenceSchema, JsonValueSchema } from "./profile.js";
+import { ApplicationTaskNameSchema } from "./application-name.js";
 
 export const ApplicationTaskStateSchema = z.enum([
   "created",
@@ -26,7 +27,8 @@ export const ApplicationTaskInputSchema = z.object({
   applicationUrl: z.string().url().refine((value) => {
     const protocol = new URL(value).protocol;
     return protocol === "http:" || protocol === "https:";
-  })
+  }),
+  name: ApplicationTaskNameSchema.optional()
 }).strict();
 
 export const ApplicationAnswerSchema = z.object({
@@ -129,6 +131,7 @@ export const ApplicationFieldCoverageSchema = z.object({
 export const ApplicationTaskSchema = z.object({
   id: z.string().uuid(),
   applicationUrl: ApplicationTaskInputSchema.shape.applicationUrl,
+  name: ApplicationTaskNameSchema.optional(),
   state: ApplicationTaskStateSchema,
   commands: z.array(ApplicationCommandTypeSchema),
   recoveryCommands: z.array(ApplicationRecoveryCommandSchema).default([]),
