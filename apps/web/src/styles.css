@@ -759,6 +759,10 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
 .review-task p { color: #5e706a; font-size: 12px; margin: 0; overflow-wrap: anywhere; }
 .review-task small { color: #77847f; font-size: 11px; line-height: 1.45; }
 .review-task .button { align-items: center; display: inline-flex; gap: 6px; white-space: nowrap; }
+.review-task-actions { align-items: center; display: flex; gap: 8px; }
+.review-task .icon-button.danger { color: #a52720; }
+.review-task .icon-button.danger:hover { background: #fff1ef; border-color: #e6b8b3; }
+.review-task .icon-button.danger:focus-visible { outline: 2px solid #a52720; outline-offset: 2px; }
 .review-inbox-state { align-items: center; color: #657470; display: flex; flex-direction: column; gap: 9px; justify-content: center; min-height: 280px; text-align: center; }
 .review-inbox-state .inline-error { margin: 0; }
 .review-inbox-state .button { align-items: center; display: inline-flex; gap: 6px; }
@@ -767,7 +771,7 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
   .workspace-panel-content { padding: 20px 16px 40px; }
   .application-start-panel { grid-template-columns: minmax(0, 1fr); }
   .review-task { align-items: start; grid-template-columns: 22px minmax(0, 1fr); }
-  .review-task .button { grid-column: 2; justify-self: start; }
+  .review-task-actions { grid-column: 2; justify-self: start; }
 }
 
 /* Application workbench: scoped so the profile workspace keeps its existing layout. */

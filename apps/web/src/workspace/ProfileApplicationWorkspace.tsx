@@ -33,6 +33,8 @@ export function ProfileApplicationWorkspace({
   const [tasks, setTasks] = useState<ApplicationTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [tasksError, setTasksError] = useState<string>();
+  const [deletingTaskId, setDeletingTaskId] = useState<string>();
+  const [taskActionError, setTaskActionError] = useState<string>();
 
   const loadTasks = async () => {
     setTasksLoading(true);
@@ -43,6 +45,23 @@ export function ProfileApplicationWorkspace({
       setTasksError("待处理任务加载失败，请重试");
     } finally {
       setTasksLoading(false);
+    }
+  };
+
+  const deleteTask = async (task: ApplicationTask) => {
+    setDeletingTaskId(task.id);
+    setTaskActionError(undefined);
+    try {
+      if (task.commands.includes("cancel")) {
+        await applicationApi.command(task.id, { type: "cancel" });
+      }
+      if (!applicationApi.delete) throw new Error("当前客户端不支持删除任务");
+      await applicationApi.delete(task.id);
+      setTasks((current) => current.filter((candidate) => candidate.id !== task.id));
+    } catch (error) {
+      setTaskActionError(error instanceof Error ? error.message : "任务删除失败，请重试；任务记录仍已保留。");
+    } finally {
+      setDeletingTaskId(undefined);
     }
   };
 
@@ -91,6 +110,9 @@ export function ProfileApplicationWorkspace({
             <header className="workspace-view-header"><div><span>人工接管</span><h1 id="workspace-reviews-title">投递审核</h1></div></header>
             <div className="workspace-panel-content"><ApplicationReviewInbox
               tasks={tasks}
+              onDeleteTask={deleteTask}
+              deletingTaskId={deletingTaskId}
+              actionError={taskActionError}
               loading={tasksLoading}
               error={tasksError}
               onRetry={() => void loadTasks()}

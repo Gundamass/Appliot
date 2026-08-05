@@ -1,7 +1,7 @@
 import type { ApplicationTask } from "@resume/contracts";
 import { render, screen } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
-import { describe, expect, it, vi } from "vitest";
+import { afterEach, describe, expect, it, vi } from "vitest";
 import { ApplicationReviewInbox } from "./ApplicationReviewInbox.js";
 
 function task(id: string, state: ApplicationTask["state"], suffix: string): ApplicationTask {
@@ -17,6 +17,10 @@ function task(id: string, state: ApplicationTask["state"], suffix: string): Appl
 }
 
 describe("ApplicationReviewInbox", () => {
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it("lists only tasks that need a user decision", async () => {
     const user = userEvent.setup();
     const onOpenTask = vi.fn();
@@ -31,5 +35,33 @@ describe("ApplicationReviewInbox", () => {
     await user.click(screen.getAllByRole("button", { name: "进入任务" })[0]!);
     expect(onOpenTask).toHaveBeenCalledWith(expect.stringContaining("00000000-0000-4000-8000-"));
     expect(screen.queryByRole("button", { name: /提交/ })).not.toBeInTheDocument();
+  });
+
+  it("shows a delete action on every review task", () => {
+    render(<ApplicationReviewInbox tasks={[task("1", "needs_questions", "questions")]} onOpenTask={vi.fn()} onDeleteTask={vi.fn()} />);
+    expect(screen.getByRole("button", { name: "删除任务" })).toBeVisible();
+  });
+
+  it("does not delete when the user cancels confirmation", async () => {
+    const user = userEvent.setup();
+    const onDeleteTask = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(false);
+    render(<ApplicationReviewInbox tasks={[task("1", "failed", "failed")]} onOpenTask={vi.fn()} onDeleteTask={onDeleteTask} />);
+
+    await user.click(screen.getByRole("button", { name: "删除任务" }));
+
+    expect(onDeleteTask).not.toHaveBeenCalled();
+  });
+
+  it("passes the confirmed task to the delete callback", async () => {
+    const user = userEvent.setup();
+    const onDeleteTask = vi.fn();
+    vi.spyOn(window, "confirm").mockReturnValue(true);
+    const candidate = task("1", "needs_questions", "questions");
+    render(<ApplicationReviewInbox tasks={[candidate]} onOpenTask={vi.fn()} onDeleteTask={onDeleteTask} />);
+
+    await user.click(screen.getByRole("button", { name: "删除任务" }));
+
+    expect(onDeleteTask).toHaveBeenCalledWith(candidate);
   });
 });

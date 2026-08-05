@@ -1,9 +1,12 @@
 import type { ApplicationTask, ApplicationTaskState } from "@resume/contracts";
-import { ArrowRight, CircleAlert, ClipboardCheck, LogIn, MessageSquareText, RefreshCw, ShieldCheck } from "lucide-react";
+import { ArrowRight, CircleAlert, ClipboardCheck, LogIn, MessageSquareText, RefreshCw, ShieldCheck, Trash2 } from "lucide-react";
 
 interface ApplicationReviewInboxProps {
   tasks: ApplicationTask[];
   onOpenTask(taskId: string): void;
+  onDeleteTask(task: ApplicationTask): void | Promise<void>;
+  deletingTaskId?: string;
+  actionError?: string | undefined;
   loading?: boolean | undefined;
   error?: string | undefined;
   onRetry?(): void;
@@ -25,7 +28,7 @@ const STATE_META: Partial<Record<ApplicationTaskState, { title: string; descript
   failed: { title: "任务需要处理", description: "自动流程已暂停，可进入任务查看恢复方式。", icon: CircleAlert }
 };
 
-export function ApplicationReviewInbox({ tasks, onOpenTask, loading = false, error, onRetry }: ApplicationReviewInboxProps) {
+export function ApplicationReviewInbox({ tasks, onOpenTask, onDeleteTask, deletingTaskId, actionError, loading = false, error, onRetry }: ApplicationReviewInboxProps) {
   const reviewTasks = tasks.filter((task) => REVIEW_STATES.has(task.state));
   if (loading) return <div className="review-inbox-state" role="status">正在读取待处理任务</div>;
   if (error) return <div className="review-inbox-state"><p className="inline-error" role="alert">{error}</p>{onRetry && <button className="button secondary" type="button" onClick={onRetry}><RefreshCw aria-hidden="true" size={16} />重新加载</button>}</div>;
@@ -34,6 +37,7 @@ export function ApplicationReviewInbox({ tasks, onOpenTask, loading = false, err
   return (
     <div className="application-review-inbox">
       <div className="review-inbox-summary"><strong>{reviewTasks.length}</strong><span>个任务等待人工决策</span></div>
+      {actionError && <p className="inline-error" role="alert">{actionError}</p>}
       <div className="review-task-list">
         {reviewTasks.map((task) => {
           const meta = STATE_META[task.state]!;
@@ -47,7 +51,24 @@ export function ApplicationReviewInbox({ tasks, onOpenTask, loading = false, err
                 <p>{task.applicationUrl}</p>
                 <small>{meta.description}</small>
               </div>
-              <button className="button secondary" type="button" onClick={() => onOpenTask(task.id)}>进入任务<ArrowRight aria-hidden="true" size={15} /></button>
+              <div className="review-task-actions">
+                <button className="button secondary" type="button" onClick={() => onOpenTask(task.id)}>进入任务<ArrowRight aria-hidden="true" size={15} /></button>
+                <button
+                  className="icon-button danger"
+                  type="button"
+                  aria-label="删除任务"
+                  title="删除任务"
+                  disabled={deletingTaskId === task.id}
+                  onClick={() => {
+                    const message = task.commands.includes("cancel")
+                      ? "该任务仍在受控浏览器中运行，删除前会先取消任务。确定删除吗？"
+                      : "确定删除这条投递任务记录吗？";
+                    if (window.confirm(message)) void onDeleteTask(task);
+                  }}
+                >
+                  <Trash2 aria-hidden="true" size={16} />
+                </button>
+              </div>
             </article>
           );
         })}
