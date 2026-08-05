@@ -119,6 +119,25 @@ describe("application task repository", () => {
     database.close();
   });
 
+  it("derives and persists a name for legacy create callers", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+
+    const first = createApplicationTaskRepository(database);
+    const task = first.create({
+      id: "0b4d43cc-a59b-4e85-a556-d64895051a1b",
+      applicationUrl: "https://apply.careers.dji.com/campus-recruitment/dji/143359"
+    });
+
+    expect(task.name).toBe("大疆校招投递");
+    const stored = database.prepare("SELECT name FROM application_tasks WHERE id = ?").get(task.id);
+    expect(stored).toEqual({ name: "大疆校招投递" });
+
+    const reopened = createApplicationTaskRepository(database);
+    expect(reopened.get(task.id)).toEqual(task);
+    database.close();
+  });
+
   it("returns a suggested name for legacy tasks with no stored name", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

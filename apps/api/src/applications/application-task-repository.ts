@@ -10,7 +10,7 @@ export interface StoredApplicationTask {
 }
 
 export interface ApplicationTaskRepository {
-  create(input: { id: string; name: string; applicationUrl: string }): StoredApplicationTask;
+  create(input: { id: string; name?: string; applicationUrl: string }): StoredApplicationTask;
   get(taskId: string): StoredApplicationTask | undefined;
   list(): StoredApplicationTask[];
   delete(taskId: string): void;
@@ -36,8 +36,9 @@ export function createApplicationTaskRepository(database: SqliteDatabase): Appli
   return {
     create(input) {
       const timestamp = new Date().toISOString();
-      insert.run(input.id, input.name, input.applicationUrl, timestamp, timestamp);
-      return { ...input, createdAt: timestamp, updatedAt: timestamp };
+      const name = input.name ?? suggestApplicationTaskName(input.applicationUrl);
+      insert.run(input.id, name, input.applicationUrl, timestamp, timestamp);
+      return { ...input, name, createdAt: timestamp, updatedAt: timestamp };
     },
     get(taskId) {
       const row = find.get(taskId) as TaskRow | undefined;
