@@ -1,6 +1,7 @@
 import { FIELD_DEFINITIONS, type FieldDefinition, type FieldSection } from "@resume/form-semantics/field-registry";
 import { Plus, Trash2 } from "lucide-react";
 import { useMemo } from "react";
+import { ProfileFieldControl } from "./ProfileFieldControl.js";
 
 export interface RepeatedEntry {
   index: number;
@@ -34,8 +35,6 @@ const FIELD_ORDERS: Partial<Record<FieldSection, readonly string[]>> = {
   work: ["company", "position", "startDate", "endDate", "description", "employmentType"],
   awards: ["name", "date", "level", "description"]
 };
-
-const AWARD_LEVELS = ["国家级", "省级", "市级", "校级", "院级", "其他"];
 
 export function RepeatedEntryEditor({ section, entries, disabled = false, onChange, onAdd, onRemove, onControl = () => undefined }: RepeatedEntryEditorProps) {
   const fields = useMemo(() => orderedFields(section), [section]);
@@ -89,27 +88,10 @@ export function RepeatedEntryEditor({ section, entries, disabled = false, onChan
 }
 
 function ProfileControl({ field, value, disabled, onChange, onControl }: { field: FieldDefinition; value: string; disabled: boolean; onChange(value: string): void; onControl(control: ProfileControlElement | null): void }) {
-  const multiline = field.types[0] === "textarea";
-  const date = field.types[0] === "date";
-  const booleanChoice = field.types.includes("checkbox") || field.types.includes("radio");
-  const awardLevel = field.semantic === "awards[].level";
   return (
-    <label className={multiline ? "profile-field profile-field-wide" : "profile-field"}>
+    <label className={field.profileControl === "textarea" ? "profile-field profile-field-wide" : "profile-field"}>
       <span>{field.label}</span>
-      {awardLevel ? (
-        <select ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
-          <option value="">请选择</option>
-          {AWARD_LEVELS.map((option) => <option key={option} value={option}>{option}</option>)}
-        </select>
-      ) : booleanChoice ? (
-        <select ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}>
-          <option value="">请选择</option><option value="是">是</option><option value="否">否</option>
-        </select>
-      ) : multiline ? (
-        <textarea ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
-      ) : (
-        <input ref={onControl} aria-label={field.label} type={date ? "date" : "text"} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
-      )}
+      <ProfileFieldControl field={field} value={value} disabled={disabled} onChange={onChange} onControl={onControl} />
     </label>
   );
 }

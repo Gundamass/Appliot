@@ -1,12 +1,36 @@
 import { describe, expect, it } from "vitest";
 import {
+  FIELD_DEFINITIONS,
   PROFILE_SECTION_DEFINITIONS,
   profileSectionFor,
   resolveDeterministicSemantic,
   semanticLookupPaths
 } from "./field-registry.js";
 
+function definition(semantic: string) {
+  return FIELD_DEFINITIONS.find((field) => field.semantic === semantic);
+}
+
 describe("字段注册表确定性映射", () => {
+  it("为档案字段提供语义化控件和标准选项", () => {
+    expect(definition("basics.name")?.profileControl).toBe("text");
+    expect(definition("basics.gender")).toMatchObject({
+      profileControl: "enum",
+      profileOptions: ["男", "女", "其他", "不愿透露"]
+    });
+    expect(definition("basics.nationality")?.profileControl).toBe("suggestion");
+    expect(definition("basics.nationality")?.profileOptions).toContain("中国");
+    expect(definition("basics.ethnicity")?.profileOptions).toContain("汉族");
+    expect(definition("basics.ethnicity")?.profileOptions).toHaveLength(56);
+    expect(definition("basics.politicalStatus")?.profileOptions).toContain("中共党员");
+    expect(definition("basics.maritalStatus")?.profileOptions).toContain("未婚");
+    expect(definition("preferences.willingToTravel")?.profileControl).toBe("boolean");
+    expect(definition("education[].degree")?.profileOptions).toContain("硕士");
+    expect(definition("work[].employmentType")?.profileOptions).toContain("实习");
+    expect(definition("work[].description")?.profileControl).toBe("textarea");
+    expect(definition("awards[].level")?.profileOptions).toContain("国家级");
+  });
+
   it("将常见个人信息别名映射到标准路径", () => {
     expect(resolveDeterministicSemantic({
       label: "个人联系电话",

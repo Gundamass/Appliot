@@ -10,6 +10,7 @@ import { forwardRef, useCallback, useEffect, useImperativeHandle, useMemo, useRe
 import type { ProfileApi } from "../api/client.js";
 import type { ProfileSaveState } from "./ProfileSummaryBar.js";
 import { RepeatedEntryEditor, type RepeatedEntry } from "./RepeatedEntryEditor.js";
+import { ProfileFieldControl } from "./ProfileFieldControl.js";
 
 export interface CandidateProfileCenterHandle {
   save(): Promise<void>;
@@ -342,19 +343,10 @@ function ProfileSection({
 }
 
 function ScalarField({ field, value, missing, disabled, onChange, onControl }: { field: FieldDefinition; value: string; missing: boolean; disabled: boolean; onChange(value: string): void; onControl(control: ProfileControlElement | null): void }) {
-  const multiline = field.types[0] === "textarea";
-  const date = field.types[0] === "date";
-  const booleanChoice = field.types.includes("checkbox") || field.types.includes("radio");
   return (
-    <label className={multiline ? "profile-field profile-field-wide" : "profile-field"}>
+    <label className={field.profileControl === "textarea" ? "profile-field profile-field-wide" : "profile-field"}>
       <span>{field.label}{missing && <small>缺失，可减少追问</small>}</span>
-      {booleanChoice ? (
-        <select ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)}><option value="">请选择</option><option value="是">是</option><option value="否">否</option></select>
-      ) : multiline ? (
-        <textarea ref={onControl} aria-label={field.label} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
-      ) : (
-        <input ref={onControl} aria-label={field.label} type={date ? "date" : "text"} value={value} disabled={disabled} onChange={(event) => onChange(event.target.value)} />
-      )}
+      <ProfileFieldControl field={field} value={value} disabled={disabled} onChange={onChange} onControl={onControl} />
     </label>
   );
 }

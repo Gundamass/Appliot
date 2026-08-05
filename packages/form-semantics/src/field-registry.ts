@@ -1,6 +1,7 @@
 import type { FormField } from "@resume/contracts";
 
 export type SemanticFieldType = FormField["type"];
+export type ProfileFieldControl = "text" | "textarea" | "date" | "enum" | "boolean" | "suggestion";
 export type FieldSection =
   | "basics"
   | "preferences"
@@ -22,6 +23,8 @@ export interface FieldDefinition {
   sections: readonly FieldSection[];
   risk: "normal" | "sensitive" | "commitment";
   description: string;
+  profileControl?: ProfileFieldControl;
+  profileOptions?: readonly string[];
 }
 
 export interface ProfileSectionDefinition {
@@ -61,7 +64,7 @@ const TEXT_TYPES = ["text", "textarea"] as const;
 const TEXT_SELECT_TYPES = ["text", "select", "radio"] as const;
 const DATE_TYPES = ["date", "text", "select"] as const;
 
-export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
+const RAW_FIELD_DEFINITIONS = [
   definition("basics.name", "姓名", ["中文姓名", "真实姓名"], TEXT_TYPES, ["basics"], "候选人的中文姓名", "sensitive"),
   definition("basics.englishName", "英文名", ["英文姓名", "english name"], TEXT_TYPES, ["basics"], "候选人的英文姓名"),
   definition("basics.email", "邮箱", ["电子邮箱", "邮箱地址", "联系邮箱", "e-mail", "email"], TEXT_TYPES, ["basics"], "候选人的联系邮箱", "sensitive"),
@@ -135,6 +138,53 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = [
   definition("selfEvaluation", "自我评价", ["个人评价", "个人总结", "self evaluation"], ["textarea", "text"], ["self"], "候选人的自我评价原文")
 ] as const;
 
+const GENDER_OPTIONS = ["男", "女", "其他", "不愿透露"] as const;
+const NATIONALITY_OPTIONS = ["中国", "美国", "加拿大", "英国", "法国", "德国", "澳大利亚", "新加坡", "日本", "韩国", "其他"] as const;
+const POLITICAL_STATUS_OPTIONS = ["中共党员", "中共预备党员", "共青团员", "群众", "民主党派成员", "无党派人士", "其他"] as const;
+const MARITAL_STATUS_OPTIONS = ["未婚", "已婚", "离异", "丧偶", "其他", "不愿透露"] as const;
+const ID_TYPE_OPTIONS = ["居民身份证", "护照", "港澳居民来往内地通行证", "台湾居民来往大陆通行证", "其他"] as const;
+const DEGREE_OPTIONS = ["高中及以下", "大专", "本科", "硕士", "博士", "其他"] as const;
+const DEGREE_TYPE_OPTIONS = ["全日制", "非全日制", "其他"] as const;
+const ENROLLMENT_TYPE_OPTIONS = ["统招", "定向", "委培", "自筹", "其他"] as const;
+const EMPLOYMENT_TYPE_OPTIONS = ["实习", "全职", "兼职", "劳务", "其他"] as const;
+const AWARD_LEVEL_OPTIONS = ["国家级", "省级", "市级", "校级", "院级", "其他"] as const;
+const ETHNICITY_OPTIONS = [
+  "汉族", "蒙古族", "回族", "藏族", "维吾尔族", "苗族", "彝族", "壮族", "布依族", "朝鲜族", "满族", "侗族", "瑶族", "白族", "土家族", "哈尼族", "哈萨克族", "傣族", "黎族", "傈僳族", "佤族", "畲族", "高山族", "拉祜族", "水族", "东乡族", "纳西族", "景颇族", "柯尔克孜族", "土族", "达斡尔族", "仫佬族", "羌族", "布朗族", "撒拉族", "毛南族", "仡佬族", "锡伯族", "阿昌族", "普米族", "塔吉克族", "怒族", "乌孜别克族", "俄罗斯族", "鄂温克族", "德昂族", "保安族", "裕固族", "京族", "塔塔尔族", "独龙族", "鄂伦春族", "赫哲族", "门巴族", "珞巴族", "基诺族"
+] as const;
+
+const PROFILE_FIELD_METADATA: Readonly<Record<string, {
+  control: ProfileFieldControl;
+  options?: readonly string[];
+}>> = {
+  "basics.gender": { control: "enum", options: GENDER_OPTIONS },
+  "basics.nationality": { control: "suggestion", options: NATIONALITY_OPTIONS },
+  "basics.ethnicity": { control: "enum", options: ETHNICITY_OPTIONS },
+  "basics.politicalStatus": { control: "enum", options: POLITICAL_STATUS_OPTIONS },
+  "basics.maritalStatus": { control: "enum", options: MARITAL_STATUS_OPTIONS },
+  "basics.currentLocation": { control: "suggestion" },
+  "basics.hukouLocation": { control: "suggestion" },
+  "identity.idType": { control: "enum", options: ID_TYPE_OPTIONS },
+  "preferences.targetRole": { control: "suggestion" },
+  "preferences.targetCity": { control: "suggestion" },
+  "preferences.employmentType": { control: "enum", options: EMPLOYMENT_TYPE_OPTIONS },
+  "preferences.willingToRelocate": { control: "boolean", options: ["是", "否"] },
+  "preferences.willingToTravel": { control: "boolean", options: ["是", "否"] },
+  "education[].degree": { control: "enum", options: DEGREE_OPTIONS },
+  "education[].degreeType": { control: "enum", options: DEGREE_TYPE_OPTIONS },
+  "education[].enrollmentType": { control: "enum", options: ENROLLMENT_TYPE_OPTIONS },
+  "education[].isHighest": { control: "boolean", options: ["是", "否"] },
+  "work[].employmentType": { control: "enum", options: EMPLOYMENT_TYPE_OPTIONS },
+  "awards[].level": { control: "enum", options: AWARD_LEVEL_OPTIONS }
+};
+
+export const FIELD_DEFINITIONS: readonly FieldDefinition[] = RAW_FIELD_DEFINITIONS.map((field) => ({
+  ...field,
+  profileControl: PROFILE_FIELD_METADATA[field.semantic]?.control ?? defaultProfileControl(field.types),
+  ...(PROFILE_FIELD_METADATA[field.semantic]?.options === undefined
+    ? {}
+    : { profileOptions: PROFILE_FIELD_METADATA[field.semantic]!.options })
+}));
+
 export function resolveDeterministicSemantic(input: SemanticFieldInput): FieldSemanticMatch | undefined {
   const hinted = input.semanticHint === undefined
     ? undefined
@@ -184,7 +234,7 @@ function definition(
   sections: readonly FieldSection[],
   description: string,
   risk: FieldDefinition["risk"] = "normal"
-): FieldDefinition {
+): Omit<FieldDefinition, "profileControl" | "profileOptions"> {
   return { semantic, label, aliases, types, sections, risk, description };
 }
 
@@ -196,8 +246,14 @@ function repeated(
   section: FieldSection,
   description: string,
   legacySemantics: readonly string[] = []
-): FieldDefinition {
+): Omit<FieldDefinition, "profileControl" | "profileOptions"> {
   return { semantic, label, aliases, legacySemantics, types, sections: [section], risk: "normal", description };
+}
+
+function defaultProfileControl(types: readonly SemanticFieldType[]): ProfileFieldControl {
+  if (types[0] === "textarea") return "textarea";
+  if (types[0] === "date") return "date";
+  return "text";
 }
 
 function matchesSemantic(definition: FieldDefinition, semantic: string): boolean {
