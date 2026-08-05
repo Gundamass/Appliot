@@ -1,5 +1,5 @@
 import type { ProfileDocumentSummary } from "@resume/contracts";
-import { FileText, RefreshCw, Upload, X } from "lucide-react";
+import { CircleAlert, FileText, RefreshCw, Upload, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 
 export type ProfileUploadState = "idle" | "uploading" | "accepted_refreshing" | "success" | "accepted_refresh_error" | "error";
@@ -14,6 +14,7 @@ interface ResumeParsePanelProps {
   onUpload(): void;
   onRetry(): void;
   onClose(): void;
+  errorAction?: { label: string; onClick(): void } | undefined;
 }
 
 export function ResumeParsePanel({
@@ -25,7 +26,8 @@ export function ResumeParsePanel({
   onSelectFile,
   onUpload,
   onRetry,
-  onClose
+  onClose,
+  errorAction
 }: ResumeParsePanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
@@ -70,11 +72,19 @@ export function ResumeParsePanel({
             <RefreshCw aria-hidden="true" size={16} />重新刷新资料
           </button>
         )}
+        {uploadState === "error" && errorAction && (
+          <button className="button secondary" type="button" onClick={errorAction.onClick}>{errorAction.label}</button>
+        )}
       </div>
       {uploadState === "uploading" && selectedFile && (
         <div className="upload-progress" role="progressbar" aria-label={`正在上传 ${selectedFile.name}`}><span /></div>
       )}
-      {uploadMessage && <p className={`resume-parse-message ${messageRole === "alert" ? "error" : ""}`} role={messageRole}>{uploadMessage}</p>}
+      {uploadMessage && (messageRole === "alert" ? (
+        <div className="resume-parse-message error" role="alert">
+          <CircleAlert aria-hidden="true" size={18} />
+          <div><strong>解析未完成</strong><span>{uploadMessage}</span></div>
+        </div>
+      ) : <p className="resume-parse-message" role="status">{uploadMessage}</p>)}
     </section>
   );
 }

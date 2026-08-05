@@ -1,7 +1,7 @@
 import { SelfEvaluationReviewSchema, type AdapterId, type AdapterStatus, type ProfileCompleteness, type ProfileDocumentSummary, type ProfileFact, type SelfEvaluationReview as SelfEvaluationReviewModel } from "@resume/contracts";
 import { FileText, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import type { ProfileApi, RagApi, SelfEvaluationReviewApi } from "../api/client.js";
+import { ProfileApiError, type ProfileApi, type RagApi, type SelfEvaluationReviewApi } from "../api/client.js";
 import type { HealthApi } from "../api/health-client.js";
 import { SelfEvaluationReview } from "../reviews/SelfEvaluationReview.js";
 import { RagWorkspace } from "../rag/RagWorkspace.js";
@@ -33,6 +33,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
   const [selectedFile, setSelectedFile] = useState<File>();
   const [uploadState, setUploadState] = useState<UploadState>("idle");
   const [uploadMessage, setUploadMessage] = useState<string>();
+  const [uploadErrorCode, setUploadErrorCode] = useState<string>();
   const contextGeneration = useRef(0);
   const readGeneration = useRef(0);
   const completenessReadGeneration = useRef(0);
@@ -270,6 +271,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     setSelectedFile(undefined);
     setUploadState("idle");
     setUploadMessage(undefined);
+    setUploadErrorCode(undefined);
     if (fileInputRef.current) fileInputRef.current.value = "";
     void requestFacts(api, context, true);
     void loadCompleteness(api, context);
@@ -291,6 +293,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     acceptedUploadPhase.current = "none";
     setUploadState("idle");
     setUploadMessage(undefined);
+    setUploadErrorCode(undefined);
     if (!file) {
       setSelectedFile(undefined);
       return;
@@ -337,6 +340,7 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     uploadOwner.current = owner;
     setUploadState("uploading");
     setUploadMessage(undefined);
+    setUploadErrorCode(undefined);
     try {
       await api.upload(file);
       if (!isCurrentContext(context) || uploadOwner.current !== owner) return;
@@ -346,10 +350,11 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
       uploadOwner.current = null;
       void loadLatestDocument(api, context);
       void refreshAcceptedUpload(owner, context, api);
-    } catch {
+    } catch (error) {
       if (!isCurrentContext(context) || uploadOwner.current !== owner) return;
       setUploadState("error");
-      setUploadMessage("上传失败，请检查文件后重试");
+      setUploadMessage(uploadErrorMessage(error));
+      setUploadErrorCode(error instanceof ProfileApiError ? error.code : undefined);
       acceptedUploadPhase.current = "none";
       uploadOwner.current = null;
     }
@@ -437,6 +442,9 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
               }
             }}
             onClose={() => setParseOpen(false)}
+            {...(uploadErrorCode === "document_already_imported" ? {
+              errorAction: { label: "查看已导入资料", onClick: () => setParseOpen(false) }
+            } : {})}
           />
         </div>
         {loading ? (
@@ -479,6 +487,15 @@ function factText(facts: ProfileFact[], leaves: string[]): string | undefined {
     }
   }
   return undefined;
+}
+
+function uploadErrorMessage(error: unknown): string {
+  if (!(error instanceof ProfileApiError)) return "服务器暂时无法完成简历解析，请稍后重试";
+  if (error.code === "document_already_imported") return "这份简历已经导入过，无需重复解析。你可以直接查看已保存的档案资料";
+  if (error.code === "profile_import_unavailable") return "简历解析服务当前不可用，请检查 OCR 和模型服务状态后重试";
+  if (error.code === "invalid_pdf_upload") return "文件不是有效的 PDF，或文件内容已经损坏，请重新导出后重试";
+  if (error.statusCode === 413) return "PDF 文件超过 15 MiB，请压缩后重新上传";
+  return "服务器暂时无法完成简历解析，请稍后重试";
 }
 
 function fieldLeaf(fieldPath: string): string {

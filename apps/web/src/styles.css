@@ -609,7 +609,11 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
 .resume-file-picker { align-items: center; display: inline-flex; gap: 6px; max-width: min(320px, 100%); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .resume-parse-controls .button { min-height: 34px; }
 .resume-parse-message { color: #176b5c; font-size: 12px; grid-column: 1 / -1; margin: -4px 0 0; }
-.resume-parse-message.error { color: #a52720; }
+.resume-parse-message.error { align-items: flex-start; background: #fff3f2; border: 1px solid #e6aaa5; border-left: 3px solid #b3362d; color: #8f241d; display: flex; gap: 9px; margin-top: 0; padding: 10px 12px; }
+.resume-parse-message.error > svg { flex: 0 0 auto; margin-top: 1px; }
+.resume-parse-message.error > div { display: grid; gap: 2px; }
+.resume-parse-message.error strong { color: #711b16; font-size: 13px; }
+.resume-parse-message.error span { line-height: 1.55; }
 .resume-parse-panel .upload-progress { grid-column: 1 / -1; margin: -3px 0 0; }
 .profile-section-navigation button { align-items: center; background: transparent; border: 0; border-left: 2px solid transparent; color: #59686a; display: flex; font-size: 12px; gap: 6px; justify-content: space-between; min-height: 34px; padding: 0 8px; text-align: left; width: 100%; }
 .profile-section-navigation button:hover { background: #f0f6f3; color: #176b5c; }

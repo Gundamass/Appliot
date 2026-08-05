@@ -62,19 +62,26 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
 
     try {
       const upload = await readMultipartUpload(request);
-      if (!hasPdfSignature(upload.bytes)) return sendError(reply, 400, "Invalid PDF upload");
+      if (!hasPdfSignature(upload.bytes)) return sendError(reply, 400, "Invalid PDF upload", "invalid_pdf_upload");
 
       const imported = DocumentResponseSchema.parse(
         await importProfileDocument(dependencies, upload.filename, upload.bytes)
       );
       return reply.code(202).send(imported);
     } catch (error) {
-      if (error instanceof DuplicateDocumentError) return sendError(reply, 409, "Document already imported");
-      if (error instanceof InvalidPdfError) return sendError(reply, 400, "Invalid PDF upload");
+      if (error instanceof DuplicateDocumentError) return sendError(reply, 409, "Document already imported", "document_already_imported");
+      if (error instanceof InvalidPdfError) return sendError(reply, 400, "Invalid PDF upload", "invalid_pdf_upload");
       if (error instanceof ProfileImportUnavailableError) {
-        return sendError(reply, 503, "Profile import is temporarily unavailable");
+        return sendError(reply, 503, "Profile import is temporarily unavailable", "profile_import_unavailable");
       }
-      if (error instanceof MultipartInputError) return sendError(reply, 400, error.publicMessage);
+      if (error instanceof MultipartInputError) {
+        return sendError(
+          reply,
+          400,
+          error.publicMessage,
+          error.publicMessage === "Invalid PDF upload" ? "invalid_pdf_upload" : "invalid_request"
+        );
+      }
       throw error;
     }
   });

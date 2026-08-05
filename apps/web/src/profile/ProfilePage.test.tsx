@@ -2,7 +2,7 @@ import type { JsonValue, ProfileFact } from "@resume/contracts";
 import { act, render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import type { ProfileApi, SelfEvaluationReviewApi } from "../api/client.js";
+import { ProfileApiError, type ProfileApi, type SelfEvaluationReviewApi } from "../api/client.js";
 import { ProfilePage } from "./ProfilePage.js";
 
 afterEach(() => vi.unstubAllGlobals());
@@ -462,9 +462,37 @@ describe("PDF upload", () => {
     await user.upload(screen.getByLabelText("选择 PDF 简历"), new File(["%PDF"], "resume.pdf", { type: "application/pdf" }));
     await user.click(screen.getByRole("button", { name: "上传并提取" }));
 
-    expect(await screen.findByRole("alert")).toHaveTextContent("上传失败");
+    expect(await screen.findByRole("alert")).toHaveTextContent("服务器暂时无法完成简历解析");
     expect(screen.queryByText("简历已导入，资料已刷新")).not.toBeInTheDocument();
     expect(screen.getByRole("button", { name: "上传并提取" })).toBeEnabled();
+  });
+
+  it("shows a specific duplicate-document warning with a view action", async () => {
+    const api = fakeProfileApi();
+    vi.mocked(api.upload).mockRejectedValueOnce(new ProfileApiError("Document already imported", "document_already_imported", 409));
+    const user = userEvent.setup();
+    render(<ProfilePage api={api} />);
+
+    await user.upload(screen.getByLabelText("选择 PDF 简历"), new File(["%PDF"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(screen.getByRole("button", { name: "上传并提取" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent("这份简历已经导入过，无需重复解析");
+    expect(screen.getByRole("button", { name: "查看已导入资料" })).toBeVisible();
+  });
+
+  it.each([
+    ["profile_import_unavailable", "简历解析服务当前不可用"],
+    ["invalid_pdf_upload", "文件不是有效的 PDF"]
+  ] as const)("shows a clear Chinese message for %s upload errors", async (code, message) => {
+    const api = fakeProfileApi();
+    vi.mocked(api.upload).mockRejectedValueOnce(new ProfileApiError("upload failed", code, 400));
+    const user = userEvent.setup();
+    render(<ProfilePage api={api} />);
+
+    await user.upload(screen.getByLabelText("选择 PDF 简历"), new File(["%PDF"], "resume.pdf", { type: "application/pdf" }));
+    await user.click(screen.getByRole("button", { name: "上传并提取" }));
+
+    expect(await screen.findByRole("alert")).toHaveTextContent(message);
   });
 
   it("keeps an accepted upload accepted when refresh fails and retries only the read", async () => {

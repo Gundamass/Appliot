@@ -24,6 +24,13 @@ import { z } from "zod";
 
 const ProfileFactListSchema = z.array(ProfileFactSchema);
 
+export class ProfileApiError extends Error {
+  constructor(message: string, readonly code?: string, readonly statusCode?: number) {
+    super(message);
+    this.name = "ProfileApiError";
+  }
+}
+
 export interface ProfileApi {
   upload(file: File): Promise<{ documentId: string }>;
   listFacts(): Promise<ProfileFact[]>;
@@ -143,11 +150,14 @@ async function readResponse(response: Response): Promise<unknown> {
   try {
     payload = await response.json();
   } catch {
-    throw new Error(response.ok ? "服务器返回了无法解析的数据" : `请求失败 (${response.status})`);
+    if (response.ok) throw new Error("服务器返回了无法解析的数据");
+    throw new ProfileApiError(`请求失败 (${response.status})`, undefined, response.status);
   }
 
   if (response.ok) return payload;
 
   const error = ErrorResponseSchema.safeParse(payload);
-  throw new Error(error.success ? error.data.error : `请求失败 (${response.status})`);
+  throw error.success
+    ? new ProfileApiError(error.data.error, error.data.code, response.status)
+    : new ProfileApiError(`请求失败 (${response.status})`, undefined, response.status);
 }

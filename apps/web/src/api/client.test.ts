@@ -1,6 +1,6 @@
 import { ProfileFactSchema, RagFieldInspectionSchema, SelfEvaluationReviewSchema } from "@resume/contracts";
 import { afterEach, describe, expect, it, vi } from "vitest";
-import { createProfileApi, createRagApi, createSelfEvaluationReviewApi } from "./client.js";
+import { createProfileApi, createRagApi, createSelfEvaluationReviewApi, ProfileApiError } from "./client.js";
 
 const fact = ProfileFactSchema.parse({
   id: "fact-1",
@@ -155,6 +155,23 @@ describe("ProfileApi HTTP contract", () => {
 
     await expect(createProfileApi().upload(new File(["%PDF"], "resume.pdf", { type: "application/pdf" })))
       .rejects.toThrow("Document already imported");
+  });
+
+  it("preserves the API error code and status for upload diagnostics", async () => {
+    vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify({
+      error: "Document already imported",
+      code: "document_already_imported"
+    }), {
+      status: 409,
+      headers: { "Content-Type": "application/json" }
+    })));
+
+    await expect(createProfileApi().upload(new File(["%PDF"], "resume.pdf", { type: "application/pdf" })))
+      .rejects.toMatchObject({
+        name: "ProfileApiError",
+        code: "document_already_imported",
+        statusCode: 409
+      } satisfies Partial<ProfileApiError>);
   });
 });
 

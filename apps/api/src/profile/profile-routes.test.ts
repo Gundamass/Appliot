@@ -183,7 +183,9 @@ describe("profile routes", () => {
     const request = { method: "POST" as const, url: "/api/documents", ...multipartPdf(pdfBytes()) };
 
     expect((await app.inject(request)).statusCode).toBe(202);
-    expect((await app.inject(request)).statusCode).toBe(409);
+    const duplicate = await app.inject(request);
+    expect(duplicate.statusCode).toBe(409);
+    expect(duplicate.json()).toMatchObject({ code: "document_already_imported" });
     expect((await app.inject({ method: "GET", url: "/api/profile/facts" })).json()).toHaveLength(1);
     expect(extractPdf).toHaveBeenCalledOnce();
   });
@@ -464,7 +466,7 @@ describe("profile routes", () => {
     const response = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes(), "text/plain") });
 
     expect(response.statusCode).toBe(400);
-    expect(ErrorResponseSchema.parse(response.json())).toEqual({ error: "Invalid PDF upload" });
+    expect(ErrorResponseSchema.parse(response.json())).toMatchObject({ error: "Invalid PDF upload", code: "invalid_pdf_upload" });
   });
 
   it("rejects a PDF MIME type with an invalid PDF signature", async () => {
@@ -472,7 +474,7 @@ describe("profile routes", () => {
     const response = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(Buffer.from("not a PDF")) });
 
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: "Invalid PDF upload" });
+    expect(response.json()).toMatchObject({ error: "Invalid PDF upload", code: "invalid_pdf_upload" });
   });
 
   it("accepts a PDF at the 15 MiB boundary", async () => {
@@ -487,7 +489,7 @@ describe("profile routes", () => {
     const response = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes(MAX_PDF_BYTES + 1)) });
 
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: "Invalid request" });
+    expect(response.json()).toMatchObject({ error: "Invalid request", code: "invalid_request" });
   });
 
   it("returns 404 for missing facts", async () => {
@@ -517,7 +519,7 @@ describe("profile routes", () => {
     const response = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) });
 
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: "Invalid PDF upload" });
+    expect(response.json()).toMatchObject({ error: "Invalid PDF upload", code: "invalid_pdf_upload" });
   });
 
   it("returns 400 when the real PDF parser rejects a signed malformed document", async () => {
@@ -531,7 +533,7 @@ describe("profile routes", () => {
     });
 
     expect(response.statusCode).toBe(400);
-    expect(response.json()).toEqual({ error: "Invalid PDF upload" });
+    expect(response.json()).toMatchObject({ error: "Invalid PDF upload", code: "invalid_pdf_upload" });
   });
 
   it("returns 503 for explicitly classified extraction unavailability", async () => {
@@ -541,7 +543,7 @@ describe("profile routes", () => {
     const response = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) });
 
     expect(response.statusCode).toBe(503);
-    expect(response.json()).toEqual({ error: "Profile import is temporarily unavailable" });
+    expect(response.json()).toMatchObject({ error: "Profile import is temporarily unavailable", code: "profile_import_unavailable" });
   });
 
   it("returns 503 without exposing a scanned-page OCR outage", async () => {
@@ -553,7 +555,7 @@ describe("profile routes", () => {
     });
 
     expect(response.statusCode).toBe(503);
-    expect(response.json()).toEqual({ error: "Profile import is temporarily unavailable" });
+    expect(response.json()).toMatchObject({ error: "Profile import is temporarily unavailable", code: "profile_import_unavailable" });
   });
 
   it("returns 500 for unexpected extractor failures", async () => {
@@ -682,7 +684,7 @@ describe("profile routes", () => {
       const response = await app.inject({ method: "POST", url: "/api/documents", ...multipartCase.request });
 
       expect(response.statusCode).toBe(400);
-      expect(response.json()).toEqual({ error: "Invalid request" });
+      expect(response.json()).toMatchObject({ error: "Invalid request", code: "invalid_request" });
       expect(tableCount(database, "documents")).toBe(0);
     });
   }
