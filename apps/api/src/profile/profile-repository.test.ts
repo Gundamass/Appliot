@@ -44,7 +44,35 @@ describe("ProfileRepository", () => {
       scope: "profile",
       revision: 1
     });
-    expect(fact.evidence[0]).toMatchObject({ documentId: "user", extraction: "user" });
+    expect(fact.evidence).toEqual([{
+      documentId: "user",
+      page: 1,
+      text: "Corrected value: \"深圳\"",
+      extraction: "user"
+    }]);
+  });
+
+  it("normalizes legacy path-only evidence for user-corrected facts", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createProfileRepository(database);
+    const legacy = repository.upsertUserFact({
+      fieldPath: "work[0].description",
+      value: "负责接口优化"
+    });
+    database.prepare("UPDATE profile_facts SET evidence_json = ? WHERE id = ?").run(JSON.stringify([{
+      documentId: "user",
+      page: 1,
+      text: "用户补充：work[0].description",
+      extraction: "user"
+    }]), legacy.id);
+
+    expect(repository.resolveForTask("task-1", "work[0].description")?.evidence).toEqual([{
+      documentId: "user",
+      page: 1,
+      text: "Corrected value: \"负责接口优化\"",
+      extraction: "user"
+    }]);
   });
 
   it("updates the reviewed semantic equivalent instead of creating a competing fact", () => {

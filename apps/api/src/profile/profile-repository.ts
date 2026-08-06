@@ -54,8 +54,26 @@ function now(): string {
   return new Date().toISOString();
 }
 
+function userValueEvidence(value: JsonValue): Evidence[] {
+  return [{
+    documentId: "user",
+    page: 1,
+    text: `Corrected value: ${JSON.stringify(value)}`,
+    extraction: "user"
+  }];
+}
+
+function normalizeLegacyUserEvidence(fact: ProfileFact): ProfileFact {
+  if (fact.status !== "user_corrected") return fact;
+  const legacyText = `用户补充：${fact.fieldPath}`;
+  if (fact.evidence.length === 0 || !fact.evidence.every((item) =>
+    item.extraction === "user" && item.text === legacyText
+  )) return fact;
+  return { ...fact, evidence: userValueEvidence(fact.value) };
+}
+
 function parseFact(row: FactRow): ProfileFact {
-  return ProfileFactSchema.parse({
+  return normalizeLegacyUserEvidence(ProfileFactSchema.parse({
     id: row.id,
     fieldPath: row.field_path,
     value: JSON.parse(row.value_json),
@@ -65,7 +83,7 @@ function parseFact(row: FactRow): ProfileFact {
     ...(row.task_id === null ? {} : { taskId: row.task_id }),
     evidence: JSON.parse(row.evidence_json),
     revision: row.revision
-  });
+  }));
 }
 
 function parseApplicationAnswer(row: ApplicationAnswerRow): ProfileFact {
@@ -240,12 +258,7 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
 
     upsertUserFact(input) {
       const parsed = ProfileFactUpsertInputSchema.parse(input);
-      const evidence: Evidence[] = [{
-        documentId: "user",
-        page: 1,
-        text: `用户补充：${parsed.fieldPath}`,
-        extraction: "user"
-      }];
+      const evidence = userValueEvidence(parsed.value);
       return database.transaction(() => {
         const existing = findReviewedProfileFact(parsed.fieldPath);
         if (existing) return correctStoredFact(existing.id, parsed.value, evidence);
