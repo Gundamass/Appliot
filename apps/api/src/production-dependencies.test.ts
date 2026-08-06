@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
-import type { FormField, FormSnapshot, WorkerActivity } from "@resume/contracts";
+import type { FormField, FormSnapshot, ProfileFact, WorkerActivity } from "@resume/contracts";
 import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
 import type { FieldSemanticResolver } from "./applications/field-semantic-resolver.js";
 import { loadConfig } from "./config.js";
@@ -212,7 +212,7 @@ describe("production dependency composition", () => {
   });
 
   it("validates a full profile date before projecting it into a select option", async () => {
-    const fact = {
+    const fact: ProfileFact = {
       id: "start-date",
       fieldPath: "work[0].startDate",
       value: "2026-04-12",
@@ -227,24 +227,27 @@ describe("production dependency composition", () => {
       }],
       revision: 1
     };
-    const profileRepository: ProfileRepositoryPort = {
-      resolveForTask: () => fact,
-      listActive: () => [fact],
-      putTaskAnswer: () => fact,
-      correct: () => fact
+    const resolverForFact = (candidate: ProfileFact) => {
+      const profileRepository: ProfileRepositoryPort = {
+        resolveForTask: () => candidate,
+        listActive: () => [candidate],
+        putTaskAnswer: () => candidate,
+        correct: () => candidate
+      };
+      return createProductionFieldResolver({
+        semanticResolver: {
+          resolve: async () => ({
+            status: "mapped" as const,
+            semantic: candidate.fieldPath,
+            source: "exact_alias" as const,
+            confidence: 1
+          })
+        },
+        ragService: createRagService({ repository: profileRepository }),
+        profileRepository
+      });
     };
-    const resolveField = createProductionFieldResolver({
-      semanticResolver: {
-        resolve: async () => ({
-          status: "mapped" as const,
-          semantic: "work[0].startDate",
-          source: "exact_alias" as const,
-          confidence: 1
-        })
-      },
-      ragService: createRagService({ repository: profileRepository }),
-      profileRepository
-    });
+    const resolveField = resolverForFact(fact);
 
     await expect(resolveField("task-1", applicationField("开始时间 年", {
       type: "select",
@@ -261,6 +264,32 @@ describe("production dependency composition", () => {
       status: "blocked",
       assessment: { status: "unsupported" }
     });
+    await expect(resolveField("task-1", applicationField("开始时间 年", {
+      type: "radio",
+      options: ["2025", "2026"]
+    }))).resolves.toMatchObject({ status: "verified", value: "2026" });
+    await expect(resolveField("task-1", applicationField("开始时间 年", {
+      type: "select",
+      options: []
+    }))).resolves.toMatchObject({ status: "blocked" });
+    await expect(resolverForFact({
+      ...fact,
+      evidence: [{ ...fact.evidence[0]!, text: "Corrected value: \"2025-04-12\"" }]
+    })("task-1", applicationField("开始时间 年", {
+      type: "select",
+      options: ["2026"]
+    }))).resolves.toMatchObject({ status: "blocked" });
+    await expect(resolverForFact({ ...fact, status: "superseded" })(
+      "task-1",
+      applicationField("开始时间 年", { type: "select", options: ["2026"] })
+    )).resolves.toMatchObject({ status: "blocked" });
+    await expect(resolverForFact({
+      ...fact,
+      fieldPath: "work[0].description"
+    })("task-1", applicationField("工作年份 年", {
+      type: "select",
+      options: ["2026-04-12"]
+    }))).resolves.toMatchObject({ status: "verified", value: "2026-04-12" });
   });
 
   it("preserves DJI catalog provenance in production field assessments", async () => {
