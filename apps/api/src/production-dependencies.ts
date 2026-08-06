@@ -48,7 +48,9 @@ export function createProductionDependencies(
 ): AppDependencies {
   const database = createSqliteDatabase(config.databaseFile);
   let closed = false;
-  const close = () => {
+  let shuttingDown = false;
+  let closingDependencies: Promise<void> | undefined;
+  const closeDatabase = () => {
     if (closed) return;
     closed = true;
     database.close();
@@ -80,6 +82,7 @@ export function createProductionDependencies(
     const tasksWithOpenAttempt = new Set<string>();
     const activityListeners = new Map<Parameters<BrowserWorkerClient["onActivity"]>[0], () => void>();
     const startBrowserClient = async (): Promise<BrowserClient> => {
+      if (shuttingDown) throw new Error("production_dependencies_closed");
       const pending = Promise.resolve().then(browserClientFactory);
       browserClient = pending;
       try {
@@ -99,10 +102,12 @@ export function createProductionDependencies(
       }
     };
     const getBrowserClient = (): Promise<BrowserClient> => {
+      if (shuttingDown) return Promise.reject(new Error("production_dependencies_closed"));
       if (recyclingBrowserClient) return recyclingBrowserClient;
       return browserClient ?? startBrowserClient();
     };
     const recycleBrowserClient = async (failedClient: BrowserClient): Promise<BrowserClient> => {
+      if (shuttingDown) throw new Error("production_dependencies_closed");
       if (resolvedBrowserClient && resolvedBrowserClient !== failedClient) return resolvedBrowserClient;
       if (recyclingBrowserClient) return recyclingBrowserClient;
       const recycling = (async () => {
@@ -113,6 +118,7 @@ export function createProductionDependencies(
         if (resolvedBrowserClient === failedClient) resolvedBrowserClient = undefined;
         browserClient = undefined;
         await failedClient.stop();
+        if (shuttingDown) throw new Error("production_dependencies_closed");
         return startBrowserClient();
       })();
       recyclingBrowserClient = recycling;
@@ -170,9 +176,9 @@ export function createProductionDependencies(
       taskEvents,
       browser: {
         async open(taskId, url) {
+          const client = await getBrowserClient();
           const firstOpenAttempt = !tasksWithOpenAttempt.has(taskId);
           tasksWithOpenAttempt.add(taskId);
-          const client = await getBrowserClient();
           try {
             return await client.open(taskId, url);
           } catch (error) {
@@ -190,13 +196,13 @@ export function createProductionDependencies(
           await (await getBrowserClient()).invalidateExecution?.(taskId, executionEpoch);
         },
         async releaseTask(taskId) {
-          tasksWithOpenAttempt.delete(taskId);
           const client = await getBrowserClient();
           try {
             await client.releaseTask?.(taskId);
           } catch {
             await recycleBrowserClient(client);
           }
+          tasksWithOpenAttempt.delete(taskId);
         },
         onActivity(listener) {
           activityListeners.set(listener, resolvedBrowserClient?.onActivity?.(listener) ?? noop);
@@ -245,17 +251,31 @@ export function createProductionDependencies(
       taskEvents,
       adapterHealth,
       async close() {
+        if (closingDependencies) return closingDependencies;
         if (closed) return;
-        try {
-          if (recyclingBrowserClient) await (await recyclingBrowserClient).stop();
-          else if (browserClient) await (await browserClient).stop();
-        } finally {
-          close();
-        }
+        shuttingDown = true;
+        const operation = (async () => {
+          try {
+            if (recyclingBrowserClient) {
+              try {
+                const client = await recyclingBrowserClient;
+                await client.stop();
+              } catch {
+                // Recycling either stopped the old Worker or failed before owning a replacement.
+              }
+            } else if (browserClient) {
+              await (await browserClient).stop();
+            }
+          } finally {
+            closeDatabase();
+          }
+        })();
+        closingDependencies = operation;
+        return operation;
       }
     };
   } catch (error) {
-    close();
+    closeDatabase();
     throw error;
   }
 }

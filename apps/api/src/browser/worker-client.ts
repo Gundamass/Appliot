@@ -171,7 +171,7 @@ export class BrowserWorkerClient {
       if (response.type !== "stopped") {
         throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
       }
-      await exitPromise;
+      await withTimeout(exitPromise, this.shutdownTimeoutMs, "浏览器 Worker 关闭后未退出");
     } catch {
       await this.terminate();
     }
@@ -283,4 +283,20 @@ function hasRequestBoundActivity(value: unknown): boolean {
     && typeof value.response === "object" && value.response !== null
     && "type" in value.response
     && value.response.type === "activity";
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }

@@ -772,6 +772,28 @@ describe("application task routes", () => {
     expect(cancelled.json()).toMatchObject({ state: "cancelled", commands: [] });
   });
 
+  it("still releases the browser task when execution invalidation fails during cancellation", async () => {
+    const releaseTask = vi.fn(async () => undefined);
+    const { app } = await buildApp({
+      async invalidateExecution() {
+        throw new Error("worker disconnected");
+      },
+      releaseTask
+    });
+    const created = await app.inject({
+      method: "POST", url: "/api/applications", payload: { applicationUrl: "https://jobs.example.test/cancel" }
+    });
+    const taskId = created.json().id as string;
+
+    const cancelled = await app.inject({
+      method: "POST", url: `/api/applications/${taskId}/commands`, payload: { type: "cancel" }
+    });
+
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json()).toMatchObject({ state: "cancelled", commands: [] });
+    expect(releaseTask).toHaveBeenCalledWith(taskId);
+  });
+
   it("persists question answers and rejects a cross-task promotion outside the current task state", async () => {
     const { app, profileRepository } = await buildQuestionApp();
     const first = await app.inject({

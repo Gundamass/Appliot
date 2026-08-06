@@ -479,7 +479,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       const actor = requireActor(taskId);
       invalidateRunGeneration(taskId);
       progress.cancel(taskId);
-      await invalidateExecution(taskId);
+      await invalidateExecution(taskId).catch(() => undefined);
       await dependencies.browser.releaseTask?.(taskId);
       sendApplicationEvent(actor, { type: "CANCEL" });
       if (activeBrowserTaskId === taskId) activeBrowserTaskId = undefined;
