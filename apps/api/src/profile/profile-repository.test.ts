@@ -75,6 +75,66 @@ describe("ProfileRepository", () => {
     }]);
   });
 
+  it.each([
+    {
+      name: "the fact is only user-confirmed",
+      status: "user_confirmed",
+      evidence: [{
+        documentId: "user",
+        page: 1,
+        text: "用户补充：work[0].description",
+        extraction: "user"
+      }]
+    },
+    {
+      name: "an evidence item is not user-authored",
+      status: "user_corrected",
+      evidence: [{
+        documentId: "resume",
+        page: 1,
+        text: "用户补充：work[0].description",
+        extraction: "pdf_text"
+      }]
+    },
+    {
+      name: "the legacy text is only approximately equal",
+      status: "user_corrected",
+      evidence: [{
+        documentId: "user",
+        page: 1,
+        text: "用户补充：work[0].description ",
+        extraction: "user"
+      }]
+    },
+    {
+      name: "one of multiple evidence items does not match",
+      status: "user_corrected",
+      evidence: [{
+        documentId: "user",
+        page: 1,
+        text: "用户补充：work[0].description",
+        extraction: "user"
+      }, {
+        documentId: "user",
+        page: 1,
+        text: "负责接口优化",
+        extraction: "user"
+      }]
+    }
+  ])("does not normalize legacy evidence when $name", ({ status, evidence }) => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createProfileRepository(database);
+    const fact = repository.upsertUserFact({
+      fieldPath: "work[0].description",
+      value: "负责接口优化"
+    });
+    database.prepare("UPDATE profile_facts SET status = ?, evidence_json = ? WHERE id = ?")
+      .run(status, JSON.stringify(evidence), fact.id);
+
+    expect(repository.resolveForTask("task-1", "work[0].description")?.evidence).toEqual(evidence);
+  });
+
   it("updates the reviewed semantic equivalent instead of creating a competing fact", () => {
     const repository = createTestProfileRepository();
     const first = repository.upsertUserFact({ fieldPath: "work[0].title", value: "Java 后端实习" });

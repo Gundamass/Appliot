@@ -64,6 +64,7 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
     }
 
     const semantic = semanticDecision.semantic;
+    const splitDateSelect = isSplitDateSelect(field, semantic);
     const existing = dependencies.profileRepository.resolveForTask(taskId, semantic);
     if (existing?.scope === "application") {
       return resolvedTaskAnswer(field, semantic, existing.value, existing.evidence);
@@ -73,27 +74,32 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
       fieldId: field.id,
       semantic,
       label: field.label,
-      type: fieldTypeForRag(field.type),
-      ...(field.options.length === 0 ? {} : { options: field.options }),
+      type: splitDateSelect ? "date" : fieldTypeForRag(field.type),
+      ...(field.options.length === 0 || splitDateSelect ? {} : { options: field.options }),
       validators: field.required ? ["required"] : []
     });
-    const requiresContentReview = decision.status === "needs_review"
-      || (semantic === "selfEvaluation" && existing?.scope === "profile");
     const resolvedValue = decision.value === undefined
       ? undefined
       : projectDateComponent(field, semantic, decision.value);
+    const projectedOptionMismatch = splitDateSelect
+      && (decision.status === "verified_auto" || decision.status === "needs_review")
+      && (typeof resolvedValue !== "string" || !field.options.includes(resolvedValue));
+    const decisionStatus = projectedOptionMismatch ? "blocked" as const : decision.status;
+    const effectiveValue = projectedOptionMismatch ? undefined : resolvedValue;
+    const requiresContentReview = decisionStatus === "needs_review"
+      || (semantic === "selfEvaluation" && existing?.scope === "profile");
     const assessmentStatus = requiresContentReview
       ? "review" as const
-      : decision.status === "verified_auto"
+      : decisionStatus === "verified_auto"
         ? "ready" as const
-        : decision.status === "blocked"
+        : decisionStatus === "blocked"
           ? "unsupported" as const
           : "missing" as const;
     return {
-      status: decision.status === "verified_auto" || decision.status === "needs_review"
+      status: decisionStatus === "verified_auto" || decisionStatus === "needs_review"
         ? "verified" as const
-        : decision.status,
-      ...(resolvedValue === undefined ? {} : { value: resolvedValue }),
+        : decisionStatus,
+      ...(effectiveValue === undefined ? {} : { value: effectiveValue }),
       ...(decision.question === undefined ? {} : { question: decision.question }),
       fieldPath: semantic,
       requiresContentReview,
@@ -121,13 +127,23 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
 }
 
 function projectDateComponent(field: FormField, semantic: string, value: unknown): unknown {
-  if (!/(?:^|\.)(?:startDate|endDate|birthDate|date)$/u.test(semantic)
+  if (!isCanonicalDateSemantic(semantic)
     || typeof value !== "string"
     || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return value;
   if (/\s年$/u.test(field.label)) return value.slice(0, 4);
   if (/\s月$/u.test(field.label)) return value.slice(5, 7);
   if (/\s日$/u.test(field.label)) return value.slice(8, 10);
   return value;
+}
+
+function isSplitDateSelect(field: FormField, semantic: string): boolean {
+  return fieldTypeForRag(field.type) === "select"
+    && isCanonicalDateSemantic(semantic)
+    && /\s[年月日]$/u.test(field.label);
+}
+
+function isCanonicalDateSemantic(semantic: string): boolean {
+  return /(?:^|\.)(?:startDate|endDate|birthDate|date)$/u.test(semantic);
 }
 
 export function fieldPathForApplicationAnswer(

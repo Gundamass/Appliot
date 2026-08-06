@@ -1,6 +1,7 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import type { FormField, FormSnapshot, WorkerActivity } from "@resume/contracts";
+import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
 import type { FieldSemanticResolver } from "./applications/field-semantic-resolver.js";
 import { loadConfig } from "./config.js";
 import { createApp } from "./app.js";
@@ -159,9 +160,9 @@ describe("production dependency composition", () => {
 
   it("projects canonical profile dates into explicit year and month controls", async () => {
     const semanticResolver: FieldSemanticResolver = {
-      resolve: vi.fn(async () => ({
+      resolve: vi.fn(async (field) => ({
         status: "mapped" as const,
-        semantic: "work[0].startDate",
+        semantic: field.semanticHint ?? "work[0].startDate",
         source: "exact_alias" as const,
         confidence: 1
       }))
@@ -186,10 +187,80 @@ describe("production dependency composition", () => {
       .resolves.toMatchObject({ status: "verified", value: "2026" });
     await expect(resolveField("task-1", applicationField("开始时间 月", { id: "month" })))
       .resolves.toMatchObject({ status: "verified", value: "04" });
+    await expect(resolveField("task-1", applicationField("结束时间 日", {
+      id: "day",
+      semanticHint: "work[0].endDate"
+    }))).resolves.toMatchObject({ status: "verified", value: "12" });
+    await expect(resolveField("task-1", applicationField("出生日期 年", {
+      id: "birth-year",
+      semanticHint: "basics.birthDate"
+    }))).resolves.toMatchObject({ status: "verified", value: "2026" });
+    await expect(resolveField("task-1", applicationField("获奖日期 月", {
+      id: "award-month",
+      semanticHint: "awards[0].date"
+    }))).resolves.toMatchObject({ status: "verified", value: "04" });
     await expect(resolveField("task-1", applicationField("开始时间", { id: "full" })))
       .resolves.toMatchObject({ status: "verified", value: "2026-04-12" });
     await expect(resolveField("task-1", applicationField("开始时间 月", { id: "nonstandard" })))
       .resolves.toMatchObject({ status: "verified", value: "2026/04" });
+    await expect(resolveField("task-1", applicationField("年份 年", {
+      id: "non-date-semantic",
+      semanticHint: "work[0].description"
+    }))).resolves.toMatchObject({ status: "verified", value: "2026-04-12" });
+    await expect(resolveField("task-1", applicationField("开始时间 年份", { id: "approximate-label" })))
+      .resolves.toMatchObject({ status: "verified", value: "2026-04-12" });
+  });
+
+  it("validates a full profile date before projecting it into a select option", async () => {
+    const fact = {
+      id: "start-date",
+      fieldPath: "work[0].startDate",
+      value: "2026-04-12",
+      status: "user_corrected" as const,
+      confidence: 1,
+      scope: "profile" as const,
+      evidence: [{
+        documentId: "user",
+        page: 1,
+        text: "Corrected value: \"2026-04-12\"",
+        extraction: "user" as const
+      }],
+      revision: 1
+    };
+    const profileRepository: ProfileRepositoryPort = {
+      resolveForTask: () => fact,
+      listActive: () => [fact],
+      putTaskAnswer: () => fact,
+      correct: () => fact
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver: {
+        resolve: async () => ({
+          status: "mapped" as const,
+          semantic: "work[0].startDate",
+          source: "exact_alias" as const,
+          confidence: 1
+        })
+      },
+      ragService: createRagService({ repository: profileRepository }),
+      profileRepository
+    });
+
+    await expect(resolveField("task-1", applicationField("开始时间 年", {
+      type: "select",
+      options: ["2025", "2026"]
+    }))).resolves.toMatchObject({
+      status: "verified",
+      value: "2026",
+      assessment: { status: "ready" }
+    });
+    await expect(resolveField("task-1", applicationField("开始时间 年", {
+      type: "select",
+      options: ["2025"]
+    }))).resolves.toMatchObject({
+      status: "blocked",
+      assessment: { status: "unsupported" }
+    });
   });
 
   it("preserves DJI catalog provenance in production field assessments", async () => {
