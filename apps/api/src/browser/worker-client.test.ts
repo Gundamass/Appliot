@@ -96,7 +96,8 @@ describe("BrowserWorkerClient", () => {
     const client = await BrowserWorkerClient.start({
       profileDir,
       headless: true,
-      requestTimeoutMs: 500,
+      requestTimeoutMs: 5_000,
+      shutdownTimeoutMs: 100,
       workerEntry: fileURLToPath(new URL("./fixtures/unresponsive-worker.ts", import.meta.url))
     });
     clients.push(client);
