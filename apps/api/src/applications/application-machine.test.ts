@@ -1161,7 +1161,7 @@ describe("application machine", () => {
     await expect(service.resume("task-1")).rejects.toThrow("browser_task_in_use");
     expect(observe).not.toHaveBeenCalled();
 
-    service.cancel("task-2");
+    await service.cancel("task-2");
     await service.resume("task-1");
     expect(service.activeBrowserTaskId()).toBe("task-1");
     expect(observe).toHaveBeenCalledOnce();
@@ -1565,7 +1565,7 @@ describe("application machine", () => {
     const running = service.runUntilPause("task-1");
     await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
 
-    service.cancel("task-1");
+    await service.cancel("task-1");
 
     expect(service.state("task-1").value).toBe("cancelled");
     expect(service.progress("task-1").busy).toBe(false);

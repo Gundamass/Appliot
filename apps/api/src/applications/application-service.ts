@@ -44,6 +44,7 @@ interface BrowserPort {
   observe(taskId: string): Promise<FormSnapshot>;
   execute(command: ExecutableCommand, executionEpoch?: number): Promise<ExecutionResult>;
   invalidateExecution?(taskId: string, executionEpoch: number): Promise<void>;
+  releaseTask?(taskId: string): Promise<void>;
   onActivity?(listener: (activity: WorkerActivity) => void): () => void;
 }
 
@@ -60,7 +61,7 @@ export interface ApplicationService {
   fieldCoverage(taskId: string): ApplicationFieldCoverage | undefined;
   approveReview(taskId: string, reviewId: string, editedValue?: string): Promise<void>;
   rejectReview(taskId: string, reviewId: string): Promise<void>;
-  cancel(taskId: string): void;
+  cancel(taskId: string): Promise<void>;
   dispose(taskId: string): void;
   runUntilPause(taskId: string, initialSnapshot?: FormSnapshot): Promise<void>;
   requestIntermediateClick(taskId: string, actionId: string): Promise<void>;
@@ -225,9 +226,14 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     return epoch;
   };
 
-  const invalidateRun = (taskId: string): number => {
+  const invalidateRunGeneration = (taskId: string): number => {
     const generation = (runGenerations.get(taskId) ?? 0) + 1;
     runGenerations.set(taskId, generation);
+    return generation;
+  };
+
+  const invalidateRun = (taskId: string): number => {
+    const generation = invalidateRunGeneration(taskId);
     void invalidateExecution(taskId).catch(() => undefined);
     return generation;
   };
@@ -469,10 +475,12 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       persist(actor, snapshot);
     },
 
-    cancel(taskId: string): void {
+    async cancel(taskId: string): Promise<void> {
       const actor = requireActor(taskId);
-      invalidateRun(taskId);
+      invalidateRunGeneration(taskId);
       progress.cancel(taskId);
+      await invalidateExecution(taskId);
+      await dependencies.browser.releaseTask?.(taskId);
       sendApplicationEvent(actor, { type: "CANCEL" });
       if (activeBrowserTaskId === taskId) activeBrowserTaskId = undefined;
       const snapshot = latestSnapshots.get(taskId);
