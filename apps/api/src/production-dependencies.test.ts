@@ -157,6 +157,41 @@ describe("production dependency composition", () => {
     }));
   });
 
+  it("projects canonical profile dates into explicit year and month controls", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "work[0].startDate",
+        source: "exact_alias" as const,
+        confidence: 1
+      }))
+    };
+    const ragService = {
+      resolveField: vi.fn(async ({ fieldId }: { fieldId: string }) => ({
+        fieldId,
+        status: "verified_auto" as const,
+        value: fieldId === "nonstandard" ? "2026/04" : "2026-04-12",
+        evidence: [],
+        confidence: 1,
+        validators: []
+      }))
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService,
+      profileRepository: { resolveForTask: vi.fn() }
+    });
+
+    await expect(resolveField("task-1", applicationField("开始时间 年", { id: "year" })))
+      .resolves.toMatchObject({ status: "verified", value: "2026" });
+    await expect(resolveField("task-1", applicationField("开始时间 月", { id: "month" })))
+      .resolves.toMatchObject({ status: "verified", value: "04" });
+    await expect(resolveField("task-1", applicationField("开始时间", { id: "full" })))
+      .resolves.toMatchObject({ status: "verified", value: "2026-04-12" });
+    await expect(resolveField("task-1", applicationField("开始时间 月", { id: "nonstandard" })))
+      .resolves.toMatchObject({ status: "verified", value: "2026/04" });
+  });
+
   it("preserves DJI catalog provenance in production field assessments", async () => {
     const semanticResolver: FieldSemanticResolver = {
       resolve: vi.fn(async () => ({

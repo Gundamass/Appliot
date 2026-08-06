@@ -37,8 +37,7 @@ export function normalizeForm(raw: RawFormObservation, context: FormContext): Fo
 }
 
 function normalizeField(raw: RawFormField): FormField {
-  const label = [raw.explicitLabel, raw.wrappingLabel, raw.ariaLabel, raw.ariaLabelledBy, raw.nearbyText, raw.name]
-    .find((candidate) => candidate.trim() !== "") ?? "未命名字段";
+  const label = fieldLabel(raw);
   return {
     id: opaqueId("field", raw.path),
     label,
@@ -48,6 +47,20 @@ function normalizeField(raw: RawFormField): FormField {
     currentValue: raw.value,
     ...(raw.name === "" ? {} : { semanticHint: raw.name })
   };
+}
+
+function fieldLabel(raw: RawFormField): string {
+  const dateComponent = /^[年月日]$/u.test(raw.nearbyText) ? raw.nearbyText : "";
+  const primary = [
+    raw.explicitLabel,
+    raw.wrappingLabel,
+    raw.ariaLabel,
+    raw.ariaLabelledBy,
+    dateComponent === "" ? raw.nearbyText : "",
+    raw.name
+  ].find((candidate) => candidate.trim() !== "");
+  if (primary === undefined) return dateComponent || "未命名字段";
+  return dateComponent === "" ? primary : `${primary} ${dateComponent}`;
 }
 
 function fieldType(raw: RawFormField): FormField["type"] {

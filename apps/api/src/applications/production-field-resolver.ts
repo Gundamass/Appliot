@@ -79,6 +79,9 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
     });
     const requiresContentReview = decision.status === "needs_review"
       || (semantic === "selfEvaluation" && existing?.scope === "profile");
+    const resolvedValue = decision.value === undefined
+      ? undefined
+      : projectDateComponent(field, semantic, decision.value);
     const assessmentStatus = requiresContentReview
       ? "review" as const
       : decision.status === "verified_auto"
@@ -90,7 +93,7 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
       status: decision.status === "verified_auto" || decision.status === "needs_review"
         ? "verified" as const
         : decision.status,
-      ...(decision.value === undefined ? {} : { value: decision.value }),
+      ...(resolvedValue === undefined ? {} : { value: resolvedValue }),
       ...(decision.question === undefined ? {} : { question: decision.question }),
       fieldPath: semantic,
       requiresContentReview,
@@ -115,6 +118,16 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
       })
     };
   };
+}
+
+function projectDateComponent(field: FormField, semantic: string, value: unknown): unknown {
+  if (!/(?:^|\.)(?:startDate|endDate|birthDate|date)$/u.test(semantic)
+    || typeof value !== "string"
+    || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return value;
+  if (/\s年$/u.test(field.label)) return value.slice(0, 4);
+  if (/\s月$/u.test(field.label)) return value.slice(5, 7);
+  if (/\s日$/u.test(field.label)) return value.slice(8, 10);
+  return value;
 }
 
 export function fieldPathForApplicationAnswer(

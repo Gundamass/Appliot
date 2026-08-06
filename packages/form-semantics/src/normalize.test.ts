@@ -48,4 +48,25 @@ describe("form semantics", () => {
       expect.objectContaining({ text: "提交申请", class: "terminal_submit" })
     ]));
   });
+
+  it("preserves year and month placeholders for split date controls", () => {
+    const dom = new JSDOM(`
+      <form>
+        <label>开始时间
+          <input id="start-year" placeholder="年" required>
+          <input id="start-month" placeholder="月" required>
+        </label>
+      </form>
+    `, { url: "https://ats.example.test/application" });
+    const raw = collectRawFormObservation(dom.window.document);
+
+    const snapshot = normalizeForm(raw, {
+      taskId: "task-1",
+      url: dom.window.location.href,
+      title: "Application",
+      stage: "application_form"
+    });
+
+    expect(snapshot.fields.map((field) => field.label)).toEqual(["开始时间 年", "开始时间 月"]);
+  });
 });
