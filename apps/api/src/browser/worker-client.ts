@@ -142,6 +142,13 @@ export class BrowserWorkerClient {
     await this.request({ type: "invalidate_execution", taskId, executionEpoch });
   }
 
+  async releaseTask(taskId: string): Promise<void> {
+    const response = await this.request({ type: "release_task", taskId });
+    if (response.type !== "released") {
+      throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+    }
+  }
+
   onActivity(listener: (activity: WorkerActivity) => void): () => void {
     this.activityListeners.add(listener);
     return () => this.activityListeners.delete(listener);
@@ -152,11 +159,15 @@ export class BrowserWorkerClient {
       return;
     }
     const exitPromise = new Promise<void>((resolve) => this.child.once("exit", () => resolve()));
-    const response = await this.request({ type: "shutdown" });
-    if (response.type !== "stopped") {
-      throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+    try {
+      const response = await this.request({ type: "shutdown" });
+      if (response.type !== "stopped") {
+        throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+      }
+      await exitPromise;
+    } catch {
+      await this.terminate();
     }
-    await exitPromise;
   }
 
   private request(rawRequest: WorkerRequest): Promise<WorkerResponse> {
