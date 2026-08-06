@@ -104,6 +104,10 @@ export function createIpcServer(session: BrowserSessionManager, channel: IpcChan
       session.invalidateExecution(request.taskId, request.executionEpoch);
       return { type: "ready" };
     }
+    if (request.type === "release_task") {
+      session.releaseTask(request.taskId);
+      return { type: "released", taskId: request.taskId };
+    }
     if (request.type === "shutdown") {
       unsubscribeActivity?.();
       unsubscribeActivity = undefined;

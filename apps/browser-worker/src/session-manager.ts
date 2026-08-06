@@ -104,6 +104,18 @@ export class BrowserSessionManager {
     this.executionEpochs.set(taskId, Math.max(currentEpoch, executionEpoch));
   }
 
+  releaseTask(taskId: string): void {
+    this.executionEpochs.delete(taskId);
+    if (this.activeTaskId !== taskId) return;
+    this.activityMonitor?.stop();
+    this.activityMonitor = undefined;
+    this.executor = undefined;
+    this.activeTaskId = undefined;
+    this.monitoredTaskId = undefined;
+    this.trustedOrigin = undefined;
+    this.preferredPage = undefined;
+  }
+
   async open(taskId: string, value: string): Promise<Extract<WorkerResponse, { type: "opened" }>> {
     await this.ensureActivePage();
     if (!this.page) {

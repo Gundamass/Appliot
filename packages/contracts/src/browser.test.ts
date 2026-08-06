@@ -206,12 +206,25 @@ describe("browser command contracts", () => {
       url: "https://jobs.example.test/apply"
     }).success).toBe(true);
     expect(WorkerRequestSchema.safeParse({ type: "shutdown" }).success).toBe(true);
+    expect(WorkerRequestSchema.parse({ type: "release_task", taskId: "task-1" })).toEqual({
+      type: "release_task",
+      taskId: "task-1"
+    });
+    expect(WorkerRequestSchema.safeParse({
+      type: "release_task",
+      taskId: "task-1",
+      force: true
+    }).success).toBe(false);
     expect(WorkerRequestSchema.safeParse({
       type: "handshake",
       approvalKey: "too-short"
     }).success).toBe(false);
     expect(WorkerResponseSchema.safeParse({ type: "ready" }).success).toBe(true);
     expect(WorkerResponseSchema.safeParse({ type: "stopped" }).success).toBe(true);
+    expect(WorkerResponseSchema.parse({ type: "released", taskId: "task-1" })).toEqual({
+      type: "released",
+      taskId: "task-1"
+    });
     expect(WorkerResponseSchema.safeParse({
       type: "activity",
       activity: { type: "page_stable", taskId: "task-1", fingerprint: "page-safe" }

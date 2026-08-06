@@ -33,6 +33,7 @@ class FakePage {
 
 class FakeContext extends EventEmitter {
   private readonly openPages: FakePage[];
+  closeCalls = 0;
 
   constructor(...pages: FakePage[]) {
     super();
@@ -55,7 +56,7 @@ class FakeContext extends EventEmitter {
     this.emit("page", page);
   }
 
-  async close(): Promise<void> {}
+  async close(): Promise<void> { this.closeCalls += 1; }
 }
 
 vi.mock("playwright-core", () => ({
@@ -220,6 +221,23 @@ describe("BrowserSessionManager 页面生命周期", () => {
     initial.close();
 
     await expect(manager.observe("task-6")).rejects.toThrow("没有同源的可用投递页面");
+    await manager.stop();
+  });
+
+  it("释放旧任务后保留浏览器上下文并允许新任务接管跨源残留页面", async () => {
+    const initial = new FakePage("initial");
+    const context = new FakeContext(initial);
+    const manager = createManager(context);
+    await manager.start(approvalKey);
+    await manager.observe("task-1");
+    context.addPage(new FakePage("other", "other.example"));
+    initial.close();
+
+    manager.releaseTask("task-1");
+    const opened = await manager.open("task-2", "https://jobs.example.test/apply");
+
+    expect(opened.taskId).toBe("task-2");
+    expect(context.closeCalls).toBe(0);
     await manager.stop();
   });
 });

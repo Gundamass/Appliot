@@ -97,4 +97,46 @@ describe("startIpcServer", () => {
     await vi.waitFor(() => expect(invalidateExecution).toHaveBeenCalledWith("task-1", 2));
     finishExecution();
   });
+
+  it("releases one task session without shutting down the browser context", async () => {
+    const sent: unknown[] = [];
+    let messageListener: ((message: unknown) => void) | undefined;
+    const ipc = {
+      on: (_event: string, listener: (message: unknown) => void) => { messageListener = listener; },
+      send: (message: unknown, callback?: (error: null) => void) => {
+        sent.push(message);
+        callback?.(null);
+        return true;
+      },
+      disconnect: vi.fn(),
+      stderr: { write: vi.fn() }
+    };
+    const releaseTask = vi.fn();
+    const session = {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+      subscribeActivity: vi.fn(() => () => undefined),
+      releaseTask
+    };
+    createIpcServer(session as never, ipc);
+    messageListener?.({
+      requestId: "handshake-1",
+      request: { type: "handshake", approvalKey: "a".repeat(43) }
+    });
+    await vi.waitFor(() => expect(sent).toContainEqual({
+      requestId: "handshake-1",
+      response: { type: "ready" }
+    }));
+
+    messageListener?.({
+      requestId: "release-1",
+      request: { type: "release_task", taskId: "task-1" }
+    });
+
+    await vi.waitFor(() => expect(releaseTask).toHaveBeenCalledWith("task-1"));
+    expect(sent).toContainEqual({
+      requestId: "release-1",
+      response: { type: "released", taskId: "task-1" }
+    });
+  });
 });
