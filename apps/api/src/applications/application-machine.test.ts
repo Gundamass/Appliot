@@ -2127,6 +2127,30 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("does not interrupt the task for an unknown optional field", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const checkpoints = createCheckpointRepository(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{ id: "field-optional", label: "Additional Information", type: "textarea", required: false, options: [], currentValue: "" }],
+      actions: [{ id: "action-submit", text: "Submit Application", class: "terminal_submit" }]
+    };
+    const service = createApplicationService({
+      checkpoints,
+      browser: { observe: async () => form, execute: vi.fn() },
+      resolveField: async () => ({ status: "needs_question", question: "Missing optional answer" }),
+      approve: () => "unused"
+    });
+
+    service.start({ taskId: "task-optional", applicationUrl: form.url });
+    await service.runUntilPause("task-optional");
+
+    expect(service.state("task-optional").value).toBe("review_locked");
+    expect(service.state("task-optional").context.questions).toEqual([]);
+    database.close();
+  });
+
   it("continues later fields after a non-terminal field execution failure", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

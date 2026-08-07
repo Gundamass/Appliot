@@ -733,7 +733,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         return !hasUserValue(observed?.currentValue) && decision.status !== "deferred";
       });
       const questions = unresolved
-        .filter(({ field, decision }) => decision.status === "needs_question" || failedFieldIds.has(field.id))
+        .filter(({ field, decision }) => field.required
+          && (decision.status === "needs_question" || failedFieldIds.has(field.id)))
         .map(({ field, decision }): ApplicationQuestion => ({
           id: field.id,
           fieldId: field.id,
