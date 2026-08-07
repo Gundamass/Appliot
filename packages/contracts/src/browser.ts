@@ -192,7 +192,8 @@ export const WorkerResponseSchema = z.discriminatedUnion("type", [
     status: z.enum(["applied", "blocked", "failed"]),
     actualValue: z.unknown(),
     snapshot: FormSnapshotSchema,
-    errors: z.array(z.string())
+    errors: z.array(z.string()),
+    warnings: z.array(z.string()).optional()
   }).strict(),
   z.object({
     type: z.literal("worker_error"),

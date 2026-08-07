@@ -4,6 +4,7 @@ import type { Locator, Route } from "playwright-core";
 import { basename } from "node:path";
 import { BrowserObserver, type BrowserObservation } from "./observer.js";
 import type { ActivityMonitor } from "./activity-monitor.js";
+import { selectCustomControl } from "./control-adapters.js";
 
 type ExecutionResponse = Extract<WorkerResponse, { type: "execution_result" }>;
 
@@ -32,6 +33,7 @@ export class ControlledExecutor {
       return this.blocked(command, "stale_snapshot", current?.snapshot);
     }
     let expectedReadback: unknown;
+    const warnings: string[] = [];
 
     try {
       verifyAndConsumeApproval(command, this.approvalKey, this.approvals);
@@ -70,6 +72,10 @@ export class ControlledExecutor {
           if (field?.type === "radio") {
             await locator.check();
             expectedReadback = true;
+          } else if (field?.controlKind === "custom") {
+            const selected = await selectCustomControl(locator, command.value);
+            expectedReadback = selected.selectedValue;
+            if (selected.recovered) warnings.push("control_recovered_after_readback_mismatch");
           } else {
             expectedReadback = (await locator.selectOption({ label: command.value }))[0];
           }
@@ -145,7 +151,8 @@ export class ControlledExecutor {
         snapshot: this.current.snapshot,
         errors: readbackMatches
           ? this.current.snapshot.errors
-          : [command.type === "click_intermediate" ? "intermediate_no_progress" : "readback_mismatch"]
+          : [command.type === "click_intermediate" ? "intermediate_no_progress" : "readback_mismatch"],
+        ...(warnings.length === 0 ? {} : { warnings })
       };
     } catch (error) {
       this.current = await this.observer.observe(command.taskId);

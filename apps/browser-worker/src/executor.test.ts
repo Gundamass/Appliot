@@ -362,6 +362,58 @@ describe("controlled browser executor", () => {
     expect(result.snapshot.title).toBe("第二步");
   }, 30_000);
 
+  it("selects a custom year combobox by opening and choosing a visible option", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>DJI Apply</title>
+        <div class="apply-field-date">
+          <div class="title-date">起止时间</div>
+          <div class="ctrl-date">
+            <div id="year" role="combobox" aria-label="年" tabindex="0">年</div>
+            <div id="year-options" role="listbox" hidden>
+              <div role="option">2025</div>
+              <div role="option">2026</div>
+            </div>
+          </div>
+        </div>
+        <script>
+          const year = document.querySelector('#year');
+          const list = document.querySelector('#year-options');
+          year.addEventListener('click', () => { list.hidden = false; });
+          list.addEventListener('click', (event) => {
+            const option = event.target.closest('[role=option]');
+            if (!option) return;
+            year.textContent = option.textContent;
+            list.hidden = true;
+          });
+        </script>`);
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-custom-select-"));
+    temporaryDirectories.push(profileDir);
+    const key = Buffer.alloc(32, 15);
+    const policy = new ActionPolicy(key);
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    sessions.push(session);
+    await session.start(key.toString("base64url"));
+    await session.open("task-custom-select", `http://127.0.0.1:${address.port}/apply`);
+
+    const snapshot = await session.observe("task-custom-select");
+    const year = snapshot.fields.find((field) => field.label === "起止时间 年");
+    if (!year) throw new Error("custom year control was not observed");
+    const result = await session.execute(approvedSelect(policy, snapshot, year.id, "2026"));
+
+    expect(result).toMatchObject({
+      status: "applied",
+      actualValue: "2026",
+      errors: []
+    });
+  }, 30_000);
+
   it("fails an intermediate click that produces no observable page change", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");
