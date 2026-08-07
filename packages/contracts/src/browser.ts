@@ -15,6 +15,7 @@ export const FormFieldSchema = z.object({
   required: z.boolean(),
   options: z.array(z.string()),
   currentValue: z.unknown(),
+  controlKind: z.enum(["native", "custom"]).optional(),
   semanticHint: z.string().optional(),
   semanticSource: z.enum(["dji_catalog"]).optional()
 }).strict().superRefine((field, context) => {

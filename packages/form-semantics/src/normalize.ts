@@ -45,6 +45,7 @@ function normalizeField(raw: RawFormField): FormField {
     required: raw.required,
     options: raw.options,
     currentValue: raw.value,
+    ...(raw.controlKind === undefined ? {} : { controlKind: raw.controlKind }),
     ...(raw.name === "" ? {} : { semanticHint: raw.name })
   };
 }

@@ -6,6 +6,7 @@ import type {
   FieldSemanticContext,
   FieldSemanticResolver
 } from "./field-semantic-resolver.js";
+import { isCanonicalDateSemantic, projectDateComponent } from "./control-value.js";
 
 interface ProductionFieldResolverDependencies {
   semanticResolver: FieldSemanticResolver;
@@ -80,10 +81,11 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
     });
     const resolvedValue = decision.value === undefined
       ? undefined
-      : projectDateComponent(field, semantic, decision.value);
+      : projectDateComponent(field.label, semantic, decision.value);
     const projectedOptionMismatch = splitDateSelect
       && (decision.status === "verified_auto" || decision.status === "needs_review")
-      && (typeof resolvedValue !== "string" || !field.options.includes(resolvedValue));
+      && (typeof resolvedValue !== "string"
+        || (field.controlKind !== "custom" && !field.options.includes(resolvedValue)));
     const decisionStatus = projectedOptionMismatch ? "blocked" as const : decision.status;
     const effectiveValue = projectedOptionMismatch ? undefined : resolvedValue;
     const requiresContentReview = decisionStatus === "needs_review"
@@ -126,24 +128,10 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
   };
 }
 
-function projectDateComponent(field: FormField, semantic: string, value: unknown): unknown {
-  if (!isCanonicalDateSemantic(semantic)
-    || typeof value !== "string"
-    || !/^\d{4}-\d{2}-\d{2}$/u.test(value)) return value;
-  if (/\s年$/u.test(field.label)) return value.slice(0, 4);
-  if (/\s月$/u.test(field.label)) return value.slice(5, 7);
-  if (/\s日$/u.test(field.label)) return value.slice(8, 10);
-  return value;
-}
-
 function isSplitDateSelect(field: FormField, semantic: string): boolean {
   return fieldTypeForRag(field.type) === "select"
     && isCanonicalDateSemantic(semantic)
     && /\s[年月日]$/u.test(field.label);
-}
-
-function isCanonicalDateSemantic(semantic: string): boolean {
-  return /(?:^|\.)(?:startDate|endDate|birthDate|date)$/u.test(semantic);
 }
 
 export function fieldPathForApplicationAnswer(

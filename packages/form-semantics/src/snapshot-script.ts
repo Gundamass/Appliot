@@ -6,6 +6,7 @@ export interface RawFormField {
   required: boolean;
   value: string | boolean;
   options: string[];
+  controlKind?: "native" | "custom";
   explicitLabel: string;
   wrappingLabel: string;
   ariaLabel: string;

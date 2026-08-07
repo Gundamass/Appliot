@@ -113,6 +113,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       options: element instanceof HTMLSelectElement
         ? [...element.options].filter((option) => option.value !== "").map((option) => normalized(option.textContent))
         : [],
+      controlKind: customSelect ? "custom" : "native",
       explicitLabel,
       wrappingLabel: itemLabel || wrappingLabel,
       ariaLabel: normalized(element.getAttribute("aria-label")),

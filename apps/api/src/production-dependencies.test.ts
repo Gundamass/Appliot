@@ -272,6 +272,11 @@ describe("production dependency composition", () => {
       type: "select",
       options: []
     }))).resolves.toMatchObject({ status: "blocked" });
+    await expect(resolveField("task-1", applicationField("开始时间 年", {
+      type: "select",
+      options: [],
+      controlKind: "custom"
+    }))).resolves.toMatchObject({ status: "verified", value: "2026" });
     await expect(resolverForFact({
       ...fact,
       evidence: [{ ...fact.evidence[0]!, text: "Corrected value: \"2025-04-12\"" }]
