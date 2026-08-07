@@ -32,14 +32,16 @@ test.afterAll(async () => {
 });
 
 for (const viewport of viewports) {
-  test(`投递工作台在${viewport.width}px视口下保持可用布局`, async ({ page }) => {
+  test(`投递工作台在 ${viewport.width}px 视口下保持可用布局`, async ({ page }) => {
     await page.setViewportSize({ width: viewport.width, height: viewport.height });
     await mockTask(page);
     await page.goto(`${baseUrl}/applications/${taskId}`);
 
     await expect(page.getByRole("heading", { name: "投递任务工作台" })).toBeVisible();
-    const bodyText = await page.locator("body").innerText();
-    expect(bodyText.trim().length).toBeGreaterThan(0);
+    await expect(page.getByRole("navigation", { name: "候选人工作台" })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "候选人工作台" })
+      .getByRole("button", { name: "投递审核", exact: true }))
+      .toHaveAttribute("aria-current", "page");
 
     const dimensions = await page.evaluate(() => ({
       scrollWidth: document.documentElement.scrollWidth,
@@ -47,35 +49,30 @@ for (const viewport of viewports) {
     }));
     expect(dimensions.scrollWidth).toBeLessThanOrEqual(dimensions.viewportWidth);
 
-    if (viewport.name === "desktop") {
-      await expect(page.locator(".application-rail")).toBeVisible();
-      await expect(page.getByRole("navigation", { name: "主导航" })).toBeVisible();
-    }
-
     const layout = await page.evaluate(() => {
-      const shell = document.querySelector<HTMLElement>(".application-shell");
-      const rail = document.querySelector<HTMLElement>(".application-rail");
-      const navigation = document.querySelector<HTMLElement>(".application-rail nav");
+      const shell = document.querySelector<HTMLElement>(".profile-workspace");
+      const sidebar = document.querySelector<HTMLElement>(".workspace-sidebar");
+      const navigation = document.querySelector<HTMLElement>(".workspace-navigation");
       const workspace = document.querySelector<HTMLElement>(".task-workbench-grid");
-      if (!shell || !rail || !navigation || !workspace) throw new Error("工作台布局节点缺失");
+      if (!shell || !sidebar || !navigation || !workspace) throw new Error("工作台布局节点缺失");
       return {
         shellDisplay: getComputedStyle(shell).display,
-        railWidth: rail.getBoundingClientRect().width,
-        railMinHeight: getComputedStyle(rail).minHeight,
+        sidebarWidth: sidebar.getBoundingClientRect().width,
         navigationOverflowX: getComputedStyle(navigation).overflowX,
         workspaceColumns: getComputedStyle(workspace).gridTemplateColumns
       };
     });
 
     if (viewport.name === "desktop") {
-      expect(layout.shellDisplay).toBe("flex");
-      expect(layout.railWidth).toBeGreaterThanOrEqual(220);
+      expect(layout.shellDisplay).toBe("grid");
+      expect(layout.sidebarWidth).toBeGreaterThanOrEqual(220);
       expect(layout.workspaceColumns.split(" ")).toHaveLength(2);
     } else if (viewport.name === "tablet") {
+      expect(layout.shellDisplay).toBe("grid");
       expect(layout.workspaceColumns.split(" ")).toHaveLength(1);
     } else {
       expect(layout.shellDisplay).toBe("block");
-      expect(layout.railWidth).toBeLessThanOrEqual(viewport.width);
+      expect(layout.sidebarWidth).toBeLessThanOrEqual(viewport.width);
       expect(["auto", "scroll"]).toContain(layout.navigationOverflowX);
       expect(layout.workspaceColumns.split(" ")).toHaveLength(1);
     }

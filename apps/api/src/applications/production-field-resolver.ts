@@ -66,6 +66,7 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
 
     const semantic = semanticDecision.semantic;
     const splitDateSelect = isSplitDateSelect(field, semantic);
+    const truncatedNativeSelect = isTruncatedNativeSelect(field);
     const existing = dependencies.profileRepository.resolveForTask(taskId, semantic);
     if (existing?.scope === "application") {
       return resolvedTaskAnswer(field, semantic, existing.value, existing.evidence);
@@ -75,8 +76,8 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
       fieldId: field.id,
       semantic,
       label: field.label,
-      type: splitDateSelect ? "date" : fieldTypeForRag(field.type),
-      ...(field.options.length === 0 || splitDateSelect ? {} : { options: field.options }),
+      type: splitDateSelect ? "date" : truncatedNativeSelect ? "text" : fieldTypeForRag(field.type),
+      ...(field.options.length === 0 || splitDateSelect || truncatedNativeSelect ? {} : { options: field.options }),
       validators: field.required ? ["required"] : []
     });
     const resolvedValue = decision.value === undefined
@@ -132,6 +133,12 @@ function isSplitDateSelect(field: FormField, semantic: string): boolean {
   return fieldTypeForRag(field.type) === "select"
     && isCanonicalDateSemantic(semantic)
     && /\s[年月日]$/u.test(field.label);
+}
+
+function isTruncatedNativeSelect(field: FormField): boolean {
+  return field.type === "select"
+    && field.controlKind !== "custom"
+    && field.optionsTruncated === true;
 }
 
 export function fieldPathForApplicationAnswer(

@@ -158,6 +158,49 @@ describe("production dependency composition", () => {
     }));
   });
 
+  it("resolves truncated native selects by exact profile value instead of a partial option list", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "education[0].institution",
+        source: "exact_alias" as const,
+        confidence: 1
+      }))
+    };
+    const ragService = {
+      resolveField: vi.fn(async (_input: { options?: string[]; type?: string }) => ({
+        fieldId: "field-1",
+        status: "verified_auto" as const,
+        value: "Hefei University of Technology",
+        evidence: [],
+        confidence: 1,
+        validators: []
+      }))
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService,
+      profileRepository: { resolveForTask: vi.fn() }
+    });
+    const field = applicationField("Which university did you attend?", {
+      type: "select",
+      controlKind: "native",
+      options: ["Aalborg University", "Aalto University"],
+      optionsTruncated: true
+    });
+
+    await expect(resolveField("task-1", field, "deterministic")).resolves.toMatchObject({
+      status: "verified",
+      value: "Hefei University of Technology",
+      fieldPath: "education[0].institution"
+    });
+    expect(ragService.resolveField).toHaveBeenCalledWith(expect.objectContaining({
+      type: "text",
+      semantic: "education[0].institution"
+    }));
+    expect(ragService.resolveField.mock.calls[0]?.[0]).not.toHaveProperty("options");
+  });
+
   it("projects canonical profile dates into explicit year and month controls", async () => {
     const semanticResolver: FieldSemanticResolver = {
       resolve: vi.fn(async (field) => ({
