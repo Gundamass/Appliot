@@ -279,6 +279,38 @@ describe("page structural fingerprint", () => {
     }
   }, 30_000);
 
+  it("observes custom year and month comboboxes as separate date fields", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>DJI Apply</title>
+        <div class="apply-field-date">
+          <div class="title-date">起止时间</div>
+          <div class="ctrl-date">
+            <div role="combobox" aria-label="年" tabindex="0">年</div>
+            <div role="combobox" aria-label="月" tabindex="0">月</div>
+          </div>
+        </div>`);
+    });
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-observer-custom-date-"));
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no port");
+      await session.start(Buffer.alloc(32, 1).toString("base64url"));
+      await session.open("task-custom-date", `http://127.0.0.1:${address.port}/apply`);
+
+      const snapshot = await session.observe("task-custom-date");
+
+      expect(snapshot.fields.map((field) => field.label)).toEqual(["起止时间 年", "起止时间 月"]);
+      expect(snapshot.fields.map((field) => field.type)).toEqual(["select", "select"]);
+    } finally {
+      await session.stop();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("associates a Mokahr add button with its nearest experience section", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");

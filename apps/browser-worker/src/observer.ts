@@ -63,11 +63,12 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
     return "";
   };
   let fieldIndex = 0;
-  const fields = [...document.querySelectorAll("input:not([type=hidden]), textarea, select")]
+  const fields = [...document.querySelectorAll("input:not([type=hidden]), textarea, select, [role=combobox]")]
     .flatMap((element, registryIndex) => {
     if (unavailable(element) || (!visible(element) && !resumableHiddenFile(element)) || internal(element)) return [];
     const index = fieldIndex++;
     const tag = element.tagName.toLocaleLowerCase();
+    const customSelect = element.getAttribute("role")?.toLocaleLowerCase() === "combobox";
     const explicitLabel = element.id
       ? normalized(document.querySelector('label[for="' + CSS.escape(element.id) + '"]')?.textContent)
       : "";
@@ -81,7 +82,9 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
     const uploadText = resumableHiddenFile(element)
       ? normalized(element.closest(".ant-upload-wrapper, .ant-upload, [class*='upload']")?.textContent)
       : "";
-    const nearbyText = uploadText || (previous && !previous.matches("input, textarea, select, button")
+    const nearbyText = customSelect
+      ? normalized(element.getAttribute("aria-label"))
+      : uploadText || (previous && !previous.matches("input, textarea, select, button, [role=combobox]")
       ? normalized(previous.textContent)
       : normalized(element.getAttribute("placeholder")));
     const itemLabel = formItemLabel(element);
@@ -98,11 +101,13 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
     return {
       path: "field:" + index,
       registryIndex,
-      tag,
-      inputType: element instanceof HTMLInputElement ? element.type : tag,
+      tag: customSelect ? "select" : tag,
+      inputType: customSelect ? "custom-select" : element instanceof HTMLInputElement ? element.type : tag,
       name: element.getAttribute("name") ?? "",
       required: required(element, [explicitLabel, wrappingLabel, ariaLabelledBy, itemLabel, nearbyText].filter(Boolean).join(" ")),
-      value: element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)
+      value: customSelect
+        ? normalized(element.textContent)
+        : element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)
         ? element.checked
         : element.value,
       options: element instanceof HTMLSelectElement
@@ -112,7 +117,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       wrappingLabel: itemLabel || wrappingLabel,
       ariaLabel: normalized(element.getAttribute("aria-label")),
       ariaLabelledBy,
-      nearbyText: itemLabel || nearbyText
+      nearbyText
     };
   });
   let actionIndex = 0;
@@ -185,9 +190,17 @@ const PAGE_STRUCTURE_SCRIPT = String.raw`(() => {
     normalized(element.getAttribute("value")),
     normalized(element.getAttribute("title"))
   ].find(Boolean) ?? "";
-  const fields = [...document.querySelectorAll("input:not([type=hidden]), textarea, select")]
+  const fields = [...document.querySelectorAll("input:not([type=hidden]), textarea, select, [role=combobox]")]
     .filter((element) => !unavailable(element) && (visible(element) || resumableHiddenFile(element)) && !internal(element) && (fieldName(element) !== "" || resumableHiddenFile(element)))
-    .map((element, index) => ({ path: "field:" + index, tag: element.tagName.toLocaleLowerCase(), inputType: element instanceof HTMLInputElement ? element.type : element.tagName.toLocaleLowerCase(), required: required(element, fieldName(element)), accessibleName: fieldName(element) }));
+    .map((element, index) => ({
+      path: "field:" + index,
+      tag: element.getAttribute("role")?.toLocaleLowerCase() === "combobox" ? "select" : element.tagName.toLocaleLowerCase(),
+      inputType: element.getAttribute("role")?.toLocaleLowerCase() === "combobox"
+        ? "custom-select"
+        : element instanceof HTMLInputElement ? element.type : element.tagName.toLocaleLowerCase(),
+      required: required(element, fieldName(element)),
+      accessibleName: fieldName(element)
+    }));
   const actions = [...document.querySelectorAll('button, input[type="button"], input[type="submit"], a[href], a[role="button"]')]
     .filter((element) => !unavailable(element) && visible(element) && !internal(element))
     .map((element, index) => ({ path: "action:" + index, kind: element instanceof HTMLInputElement ? "input" : element instanceof HTMLAnchorElement ? "link" : "button", accessibleName: actionName(element) }));
@@ -249,7 +262,7 @@ export class BrowserObserver {
       stage: this.detectStructureStage(raw),
       fields: raw.fields.map((field) => ({
         id: opaqueId("field", field.path),
-        type: field.tag === "textarea" ? "textarea" : field.tag === "select" ? "select" : field.inputType,
+        type: field.tag === "textarea" ? "textarea" : field.tag === "select" || field.inputType === "custom-select" ? "select" : field.inputType,
         required: field.required,
         accessibleName: field.accessibleName
       })),

@@ -1,7 +1,7 @@
 import type { FormSnapshot } from "@resume/contracts";
 import type { Locator, Page } from "playwright-core";
 
-const FIELD_SELECTOR = "input:not([type=hidden]), textarea, select";
+const FIELD_SELECTOR = "input:not([type=hidden]), textarea, select, [role=combobox]";
 const ACTION_SELECTOR = 'button, input[type="button"], input[type="submit"], a[href], a[role="button"]';
 
 interface RegistryIndices {
