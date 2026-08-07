@@ -279,15 +279,25 @@ describe("page structural fingerprint", () => {
     }
   }, 30_000);
 
-  it("observes custom year and month comboboxes as separate date fields", async () => {
+  it("observes DJI text-backed year and month selects as separate date fields", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");
       response.end(`<!doctype html><title>DJI Apply</title>
         <div class="apply-field-date">
           <div class="title-date">起止时间</div>
           <div class="ctrl-date">
-            <div role="combobox" aria-label="年" tabindex="0">年</div>
-            <div role="combobox" aria-label="月" tabindex="0">月</div>
+            <div class="sd-Dropdown-container-282zZ">
+              <div class="sd-Input-container-3OoVt sd-Select-container-D6nZH">
+                <span class="sd-Input-prefix"></span>
+                <input class="sd-Input-input-QsLkW" type="text" placeholder="年">
+              </div>
+            </div>
+            <div class="sd-Dropdown-container-282zZ">
+              <div class="sd-Input-container-3OoVt sd-Select-container-D6nZH">
+                <span class="sd-Input-prefix"></span>
+                <input class="sd-Input-input-QsLkW" type="text" placeholder="月">
+              </div>
+            </div>
           </div>
         </div>`);
     });
@@ -304,6 +314,7 @@ describe("page structural fingerprint", () => {
 
       expect(snapshot.fields.map((field) => field.label)).toEqual(["起止时间 年", "起止时间 月"]);
       expect(snapshot.fields.map((field) => field.type)).toEqual(["select", "select"]);
+      expect(snapshot.fields.map((field) => field.controlKind)).toEqual(["custom", "custom"]);
     } finally {
       await session.stop();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

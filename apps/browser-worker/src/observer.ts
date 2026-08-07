@@ -68,7 +68,19 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
     if (unavailable(element) || (!visible(element) && !resumableHiddenFile(element)) || internal(element)) return [];
     const index = fieldIndex++;
     const tag = element.tagName.toLocaleLowerCase();
-    const customSelect = element.getAttribute("role")?.toLocaleLowerCase() === "combobox";
+    const roleCombobox = element.getAttribute("role")?.toLocaleLowerCase() === "combobox";
+    const textBackedSelect = element instanceof HTMLInputElement
+      && Boolean(element.closest("[class*='Select-container']"));
+    const customSelect = roleCombobox || textBackedSelect;
+    const customDisplayValue = textBackedSelect
+      ? normalized(element.closest("[class*='Select-container']")?.querySelector("[class*='Input-display-value']")?.textContent)
+      : "";
+    const selectPlaceholder = textBackedSelect ? normalized(element.getAttribute("placeholder")) : "";
+    const inferredDateUnit = textBackedSelect && selectPlaceholder === ""
+      ? /^\d{4}$/u.test(customDisplayValue)
+        ? "年"
+        : /^(?:0?[1-9]|1[0-2])$/u.test(customDisplayValue) ? "月" : ""
+      : "";
     const explicitLabel = element.id
       ? normalized(document.querySelector('label[for="' + CSS.escape(element.id) + '"]')?.textContent)
       : "";
@@ -82,8 +94,10 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
     const uploadText = resumableHiddenFile(element)
       ? normalized(element.closest(".ant-upload-wrapper, .ant-upload, [class*='upload']")?.textContent)
       : "";
-    const nearbyText = customSelect
+    const nearbyText = roleCombobox
       ? normalized(element.getAttribute("aria-label"))
+      : textBackedSelect
+        ? selectPlaceholder || inferredDateUnit
       : uploadText || (previous && !previous.matches("input, textarea, select, button, [role=combobox]")
       ? normalized(previous.textContent)
       : normalized(element.getAttribute("placeholder")));
@@ -105,8 +119,10 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       inputType: customSelect ? "custom-select" : element instanceof HTMLInputElement ? element.type : tag,
       name: element.getAttribute("name") ?? "",
       required: required(element, [explicitLabel, wrappingLabel, ariaLabelledBy, itemLabel, nearbyText].filter(Boolean).join(" ")),
-      value: customSelect
+      value: roleCombobox
         ? normalized(element.textContent)
+        : textBackedSelect
+        ? customDisplayValue || element.value
         : element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)
         ? element.checked
         : element.value,
@@ -193,15 +209,19 @@ const PAGE_STRUCTURE_SCRIPT = String.raw`(() => {
   ].find(Boolean) ?? "";
   const fields = [...document.querySelectorAll("input:not([type=hidden]), textarea, select, [role=combobox]")]
     .filter((element) => !unavailable(element) && (visible(element) || resumableHiddenFile(element)) && !internal(element) && (fieldName(element) !== "" || resumableHiddenFile(element)))
-    .map((element, index) => ({
+    .map((element, index) => {
+      const customSelect = element.getAttribute("role")?.toLocaleLowerCase() === "combobox"
+        || (element instanceof HTMLInputElement && Boolean(element.closest("[class*='Select-container']")));
+      return {
       path: "field:" + index,
-      tag: element.getAttribute("role")?.toLocaleLowerCase() === "combobox" ? "select" : element.tagName.toLocaleLowerCase(),
-      inputType: element.getAttribute("role")?.toLocaleLowerCase() === "combobox"
+      tag: customSelect ? "select" : element.tagName.toLocaleLowerCase(),
+      inputType: customSelect
         ? "custom-select"
         : element instanceof HTMLInputElement ? element.type : element.tagName.toLocaleLowerCase(),
       required: required(element, fieldName(element)),
       accessibleName: fieldName(element)
-    }));
+    };
+    });
   const actions = [...document.querySelectorAll('button, input[type="button"], input[type="submit"], a[href], a[role="button"]')]
     .filter((element) => !unavailable(element) && visible(element) && !internal(element))
     .map((element, index) => ({ path: "action:" + index, kind: element instanceof HTMLInputElement ? "input" : element instanceof HTMLAnchorElement ? "link" : "button", accessibleName: actionName(element) }));

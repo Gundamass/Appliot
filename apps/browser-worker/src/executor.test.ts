@@ -414,6 +414,132 @@ describe("controlled browser executor", () => {
     });
   }, 30_000);
 
+  it("selects a DJI text-backed year control from its visible menu items", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>DJI Apply</title>
+        <div class="apply-field-date">
+          <div class="title-date">Start date</div>
+          <div class="ctrl-date">
+            <div class="sd-Dropdown-container-282zZ">
+              <label class="sd-Input-container-3OoVt sd-Select-container-D6nZH">
+                <span id="stale-display" class="sd-Input-display-value-1RTHN"></span>
+                <input id="stale" type="text" placeholder="Stale" value="">
+              </label>
+            </div>
+            <div class="sd-Dropdown-container-282zZ">
+              <label class="sd-Input-container-3OoVt sd-Select-container-D6nZH">
+                <span id="year-display" class="sd-Input-display-value-1RTHN"></span>
+                <input id="year" type="text" placeholder="年" value="">
+              </label>
+            </div>
+            <div class="sd-Dropdown-container-282zZ">
+              <label class="sd-Input-container-3OoVt sd-Select-container-D6nZH">
+                <span id="month-display" class="sd-Input-display-value-1RTHN"></span>
+                <input id="month" type="text" placeholder="月" value="">
+              </label>
+            </div>
+            <div id="stale-options" class="sd-Select-menu-UbIS2" hidden>
+              <div class="sd-Menu-content-item-37fPj">2026</div>
+            </div>
+            <div id="year-options" class="sd-Select-menu-UbIS2" hidden>
+              <div class="sd-Menu-content-item-37fPj">2025</div>
+              <div class="sd-Menu-content-item-37fPj">2026</div>
+            </div>
+            <div id="month-options" class="sd-Select-menu-UbIS2" hidden>
+              <div class="sd-Menu-content-item-37fPj">1</div>
+              <div class="sd-Menu-content-item-37fPj">04</div>
+            </div>
+          </div>
+        </div>
+        <script>
+          const stale = document.querySelector('#stale');
+          const staleDisplay = document.querySelector('#stale-display');
+          const staleList = document.querySelector('#stale-options');
+          const year = document.querySelector('#year');
+          const display = document.querySelector('#year-display');
+          const list = document.querySelector('#year-options');
+          const month = document.querySelector('#month');
+          const monthDisplay = document.querySelector('#month-display');
+          const monthList = document.querySelector('#month-options');
+          stale.addEventListener('click', () => { staleList.hidden = false; });
+          stale.addEventListener('keydown', (event) => {
+            if (event.key === 'Escape') staleList.hidden = true;
+          });
+          staleList.addEventListener('click', (event) => {
+            const option = event.target.closest('[class*="Menu-content-item"]');
+            if (!option) return;
+            staleDisplay.textContent = option.textContent;
+            staleList.hidden = true;
+          });
+          year.addEventListener('click', () => { list.hidden = false; });
+          list.addEventListener('click', (event) => {
+            const option = event.target.closest('[class*="Menu-content-item"]');
+            if (!option) return;
+            display.textContent = option.textContent;
+            year.removeAttribute('placeholder');
+            list.hidden = true;
+          });
+          month.addEventListener('click', () => { monthList.hidden = false; });
+          monthList.addEventListener('click', (event) => {
+            const option = event.target.closest('[class*="Menu-content-item"]');
+            if (!option) return;
+            monthDisplay.textContent = option.textContent;
+            month.removeAttribute('placeholder');
+            monthList.hidden = true;
+          });
+        </script>`);
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-dji-text-select-"));
+    temporaryDirectories.push(profileDir);
+    const key = Buffer.alloc(32, 16);
+    const policy = new ActionPolicy(key);
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    sessions.push(session);
+    await session.start(key.toString("base64url"));
+    await session.open("task-dji-text-select", `http://127.0.0.1:${address.port}/apply`);
+
+    const snapshot = await session.observe("task-dji-text-select");
+    const stale = snapshot.fields.find((field) => field.type === "select"
+      && field.controlKind === "custom"
+      && !/[年月]/u.test(field.label));
+    if (!stale) throw new Error("stale custom control was not observed");
+    const failed = await session.execute(approvedSelect(policy, snapshot, stale.id, "2099"));
+    expect(failed).toMatchObject({ status: "failed", errors: ["custom_option_not_found"] });
+
+    const year = failed.snapshot.fields.find((field) => field.label === "Start date 年");
+    if (!year) throw new Error("DJI text-backed year control was not observed");
+    const result = await session.execute(approvedSelect(policy, failed.snapshot, year.id, "2026"));
+
+    expect(result).toMatchObject({
+      status: "applied",
+      actualValue: "2026",
+      errors: []
+    });
+    expect(result.snapshot.fields.find((field) => field.id === year.id)).toMatchObject({
+      label: "Start date 年",
+      currentValue: "2026"
+    });
+    const month = result.snapshot.fields.find((field) => field.label === "Start date 月");
+    if (!month) throw new Error("DJI text-backed month control was not observed");
+    const monthResult = await session.execute(approvedSelect(policy, result.snapshot, month.id, "04"));
+
+    expect(monthResult).toMatchObject({
+      status: "applied",
+      actualValue: "04",
+      errors: []
+    });
+    expect(monthResult.snapshot.fields.find((field) => field.id === month.id)).toMatchObject({
+      label: "Start date 月",
+      currentValue: "04"
+    });
+  }, 30_000);
+
   it("fails an intermediate click that produces no observable page change", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");
