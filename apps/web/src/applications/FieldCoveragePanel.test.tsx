@@ -27,8 +27,8 @@ it("summarizes coverage and expands only fields that need attention", async () =
   render(<FieldCoveragePanel coverage={coverage} />);
 
   expect(screen.getByText("已填写 3")).toBeVisible();
-  expect(screen.getByText("待审核 1")).toBeVisible();
-  expect(screen.getByText("缺少资料 1")).toBeVisible();
+  expect(screen.getByText("待确认 1")).toBeVisible();
+  expect(screen.getByText("需补充 1")).toBeVisible();
   expect(screen.getByRole("button", { name: "查看待处理字段" })).toBeVisible();
   expect(screen.queryByText("最高学历")).not.toBeInTheDocument();
 

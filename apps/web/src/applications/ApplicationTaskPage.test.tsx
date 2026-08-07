@@ -152,7 +152,7 @@ describe("ApplicationTaskPage", () => {
 
     expect(await screen.findByRole("heading", { name: "字段匹配" })).toBeVisible();
     expect(screen.getByText("已填写 1")).toBeVisible();
-    expect(screen.getByText("待审核 1")).toBeVisible();
+    expect(screen.getByText("待确认 1")).toBeVisible();
     expect(screen.queryByRole("button", { name: submissionActionName })).not.toBeInTheDocument();
   });
 

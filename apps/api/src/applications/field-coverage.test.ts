@@ -30,6 +30,19 @@ describe("field coverage", () => {
       fields: [expect.objectContaining({ fieldId: "field-school", status: "filled" })]
     });
   });
+
+  it("marks a recovered field for final review", () => {
+    const store = createFieldCoverageStore();
+    store.record("task-1", assessment("ready", "field-month"));
+
+    store.markFilled("task-1", "field-month", ["control_recovered_after_readback_mismatch"]);
+
+    expect(store.snapshot("task-1")?.fields).toContainEqual(expect.objectContaining({
+      fieldId: "field-month",
+      status: "review",
+      reason: "已自动恢复并完成填写，建议在最终审核时确认实际选项"
+    }));
+  });
 });
 
 function assessment(status: ApplicationFieldAssessment["status"], fieldId: string): ApplicationFieldAssessment {

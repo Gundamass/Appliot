@@ -77,7 +77,7 @@ export interface ApplicationProgressCoordinator {
   startOperation(input: StartOperationInput): { generation: number };
   completeOperation(taskId: string, generation: number): void;
   failOperation(taskId: string, generation: number, errorCode: ApplicationOperationErrorCode): void;
-  recordFailure(input: StartOperationInput, errorCode: ApplicationOperationErrorCode): void;
+  recordFailure(input: StartOperationInput, errorCode: ApplicationOperationErrorCode, mode?: "pause" | "defer"): void;
   cancel(taskId: string): void;
   dispose(taskId: string): void;
   pause(taskId: string, reason: "user_activity" | "operation_failed" | "worker_disconnected" | "page_unstable"): void;
@@ -261,10 +261,10 @@ export function createApplicationProgressCoordinator(
       settle(taskId, generation, errorCode === "TIMEOUT" ? "timed_out" : "failed", errorCode);
     },
 
-    recordFailure(input, errorCode) {
+    recordFailure(input, errorCode, mode = "pause") {
       const task = requireTask(input.taskId);
       if (task.active) {
-        settle(input.taskId, task.active.generation, "failed", errorCode);
+        settle(input.taskId, task.active.generation, "failed", errorCode, mode);
         return;
       }
       const failureProgress: ApplicationTaskProgress = {
@@ -283,15 +283,19 @@ export function createApplicationProgressCoordinator(
         errorCode
       };
       task.generation += 1;
-      task.status = "paused";
+      task.status = mode === "pause" ? "paused" : "idle";
       task.lastResult = { ...failureProgress, operation };
-      task.stalledFieldId = input.fieldId;
+      task.stalledFieldId = mode === "pause" ? input.fieldId : undefined;
       task.recovery = ["retry_current", "cancel"];
       emit(input.taskId, { type: "operation_failed", progress: failureProgress, operation });
-      emit(input.taskId, {
-        type: "task_paused",
-        activity: activity("page_changed", input.fieldId, input.displayCategory)
-      });
+      if (mode === "pause") {
+        emit(input.taskId, {
+          type: "task_paused",
+          activity: activity("page_changed", input.fieldId, input.displayCategory)
+        });
+      } else {
+        task.recovery = [];
+      }
       persist(input.taskId, task);
     },
 

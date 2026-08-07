@@ -369,18 +369,13 @@ describe("application machine", () => {
 
     await service.runUntilPause("task-1");
 
-    expect(service.state("task-1").value).toBe("observing");
+    expect(service.state("task-1").value).toBe("needs_questions");
     expect(service.progress("task-1")).toMatchObject({
-      status: "paused",
-      recovery: ["retry_current", "cancel"],
+      status: "idle",
+      recovery: [],
       lastResult: { operation: { status: "failed" } }
     });
-
-    await service.retryCurrent("task-1");
-
-    expect(execute).toHaveBeenCalledTimes(2);
-    expect(service.state("task-1").value).toBe("review_locked");
-    expect(service.progress("task-1")).toMatchObject({ status: "idle", recovery: [] });
+    expect(service.state("task-1").context.questions).toHaveLength(1);
     database.close();
   });
 
@@ -2058,7 +2053,8 @@ describe("application machine", () => {
           status: "applied" as const,
           actualValue: "13800000000",
           snapshot: filled,
-          errors: []
+          errors: [],
+          warnings: ["control_recovered_after_readback_mismatch"]
         }))
       },
       resolveField: async () => ({
@@ -2078,10 +2074,14 @@ describe("application machine", () => {
 
     expect(service.fieldCoverage("task-1")).toMatchObject({
       total: 1,
-      filled: 1,
-      fields: [expect.objectContaining({ fieldId: "field-phone", status: "filled" })]
+      review: 1,
+      fields: [expect.objectContaining({
+        fieldId: "field-phone",
+        status: "review",
+        reason: "已自动恢复并完成填写，建议在最终审核时确认实际选项"
+      })]
     });
-    expect(checkpoints.latest("task-1")?.fieldCoverage?.filled).toBe(1);
+    expect(checkpoints.latest("task-1")?.fieldCoverage?.review).toBe(1);
     database.close();
   });
 
@@ -2124,6 +2124,75 @@ describe("application machine", () => {
     expect(service.fieldCoverage("task-1")?.fields).toContainEqual(expect.objectContaining({
       fieldId: "field-manual", status: "filled", source: "user", confidence: 1
     }));
+    database.close();
+  });
+
+  it("continues later fields after a non-terminal field execution failure", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [
+        { id: "field-month", label: "开始时间 月", type: "select", required: true, options: ["1", "2"], currentValue: "" },
+        { id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" }
+      ]
+    };
+    const filledEmail: FormSnapshot = {
+      ...form,
+      id: "snapshot-email-filled",
+      fields: [form.fields[0]!, { ...form.fields[1]!, currentValue: "me@example.com" }]
+    };
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        type: "execution_result" as const,
+        taskId: "task-1",
+        snapshotId: form.id,
+        commandType: "select" as const,
+        status: "failed" as const,
+        actualValue: null,
+        snapshot: form,
+        errors: ["option_not_found"]
+      })
+      .mockResolvedValueOnce({
+        type: "execution_result" as const,
+        taskId: "task-1",
+        snapshotId: filledEmail.id,
+        commandType: "fill" as const,
+        status: "applied" as const,
+        actualValue: "me@example.com",
+        snapshot: filledEmail,
+        errors: []
+      });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: vi.fn(async () => form), execute },
+      resolveField: async (_taskId, field) => ({
+        status: "verified" as const,
+        value: field.id === "field-month" ? "2" : "me@example.com",
+        fieldPath: field.id,
+        assessment: {
+          fieldId: field.id,
+          label: field.label,
+          semantic: field.id,
+          status: "ready" as const,
+          source: "exact" as const,
+          confidence: 1,
+          reason: "ready",
+          evidence: []
+        }
+      }),
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(service.fieldCoverage("task-1")?.fields).toEqual(expect.arrayContaining([
+      expect.objectContaining({ fieldId: "field-month", status: "missing", reason: "option_not_found" }),
+      expect.objectContaining({ fieldId: "field-email", status: "filled" })
+    ]));
+    expect(service.state("task-1").value).toBe("needs_questions");
     database.close();
   });
 

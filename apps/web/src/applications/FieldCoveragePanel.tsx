@@ -9,8 +9,8 @@ interface FieldCoveragePanelProps {
 
 const STATUS_LABELS: Record<ApplicationFieldAssessment["status"], string> = {
   ready: "可填写",
-  review: "待审核",
-  missing: "缺少资料",
+  review: "已填写，待确认",
+  missing: "自动填写失败",
   unsupported: "暂不支持",
   filled: "已填写"
 };
@@ -30,8 +30,8 @@ export function FieldCoveragePanel({ coverage }: FieldCoveragePanelProps) {
       <div className="coverage-summary" aria-label="字段匹配统计">
         <span className="filled"><CheckCircle2 aria-hidden="true" size={14} />已填写 {coverage.filled}</span>
         <span>可填写 {coverage.ready}</span>
-        <span className="review">待审核 {coverage.review}</span>
-        <span className="missing">缺少资料 {coverage.missing}</span>
+        <span className="review">待确认 {coverage.review}</span>
+        <span className="missing">需补充 {coverage.missing}</span>
         {coverage.unsupported > 0 && <span>暂不支持 {coverage.unsupported}</span>}
       </div>
     </header>
@@ -65,7 +65,7 @@ function CoverageItem({ item }: { item: ApplicationFieldAssessment }) {
     <dl className="field-coverage-details">
       <div><dt>系统理解</dt><dd>{item.semantic ?? "尚未识别到对应档案字段"}</dd></div>
       <div><dt>匹配方式</dt><dd>{sourceLabel(item.source)}</dd></div>
-      <div><dt>判断原因</dt><dd>{item.reason}</dd></div>
+      <div><dt>{item.status === "missing" ? "失败原因" : "审核提示"}</dt><dd>{item.reason}</dd></div>
     </dl>
     <EvidenceList evidence={item.evidence} />
   </li>;

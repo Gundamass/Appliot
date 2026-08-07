@@ -570,6 +570,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       type ResolvedField = { field: FormField; decision: FieldResolution };
       const pendingDecisions: ResolvedField[] = [];
       const seenFieldIds = new Set<string>();
+      const failedFieldIds = new Set<string>();
 
       const resolvePass = async (
         fields: FormField[],
@@ -676,11 +677,22 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
             contentReviews.delete(taskId);
           }
           if (result.status !== "applied") {
-            pauseAfterExecutionFailure(actor, fillOperation, result);
+            if (isTerminalSafetyBlock(result)) {
+              pauseAfterExecutionFailure(actor, fillOperation, result);
+              persist(actor, current);
+              return false;
+            }
+            progress.recordFailure(
+              fillOperation,
+              result.status === "blocked" ? "READBACK_MISMATCH" : "PAGE_ERROR",
+              "defer"
+            );
+            fieldCoverageStore.markFailed(taskId, field.id, result.errors[0] ?? "field_execution_failed");
+            failedFieldIds.add(field.id);
             persist(actor, current);
-            return false;
+            continue;
           }
-          fieldCoverageStore.markFilled(taskId, field.id);
+          fieldCoverageStore.markFilled(taskId, field.id, result.warnings ?? []);
           persist(actor, current);
         }
         return true;
@@ -691,8 +703,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       const deterministic = await resolvePass(deterministicFields, "deterministic");
       if (!runIsCurrent(taskId, runGeneration, actor)) return;
       if (!await applyVerified(deterministic, "deterministic_fill")) return;
-      pendingDecisions.push(...deterministic.filter(({ decision }) =>
-        decision.status !== "verified" || decision.requiresContentReview
+      pendingDecisions.push(...deterministic.filter(({ field, decision }) =>
+        decision.status !== "verified" || decision.requiresContentReview || failedFieldIds.has(field.id)
       ));
 
       let semanticIds = new Set(deterministic
@@ -708,8 +720,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         const semantic = await resolvePass(semanticFields, "semantic");
         if (!runIsCurrent(taskId, runGeneration, actor)) return;
         if (!await applyVerified(semantic, "semantic_fill")) return;
-        pendingDecisions.push(...semantic.filter(({ decision }) =>
-          decision.status !== "verified" || decision.requiresContentReview
+        pendingDecisions.push(...semantic.filter(({ field, decision }) =>
+          decision.status !== "verified" || decision.requiresContentReview || failedFieldIds.has(field.id)
         ));
         semanticIds = new Set(semantic
           .filter(({ decision }) => decision.status === "deferred")
@@ -721,7 +733,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         return !hasUserValue(observed?.currentValue) && decision.status !== "deferred";
       });
       const questions = unresolved
-        .filter(({ decision }) => decision.status === "needs_question")
+        .filter(({ field, decision }) => decision.status === "needs_question" || failedFieldIds.has(field.id))
         .map(({ field, decision }): ApplicationQuestion => ({
           id: field.id,
           fieldId: field.id,

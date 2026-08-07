@@ -2,7 +2,8 @@ import type { ApplicationFieldAssessment, ApplicationFieldCoverage } from "@resu
 
 export interface FieldCoverageStore {
   record(taskId: string, assessment: ApplicationFieldAssessment): void;
-  markFilled(taskId: string, fieldId: string): void;
+  markFilled(taskId: string, fieldId: string, warnings?: string[]): void;
+  markFailed(taskId: string, fieldId: string, reason: string): void;
   markUserFilled(taskId: string, field: Pick<ApplicationFieldAssessment, "fieldId" | "label" | "semantic">): void;
   restore(taskId: string, coverage: ApplicationFieldCoverage): void;
   retain(taskId: string, fieldIds: ReadonlySet<string>): void;
@@ -37,13 +38,27 @@ export function createFieldCoverageStore(): FieldCoverageStore {
     record(taskId, assessment) {
       requireTask(taskId).set(assessment.fieldId, assessment);
     },
-    markFilled(taskId, fieldId) {
+    markFilled(taskId, fieldId, warnings = []) {
       const current = tasks.get(taskId)?.get(fieldId);
-      if (current) requireTask(taskId).set(fieldId, { ...current, status: "filled", reason: "页面回读确认填写成功" });
+      if (current) requireTask(taskId).set(fieldId, {
+        ...current,
+        status: warnings.length > 0 ? "review" : "filled",
+        reason: warnings.length > 0
+          ? "已自动恢复并完成填写，建议在最终审核时确认实际选项"
+          : "页面回读确认填写成功"
+      });
+    },
+    markFailed(taskId, fieldId, reason) {
+      const current = tasks.get(taskId)?.get(fieldId);
+      if (current) requireTask(taskId).set(fieldId, {
+        ...current,
+        status: "missing",
+        reason: reason || "field_execution_failed"
+      });
     },
     markUserFilled(taskId, field) {
       const current = tasks.get(taskId)?.get(field.fieldId);
-      if (current?.status === "filled") return;
+      if (current?.status === "filled" || current?.status === "review") return;
       requireTask(taskId).set(field.fieldId, {
         fieldId: field.fieldId,
         label: field.label,
