@@ -37,7 +37,9 @@ import { createAdapterHealthRegistry, ObservedStructuredModelProvider } from "./
 export interface ProductionAdapterDependencies {
   fetch?: typeof globalThis.fetch;
   browserClient?: Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
-    & Partial<Pick<BrowserWorkerClient, "invalidateExecution" | "onActivity">>;
+    & Partial<Pick<BrowserWorkerClient, "invalidateExecution" | "releaseTask" | "onActivity">>;
+  browserClientFactory?: () => Promise<Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
+    & Partial<Pick<BrowserWorkerClient, "invalidateExecution" | "releaseTask" | "onActivity">>>;
 }
 
 export function createProductionDependencies(
@@ -46,7 +48,9 @@ export function createProductionDependencies(
 ): AppDependencies {
   const database = createSqliteDatabase(config.databaseFile);
   let closed = false;
-  const close = () => {
+  let shuttingDown = false;
+  let closingDependencies: Promise<void> | undefined;
+  const closeDatabase = () => {
     if (closed) return;
     closed = true;
     database.close();
@@ -59,28 +63,70 @@ export function createProductionDependencies(
     const approvalKey = randomBytes(32);
     const actionPolicy = new ActionPolicy(approvalKey);
     type BrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
-      & Partial<Pick<BrowserWorkerClient, "invalidateExecution" | "onActivity">>;
-    let browserClient: Promise<BrowserClient> | undefined =
-      adapters.browserClient === undefined ? undefined : Promise.resolve(adapters.browserClient);
-    let resolvedBrowserClient: BrowserClient | undefined;
-    const activityListeners = new Map<Parameters<BrowserWorkerClient["onActivity"]>[0], () => void>();
+      & Partial<Pick<BrowserWorkerClient, "invalidateExecution" | "releaseTask" | "onActivity">>;
     const bundledWorkerEntry = new URL(import.meta.url).pathname.endsWith("/dist/server.js")
       ? fileURLToPath(new URL("./browser-worker.js", import.meta.url))
       : undefined;
-    const getBrowserClient = async (): Promise<BrowserClient> => {
-      const client = await (browserClient ??= BrowserWorkerClient.start({
-        profileDir: resolve(dirname(resolve(config.databaseFile)), "browser-profile"),
-        approvalKey,
-        uploadDirectory: originalsDirectory,
-        ...(bundledWorkerEntry === undefined ? {} : { workerEntry: bundledWorkerEntry })
-      }));
-      resolvedBrowserClient = client;
-      for (const [listener, unsubscribe] of activityListeners) {
-        if (unsubscribe === noop && client.onActivity) {
-          activityListeners.set(listener, client.onActivity(listener));
+    const browserClientFactory: () => Promise<BrowserClient> = adapters.browserClientFactory
+      ?? (adapters.browserClient === undefined
+        ? () => BrowserWorkerClient.start({
+            profileDir: resolve(dirname(resolve(config.databaseFile)), "browser-profile"),
+            approvalKey,
+            uploadDirectory: originalsDirectory,
+            ...(bundledWorkerEntry === undefined ? {} : { workerEntry: bundledWorkerEntry })
+          })
+        : async () => adapters.browserClient!);
+    let browserClient: Promise<BrowserClient> | undefined;
+    let resolvedBrowserClient: BrowserClient | undefined;
+    let recyclingBrowserClient: Promise<BrowserClient> | undefined;
+    const tasksWithOpenAttempt = new Set<string>();
+    const activityListeners = new Map<Parameters<BrowserWorkerClient["onActivity"]>[0], () => void>();
+    const startBrowserClient = async (): Promise<BrowserClient> => {
+      if (shuttingDown) throw new Error("production_dependencies_closed");
+      const pending = Promise.resolve().then(browserClientFactory);
+      browserClient = pending;
+      try {
+        const client = await pending;
+        if (browserClient === pending) {
+          resolvedBrowserClient = client;
+          for (const [listener, unsubscribe] of activityListeners) {
+            if (unsubscribe === noop && client.onActivity) {
+              activityListeners.set(listener, client.onActivity(listener));
+            }
+          }
         }
+        return client;
+      } catch (error) {
+        if (browserClient === pending) browserClient = undefined;
+        throw error;
       }
-      return client;
+    };
+    const getBrowserClient = (): Promise<BrowserClient> => {
+      if (shuttingDown) return Promise.reject(new Error("production_dependencies_closed"));
+      if (recyclingBrowserClient) return recyclingBrowserClient;
+      return browserClient ?? startBrowserClient();
+    };
+    const recycleBrowserClient = async (failedClient: BrowserClient): Promise<BrowserClient> => {
+      if (shuttingDown) throw new Error("production_dependencies_closed");
+      if (resolvedBrowserClient && resolvedBrowserClient !== failedClient) return resolvedBrowserClient;
+      if (recyclingBrowserClient) return recyclingBrowserClient;
+      const recycling = (async () => {
+        for (const [listener, unsubscribe] of activityListeners) {
+          unsubscribe();
+          activityListeners.set(listener, noop);
+        }
+        if (resolvedBrowserClient === failedClient) resolvedBrowserClient = undefined;
+        browserClient = undefined;
+        await failedClient.stop();
+        if (shuttingDown) throw new Error("production_dependencies_closed");
+        return startBrowserClient();
+      })();
+      recyclingBrowserClient = recycling;
+      try {
+        return await recycling;
+      } finally {
+        if (recyclingBrowserClient === recycling) recyclingBrowserClient = undefined;
+      }
     };
     const adapterHealth: AdapterHealthRegistry = createAdapterHealthRegistry({
       ...(config.deepseek === undefined ? {} : { deepseek: { model: config.deepseek.defaultModel } }),
@@ -130,7 +176,15 @@ export function createProductionDependencies(
       taskEvents,
       browser: {
         async open(taskId, url) {
-          return (await getBrowserClient()).open(taskId, url);
+          const client = await getBrowserClient();
+          const firstOpenAttempt = !tasksWithOpenAttempt.has(taskId);
+          tasksWithOpenAttempt.add(taskId);
+          try {
+            return await client.open(taskId, url);
+          } catch (error) {
+            if (!firstOpenAttempt) throw error;
+            return (await recycleBrowserClient(client)).open(taskId, url);
+          }
         },
         async observe(taskId) {
           return (await (await getBrowserClient()).observe(taskId)).snapshot;
@@ -140,6 +194,15 @@ export function createProductionDependencies(
         },
         async invalidateExecution(taskId, executionEpoch) {
           await (await getBrowserClient()).invalidateExecution?.(taskId, executionEpoch);
+        },
+        async releaseTask(taskId) {
+          const client = await getBrowserClient();
+          try {
+            await client.releaseTask?.(taskId);
+          } catch {
+            await recycleBrowserClient(client);
+          }
+          tasksWithOpenAttempt.delete(taskId);
         },
         onActivity(listener) {
           activityListeners.set(listener, resolvedBrowserClient?.onActivity?.(listener) ?? noop);
@@ -188,16 +251,31 @@ export function createProductionDependencies(
       taskEvents,
       adapterHealth,
       async close() {
+        if (closingDependencies) return closingDependencies;
         if (closed) return;
-        try {
-          if (browserClient) await (await browserClient).stop();
-        } finally {
-          close();
-        }
+        shuttingDown = true;
+        const operation = (async () => {
+          try {
+            if (recyclingBrowserClient) {
+              try {
+                const client = await recyclingBrowserClient;
+                await client.stop();
+              } catch {
+                // Recycling either stopped the old Worker or failed before owning a replacement.
+              }
+            } else if (browserClient) {
+              await (await browserClient).stop();
+            }
+          } finally {
+            closeDatabase();
+          }
+        })();
+        closingDependencies = operation;
+        return operation;
       }
     };
   } catch (error) {
-    close();
+    closeDatabase();
     throw error;
   }
 }

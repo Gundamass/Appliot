@@ -623,6 +623,288 @@ describe("production dependency composition", () => {
     await app.close();
   });
 
+  it("recycles a Worker whose task release fails and transfers activity subscriptions", async () => {
+    const firstUnsubscribe = vi.fn();
+    const secondUnsubscribe = vi.fn();
+    const first = productionBrowserClient({
+      releaseTask: vi.fn(async () => { throw new Error("stale worker"); }),
+      onActivity: vi.fn(() => firstUnsubscribe)
+    });
+    const second = productionBrowserClient({
+      onActivity: vi.fn(() => secondUnsubscribe)
+    });
+    const browserClientFactory = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: first,
+      browserClientFactory
+    });
+    const taskId = "4a542b70-4dcc-482e-a282-b3e7478921d8";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+    await dependencies.applicationService!.openBrowser(taskId);
+
+    await expect(dependencies.applicationService!.cancel(taskId)).resolves.toBeUndefined();
+
+    expect(first.releaseTask).toHaveBeenCalledWith(taskId);
+    expect(first.stop).toHaveBeenCalledOnce();
+    expect(second.releaseTask).not.toHaveBeenCalled();
+    expect(browserClientFactory).toHaveBeenCalledTimes(2);
+    expect(firstUnsubscribe).toHaveBeenCalledOnce();
+    expect(first.onActivity).toHaveBeenCalledOnce();
+    expect(second.onActivity).toHaveBeenCalledOnce();
+    await dependencies.close?.();
+    expect(second.stop).toHaveBeenCalledOnce();
+  });
+
+  it("recycles and retries the first safe open exactly once", async () => {
+    const first = productionBrowserClient({
+      open: vi.fn(async () => { throw new Error("stale worker"); })
+    });
+    const second = productionBrowserClient();
+    const browserClientFactory = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: first,
+      browserClientFactory
+    });
+    const taskId = "05ef7591-0f36-4795-91b7-e56d76bb680a";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+
+    await expect(dependencies.applicationService!.openBrowser(taskId)).resolves.toBeUndefined();
+
+    expect(first.open).toHaveBeenCalledOnce();
+    expect(first.stop).toHaveBeenCalledOnce();
+    expect(second.open).toHaveBeenCalledOnce();
+    expect(browserClientFactory).toHaveBeenCalledTimes(2);
+    await dependencies.close?.();
+  });
+
+  it("does not start a third Worker when the retried open also fails", async () => {
+    const first = productionBrowserClient({ open: vi.fn(async () => { throw new Error("first failure"); }) });
+    const second = productionBrowserClient({ open: vi.fn(async () => { throw new Error("second failure"); }) });
+    const browserClientFactory = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: first,
+      browserClientFactory
+    });
+    const taskId = "f9b5e181-eaf7-457e-a519-cfe22d37f39c";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+
+    await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("second failure");
+
+    expect(browserClientFactory).toHaveBeenCalledTimes(2);
+    expect(second.open).toHaveBeenCalledOnce();
+    await dependencies.close?.();
+  });
+
+  it("does not recycle a later open attempt for the same task", async () => {
+    const client = productionBrowserClient({
+      open: vi.fn()
+        .mockResolvedValueOnce({ type: "opened", taskId: "task", url: "https://jobs.example.test/apply", title: "Jobs" })
+        .mockRejectedValueOnce(new Error("later open failure"))
+    });
+    const browserClientFactory = vi.fn().mockResolvedValue(client);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: client,
+      browserClientFactory
+    });
+    const taskId = "b892741f-739b-4b0a-8970-cb181f42f3b2";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+    await dependencies.applicationService!.openBrowser(taskId);
+
+    await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("later open failure");
+
+    expect(browserClientFactory).toHaveBeenCalledOnce();
+    expect(client.stop).not.toHaveBeenCalled();
+    await dependencies.close?.();
+  });
+
+  it("does not restore the first-open retry after a failed task release", async () => {
+    const first = productionBrowserClient({
+      releaseTask: vi.fn(async () => { throw new Error("release failure"); }),
+      stop: vi.fn(async () => { throw new Error("stop failure"); })
+    });
+    const second = productionBrowserClient({
+      open: vi.fn(async () => { throw new Error("later open failure"); })
+    });
+    const third = productionBrowserClient();
+    const browserClientFactory = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second)
+      .mockResolvedValueOnce(third);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: first,
+      browserClientFactory
+    });
+    const taskId = "ade7d2bd-0b36-4678-b06b-775595c2485a";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+    await dependencies.applicationService!.openBrowser(taskId);
+    await expect(dependencies.applicationService!.cancel(taskId)).rejects.toThrow("stop failure");
+
+    await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("later open failure");
+
+    expect(browserClientFactory).toHaveBeenCalledTimes(2);
+    expect(second.stop).not.toHaveBeenCalled();
+    expect(third.open).not.toHaveBeenCalled();
+    await dependencies.close?.();
+  });
+
+  it("does not start a replacement Worker when close races with recycling", async () => {
+    let finishStop: (() => void) | undefined;
+    const stopPending = new Promise<void>((resolve) => {
+      finishStop = resolve;
+    });
+    const first = productionBrowserClient({
+      releaseTask: vi.fn(async () => { throw new Error("release failure"); }),
+      stop: vi.fn(async () => stopPending)
+    });
+    const second = productionBrowserClient();
+    const browserClientFactory = vi.fn()
+      .mockResolvedValueOnce(first)
+      .mockResolvedValueOnce(second);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: first,
+      browserClientFactory
+    });
+    const taskId = "c00ea867-c851-431e-a544-ec20ba4e5461";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+    await dependencies.applicationService!.openBrowser(taskId);
+    const cancellation = dependencies.applicationService!.cancel(taskId).catch((error: unknown) => error);
+    await vi.waitFor(() => expect(first.stop).toHaveBeenCalledOnce());
+
+    const closing = dependencies.close?.();
+    finishStop?.();
+    await closing;
+    await cancellation;
+
+    expect(first.stop).toHaveBeenCalledOnce();
+    expect(browserClientFactory).toHaveBeenCalledOnce();
+    expect(second.stop).not.toHaveBeenCalled();
+  });
+
+  it("does not recycle a Worker after an observation failure", async () => {
+    const first = productionBrowserClient({
+      observe: vi.fn(async () => { throw new Error("observation failure"); })
+    });
+    const browserClientFactory = vi.fn().mockResolvedValue(first);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: first,
+      browserClientFactory
+    });
+    const taskId = "3e05c1be-b83e-47a1-a8f5-8243de55383d";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+    await dependencies.applicationService!.openBrowser(taskId);
+
+    await expect(dependencies.applicationService!.runUntilPause(taskId)).rejects.toThrow("observation failure");
+
+    expect(browserClientFactory).toHaveBeenCalledOnce();
+    expect(first.stop).not.toHaveBeenCalled();
+    await dependencies.close?.();
+  });
+
+  it("does not retain a failed Worker startup promise", async () => {
+    const client = productionBrowserClient();
+    const browserClientFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("startup failure"))
+      .mockResolvedValueOnce(client);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: client,
+      browserClientFactory
+    });
+    const taskId = "a03ed3e4-b948-4f96-aa42-13fbf36603f6";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+
+    await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("startup failure");
+    await expect(dependencies.applicationService!.openBrowser(taskId)).resolves.toBeUndefined();
+
+    expect(browserClientFactory).toHaveBeenCalledTimes(2);
+    expect(client.open).toHaveBeenCalledOnce();
+    await dependencies.close?.();
+  });
+
+  it("does not consume the first-open retry when Worker startup fails before navigation", async () => {
+    const failedOpen = productionBrowserClient({
+      open: vi.fn(async () => { throw new Error("stale after startup"); })
+    });
+    const recovered = productionBrowserClient();
+    const browserClientFactory = vi.fn()
+      .mockRejectedValueOnce(new Error("startup failure"))
+      .mockResolvedValueOnce(failedOpen)
+      .mockResolvedValueOnce(recovered);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: failedOpen,
+      browserClientFactory
+    });
+    const taskId = "2cc3f67d-2d38-45c2-8645-f20121621f6a";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+
+    await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("startup failure");
+    await expect(dependencies.applicationService!.openBrowser(taskId)).resolves.toBeUndefined();
+
+    expect(browserClientFactory).toHaveBeenCalledTimes(3);
+    expect(failedOpen.open).toHaveBeenCalledOnce();
+    expect(recovered.open).toHaveBeenCalledOnce();
+    await dependencies.close?.();
+  });
+
+  it("does not recycle or replay a failed execute command", async () => {
+    const client = productionBrowserClient({
+      execute: vi.fn(async () => { throw new Error("execution failure"); })
+    });
+    const browserClientFactory = vi.fn().mockResolvedValue(client);
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: client,
+      browserClientFactory
+    });
+    dependencies.profileRepository.createExtracted({
+      id: "self-evaluation",
+      fieldPath: "selfEvaluation",
+      value: "原始自我评价",
+      status: "extracted",
+      confidence: 1,
+      scope: "profile",
+      evidence: [{ documentId: "resume", page: 1, text: "原始自我评价", extraction: "pdf_text" }],
+      revision: 1
+    });
+    dependencies.profileRepository.confirm("self-evaluation");
+    const taskId = "ac278692-dcf5-4682-8581-50d344023f5a";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+    const form: FormSnapshot = {
+      id: "snapshot-form",
+      taskId,
+      url: "https://jobs.example.test/apply",
+      title: "Application",
+      stage: "application_form",
+      fields: [{
+        id: "self",
+        label: "自我评价",
+        type: "textarea",
+        required: true,
+        options: [],
+        currentValue: "",
+        semanticHint: "selfEvaluation"
+      }],
+      actions: [],
+      errors: []
+    };
+
+    await dependencies.applicationService!.runUntilPause(taskId, form);
+    const review = dependencies.applicationService!.contentReview(taskId);
+    if (!review) throw new Error("content review missing");
+    await expect(dependencies.applicationService!.approveReview(taskId, review.id)).resolves.toBeUndefined();
+    await expect(dependencies.applicationService!.runUntilPause(taskId, form)).resolves.toBeUndefined();
+
+    expect(client.execute).toHaveBeenCalledOnce();
+    expect(browserClientFactory).toHaveBeenCalledOnce();
+    expect(client.stop).not.toHaveBeenCalled();
+    expect(dependencies.applicationService!.progress(taskId).status).toBe("paused");
+    await dependencies.close?.();
+  });
+
   it("reviews a profile self-evaluation once and fills the approved task value", async () => {
     const executedValues: unknown[] = [];
     const formFor = (taskId: string, id: string, value = ""): FormSnapshot => ({
@@ -758,6 +1040,29 @@ function applicationField(
     required: true,
     options: [],
     currentValue: "",
+    ...overrides
+  };
+}
+
+function productionBrowserClient(overrides: Record<string, unknown> = {}) {
+  return {
+    open: vi.fn(async (taskId: string, url: string) => ({ type: "opened" as const, taskId, url, title: "Jobs" })),
+    observe: vi.fn(async (taskId: string) => ({
+      type: "snapshot" as const,
+      snapshot: {
+        id: `snapshot-${taskId}`,
+        taskId,
+        url: "https://jobs.example.test/apply",
+        title: "Login",
+        stage: "login" as const,
+        fields: [], actions: [], errors: []
+      }
+    })),
+    execute: vi.fn(),
+    invalidateExecution: vi.fn(async () => undefined),
+    releaseTask: vi.fn(async () => undefined),
+    onActivity: vi.fn(() => vi.fn()),
+    stop: vi.fn(async () => undefined),
     ...overrides
   };
 }

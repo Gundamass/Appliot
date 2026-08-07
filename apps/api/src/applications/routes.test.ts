@@ -24,7 +24,12 @@ afterEach(async () => {
   }
 });
 
-async function buildApp(options: { sseHeartbeatMs?: number; observeStages?: Array<"login" | "application_form"> } = {}) {
+async function buildApp(options: {
+  sseHeartbeatMs?: number;
+  observeStages?: Array<"login" | "application_form">;
+  invalidateExecution?: (taskId: string, executionEpoch: number) => Promise<void>;
+  releaseTask?: (taskId: string) => Promise<void>;
+} = {}) {
   const database = new Database(":memory:");
   migrateDatabase(database);
   const storageRoot = await mkdtemp(join(tmpdir(), "resume-application-routes-"));
@@ -36,6 +41,8 @@ async function buildApp(options: { sseHeartbeatMs?: number; observeStages?: Arra
     checkpoints: createCheckpointRepository(database),
     browser: {
       open,
+      ...(options.invalidateExecution === undefined ? {} : { invalidateExecution: options.invalidateExecution }),
+      ...(options.releaseTask === undefined ? {} : { releaseTask: options.releaseTask }),
       async observe(taskId) {
         const stage = stages[Math.min(observed++, stages.length - 1)] ?? "login";
         return {
@@ -724,6 +731,67 @@ describe("application task routes", () => {
       method: "POST", url: "/api/applications", payload: { applicationUrl: "https://jobs.example.test/second" }
     });
     expect(second.statusCode).toBe(201);
+  });
+
+  it("waits for browser execution invalidation and task release before completing cancellation", async () => {
+    const calls: string[] = [];
+    let finishRelease: (() => void) | undefined;
+    const releasePending = new Promise<void>((resolve) => {
+      finishRelease = resolve;
+    });
+    const { app } = await buildApp({
+      async invalidateExecution(taskId) {
+        calls.push(`invalidate:${taskId}`);
+      },
+      async releaseTask(taskId) {
+        calls.push(`release:${taskId}`);
+        await releasePending;
+      }
+    });
+    const created = await app.inject({
+      method: "POST", url: "/api/applications", payload: { applicationUrl: "https://jobs.example.test/cancel" }
+    });
+    const taskId = created.json().id as string;
+    let completed = false;
+
+    const cancellation = app.inject({
+      method: "POST", url: `/api/applications/${taskId}/commands`, payload: { type: "cancel" }
+    }).then((response) => {
+      completed = true;
+      return response;
+    });
+    await vi.waitFor(() => expect(calls).toEqual([
+      `invalidate:${taskId}`,
+      `release:${taskId}`
+    ]));
+
+    expect(completed).toBe(false);
+    finishRelease?.();
+    const cancelled = await cancellation;
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json()).toMatchObject({ state: "cancelled", commands: [] });
+  });
+
+  it("still releases the browser task when execution invalidation fails during cancellation", async () => {
+    const releaseTask = vi.fn(async () => undefined);
+    const { app } = await buildApp({
+      async invalidateExecution() {
+        throw new Error("worker disconnected");
+      },
+      releaseTask
+    });
+    const created = await app.inject({
+      method: "POST", url: "/api/applications", payload: { applicationUrl: "https://jobs.example.test/cancel" }
+    });
+    const taskId = created.json().id as string;
+
+    const cancelled = await app.inject({
+      method: "POST", url: `/api/applications/${taskId}/commands`, payload: { type: "cancel" }
+    });
+
+    expect(cancelled.statusCode).toBe(200);
+    expect(cancelled.json()).toMatchObject({ state: "cancelled", commands: [] });
+    expect(releaseTask).toHaveBeenCalledWith(taskId);
   });
 
   it("persists question answers and rejects a cross-task promotion outside the current task state", async () => {

@@ -37,6 +37,7 @@ export interface BrowserWorkerOptions {
   uploadDirectory?: string;
   workerEntry?: string;
   requestTimeoutMs?: number;
+  shutdownTimeoutMs?: number;
   approvalKey?: Uint8Array;
 }
 
@@ -57,7 +58,8 @@ export class BrowserWorkerClient {
 
   private constructor(
     private readonly child: ChildProcess,
-    private readonly requestTimeoutMs: number
+    private readonly requestTimeoutMs: number,
+    private readonly shutdownTimeoutMs: number
   ) {
     child.stderr?.on("data", (chunk) => {
       this.workerOutput += String(chunk);
@@ -97,7 +99,12 @@ export class BrowserWorkerClient {
       execArgv: workerEntry.endsWith(".ts") ? ["--import", "tsx"] : [],
       stdio: ["ignore", "ignore", "pipe", "ipc"]
     });
-    const client = new BrowserWorkerClient(child, options.requestTimeoutMs ?? 20_000);
+    const requestTimeoutMs = options.requestTimeoutMs ?? 20_000;
+    const client = new BrowserWorkerClient(
+      child,
+      requestTimeoutMs,
+      options.shutdownTimeoutMs ?? requestTimeoutMs
+    );
     try {
       const response = await client.request({
         type: "handshake",
@@ -142,6 +149,13 @@ export class BrowserWorkerClient {
     await this.request({ type: "invalidate_execution", taskId, executionEpoch });
   }
 
+  async releaseTask(taskId: string): Promise<void> {
+    const response = await this.request({ type: "release_task", taskId });
+    if (response.type !== "released") {
+      throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+    }
+  }
+
   onActivity(listener: (activity: WorkerActivity) => void): () => void {
     this.activityListeners.add(listener);
     return () => this.activityListeners.delete(listener);
@@ -152,14 +166,18 @@ export class BrowserWorkerClient {
       return;
     }
     const exitPromise = new Promise<void>((resolve) => this.child.once("exit", () => resolve()));
-    const response = await this.request({ type: "shutdown" });
-    if (response.type !== "stopped") {
-      throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+    try {
+      const response = await this.request({ type: "shutdown" }, this.shutdownTimeoutMs);
+      if (response.type !== "stopped") {
+        throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+      }
+      await withTimeout(exitPromise, this.shutdownTimeoutMs, "浏览器 Worker 关闭后未退出");
+    } catch {
+      await this.terminate();
     }
-    await exitPromise;
   }
 
-  private request(rawRequest: WorkerRequest): Promise<WorkerResponse> {
+  private request(rawRequest: WorkerRequest, timeoutMs = this.requestTimeoutMs): Promise<WorkerResponse> {
     if (this.stopped || !this.child.connected) {
       return Promise.reject(new Error("浏览器 Worker 未运行"));
     }
@@ -176,7 +194,7 @@ export class BrowserWorkerClient {
       const timer = setTimeout(() => {
         this.pending.delete(requestId);
         reject(new Error(`浏览器 Worker 请求超时：${request.type}`));
-      }, this.requestTimeoutMs);
+      }, timeoutMs);
       this.pending.set(requestId, { resolve, reject, timer });
       this.child.send({ requestId, request }, (error) => {
         if (!error) {
@@ -265,4 +283,20 @@ function hasRequestBoundActivity(value: unknown): boolean {
     && typeof value.response === "object" && value.response !== null
     && "type" in value.response
     && value.response.type === "activity";
+}
+
+function withTimeout<T>(promise: Promise<T>, timeoutMs: number, message: string): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error(message)), timeoutMs);
+    promise.then(
+      (value) => {
+        clearTimeout(timer);
+        resolve(value);
+      },
+      (error: unknown) => {
+        clearTimeout(timer);
+        reject(error);
+      }
+    );
+  });
 }

@@ -90,6 +90,42 @@ describe("BrowserWorkerClient", () => {
     await expect(readFile(join(profileDir, "worker-exit.txt"), "utf8")).resolves.toBe("terminated");
   });
 
+  it("terminates the child process when graceful shutdown times out", async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-browser-unresponsive-"));
+    temporaryDirectories.push(profileDir);
+    const client = await BrowserWorkerClient.start({
+      profileDir,
+      headless: true,
+      requestTimeoutMs: 5_000,
+      shutdownTimeoutMs: 100,
+      workerEntry: fileURLToPath(new URL("./fixtures/unresponsive-worker.ts", import.meta.url))
+    });
+    clients.push(client);
+
+    await expect(client.stop()).resolves.toBeUndefined();
+    clients.splice(clients.indexOf(client), 1);
+
+    await expect(readFile(join(profileDir, "worker-exit.txt"), "utf8")).resolves.toBe("terminated");
+  });
+
+  it("terminates the child process when it acknowledges shutdown without exiting", async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-browser-stuck-exit-"));
+    temporaryDirectories.push(profileDir);
+    const client = await BrowserWorkerClient.start({
+      profileDir,
+      headless: true,
+      requestTimeoutMs: 5_000,
+      shutdownTimeoutMs: 100,
+      workerEntry: fileURLToPath(new URL("./fixtures/stopped-worker.ts", import.meta.url))
+    });
+    clients.push(client);
+
+    await expect(client.stop()).resolves.toBeUndefined();
+    clients.splice(clients.indexOf(client), 1);
+
+    await expect(readFile(join(profileDir, "worker-exit.txt"), "utf8")).resolves.toBe("terminated");
+  });
+
   it("persists a manual login session and rejects non-web URLs", async () => {
     const server = createServer((request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -118,6 +154,11 @@ describe("BrowserWorkerClient", () => {
     await expect(firstClient.open("task-1", `${baseUrl}/login`)).resolves.toMatchObject({
       type: "opened",
       title: "已登录"
+    });
+    await firstClient.releaseTask("task-1");
+    await expect(firstClient.open("task-2", `${baseUrl}/account`)).resolves.toMatchObject({
+      type: "opened",
+      title: "会话已恢复"
     });
     await firstClient.stop();
     clients.splice(clients.indexOf(firstClient), 1);

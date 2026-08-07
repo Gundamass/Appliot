@@ -112,6 +112,10 @@ export const WorkerRequestSchema = z.discriminatedUnion("type", [
     executionEpoch: z.number().int().nonnegative()
   }).strict(),
   z.object({
+    type: z.literal("release_task"),
+    taskId: z.string().min(1)
+  }).strict(),
+  z.object({
     type: z.literal("shutdown")
   }).strict()
 ]);
@@ -164,6 +168,10 @@ export const WorkerResponseSchema = z.discriminatedUnion("type", [
   }).strict(),
   z.object({
     type: z.literal("stopped")
+  }).strict(),
+  z.object({
+    type: z.literal("released"),
+    taskId: z.string().min(1)
   }).strict(),
   z.object({
     type: z.literal("opened"),

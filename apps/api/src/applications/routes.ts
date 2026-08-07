@@ -114,7 +114,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       console.error("[application.create] failed", error instanceof Error ? error.stack ?? error.message : error);
       if (serviceStarted) {
         try {
-          dependencies.applicationService.cancel(taskInput.id);
+          await dependencies.applicationService.cancel(taskInput.id);
         } catch {
           // Cleanup below must still run when cancellation observes a terminal actor.
         } finally {
@@ -190,7 +190,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     try {
       if (command.data.type === "retry_current") await dependencies.applicationService.retryCurrent(task.id);
       else if (command.data.type === "manual_done") await dependencies.applicationService.manualDone(task.id);
-      else dependencies.applicationService.cancel(task.id);
+      else await dependencies.applicationService.cancel(task.id);
       emitState(task.id);
       return reply.code(200).send(taskResponse(task));
     } catch (error) {
@@ -305,7 +305,7 @@ async function executeCommand(dependencies: ApplicationRouteDependencies, taskId
   const { applicationService: service } = dependencies;
   switch (command.type) {
     case "cancel":
-      service.cancel(taskId);
+      await service.cancel(taskId);
       return;
     case "open_browser":
       await service.openBrowser(taskId);
