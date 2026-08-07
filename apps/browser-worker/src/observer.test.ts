@@ -279,6 +279,31 @@ describe("page structural fingerprint", () => {
     }
   }, 30_000);
 
+  it("waits for an asynchronously mounted apply action on a job route", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Job</title><main id="app"></main>
+        <script>setTimeout(() => { document.querySelector('#app').innerHTML = '<button type="button">Apply</button>'; }, 160);</script>`);
+    });
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-observer-delayed-action-"));
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no port");
+      await session.start(Buffer.alloc(32, 1).toString("base64url"));
+      await session.open("task-delayed-action", `http://127.0.0.1:${address.port}/job/role`);
+
+      const snapshot = await session.observe("task-delayed-action");
+
+      expect(snapshot.actions.map((action) => action.text)).toContain("Apply");
+    } finally {
+      await session.stop();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("observes DJI text-backed year and month selects as separate date fields", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");

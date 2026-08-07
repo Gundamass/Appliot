@@ -270,9 +270,11 @@ export class BrowserObserver {
   private async waitForObservablePage(): Promise<BrowserRawFormObservation> {
     let raw = await this.page.evaluate<BrowserRawFormObservation>(BROWSER_OBSERVATION_SCRIPT);
     const deadline = Date.now() + EMPTY_PAGE_WAIT_CAP_MS;
-    const route = this.page.url().toLocaleLowerCase();
-    const isFormRoute = /\/(?:apply|application|login)(?:[/?#]|$)/u.test(route);
-    while (isFormRoute && raw.fields.length === 0 && raw.errors.length === 0 && Date.now() < deadline) {
+    const isFormRoute = /\/(?:apply|application|login)(?:[/?#]|$)/u.test(this.page.url().toLocaleLowerCase());
+    while (raw.errors.length === 0
+      && raw.fields.length === 0
+      && (isFormRoute || raw.actions.length === 0)
+      && Date.now() < deadline) {
       await delay(EMPTY_PAGE_SAMPLE_MS);
       raw = await this.page.evaluate<BrowserRawFormObservation>(BROWSER_OBSERVATION_SCRIPT);
     }
@@ -303,7 +305,7 @@ export class BrowserObserver {
     const url = this.page.url().toLocaleLowerCase();
     if (/review|confirm|preview/u.test(url)) return "review";
     if (/success|complete|finished/u.test(url)) return "success";
-    if (raw.fields.some((field) => field.inputType === "password")) return "login";
+    if (raw.fields.some((field) => field.inputType === "password") || hasLoginAction(raw.actions)) return "login";
     if (raw.fields.length > 0) return "application_form";
     return "unknown";
   }
@@ -312,10 +314,15 @@ export class BrowserObserver {
     const url = this.page.url().toLocaleLowerCase();
     if (/review|confirm|preview/u.test(url)) return "review";
     if (/success|complete|finished/u.test(url)) return "success";
-    if (raw.fields.some((field) => field.inputType === "password")) return "login";
+    if (raw.fields.some((field) => field.inputType === "password") || hasLoginAction(raw.actions)) return "login";
     if (raw.fields.length > 0) return "application_form";
     return "unknown";
   }
+}
+
+function hasLoginAction(actions: Array<{ text?: string; ariaLabel?: string; accessibleName?: string }>): boolean {
+  return actions.some((action) => /sign\s*in|log\s*in|登录|邮箱登录|google登录/iu
+    .test(`${action.text ?? ""} ${action.ariaLabel ?? ""} ${action.accessibleName ?? ""}`));
 }
 
 function delay(milliseconds: number): Promise<void> {
