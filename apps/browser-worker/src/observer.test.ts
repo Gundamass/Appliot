@@ -530,6 +530,38 @@ describe("page structural fingerprint", () => {
     }
   }, 30_000);
 
+  it("keeps a verbose resume upload wrapper label concise", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Apply</title>
+        <div class="resume-upload-wrapper">
+          <h3>Resume</h3>
+          <p>Upload a PDF or DOCX file. Maximum size 10 MB. Drag and drop is supported.</p>
+          <button type="button">Choose file</button>
+          <input type="file" accept="application/pdf" style="display:none">
+        </div>`);
+    });
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-observer-concise-upload-"));
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no port");
+      await session.start(Buffer.alloc(32, 1).toString("base64url"));
+      await session.open("task-concise-upload", `http://127.0.0.1:${address.port}/apply`);
+
+      const snapshot = await session.observe("task-concise-upload");
+
+      expect(snapshot.fields).toEqual([
+        expect.objectContaining({ label: "Resume", type: "file", interactionMode: "file" })
+      ]);
+    } finally {
+      await session.stop();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("reports activity only for visible, editable, non-internal controls", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");
@@ -612,6 +644,59 @@ describe("page structural fingerprint", () => {
       expect(clicks).toHaveLength(2);
       expect(new Set(clicks.map((activity) => activity.fieldId)).size).toBe(2);
       expect(JSON.stringify(clicks)).not.toMatch(/Choose job|Job details|#visible|#link|coordinates/);
+    } finally {
+      await session.stop();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("groups native and ARIA choice controls into question fields", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Apply</title>
+        <fieldset required>
+          <legend>Are you willing to relocate?</legend>
+          <label><input type="radio" name="relocate" value="Yes">Yes</label>
+          <label><input type="radio" name="relocate" value="No" checked>No</label>
+        </fieldset>
+        <div role="radiogroup" aria-labelledby="sponsorship-label" aria-required="true">
+          <div id="sponsorship-label">Will you now or in the future require sponsorship?</div>
+          <button type="button" role="radio" aria-checked="true">Yes</button>
+          <button type="button" role="radio" aria-checked="false">No</button>
+        </div>
+        <button type="button">Continue</button>`);
+    });
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-observer-choice-groups-"));
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no port");
+      await session.start(Buffer.alloc(32, 1).toString("base64url"));
+      await session.open("task-choice-groups", `http://127.0.0.1:${address.port}/apply`);
+
+      const snapshot = await session.observe("task-choice-groups");
+
+      expect(snapshot.fields).toEqual([
+        expect.objectContaining({
+          label: "Are you willing to relocate?",
+          type: "radio",
+          required: true,
+          options: ["Yes", "No"],
+          currentValue: "No",
+          interactionMode: "choice_group"
+        }),
+        expect.objectContaining({
+          label: "Will you now or in the future require sponsorship?",
+          type: "radio",
+          required: true,
+          options: ["Yes", "No"],
+          currentValue: "Yes",
+          interactionMode: "choice_group"
+        })
+      ]);
+      expect(snapshot.actions.map((action) => action.text)).toEqual(["Continue"]);
     } finally {
       await session.stop();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

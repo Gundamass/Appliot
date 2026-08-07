@@ -4,7 +4,7 @@ import type { Locator, Route } from "playwright-core";
 import { basename } from "node:path";
 import { BrowserObserver, type BrowserObservation } from "./observer.js";
 import type { ActivityMonitor } from "./activity-monitor.js";
-import { selectCustomControl } from "./control-adapters.js";
+import { selectChoiceGroup, selectCustomControl } from "./control-adapters.js";
 
 type ExecutionResponse = Extract<WorkerResponse, { type: "execution_result" }>;
 
@@ -69,7 +69,9 @@ export class ControlledExecutor {
         if (!isCurrent()) return this.blocked(command, "execution_invalidated", current.snapshot);
         await this.runAutomation(async () => {
           if (!isCurrent()) return;
-          if (field?.type === "radio") {
+          if (field?.type === "radio" && field.interactionMode === "choice_group") {
+            expectedReadback = await selectChoiceGroup(locator, command.value);
+          } else if (field?.type === "radio") {
             await locator.check();
             expectedReadback = true;
           } else if (field?.controlKind === "custom") {

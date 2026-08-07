@@ -28,6 +28,47 @@ export async function selectCustomControl(locator: Locator, expected: string): P
   return { selectedValue, recovered: selectedValue !== expected };
 }
 
+export async function selectChoiceGroup(locator: Locator, expected: string): Promise<string> {
+  const nativeRadio = await locator.evaluate((element) =>
+    element instanceof HTMLInputElement && element.type === "radio");
+  let choices: Locator;
+  if (nativeRadio) {
+    const fieldset = locator.locator("xpath=ancestor::fieldset[1]");
+    if (await fieldset.count() > 0) {
+      choices = fieldset.locator('input[type="radio"]');
+    } else {
+      const name = await locator.getAttribute("name");
+      choices = name === null
+        ? locator.page().locator('input[type="radio"]')
+        : locator.page().locator(`input[type="radio"][name=${JSON.stringify(name)}]`);
+    }
+  } else {
+    choices = locator.locator('[role="radio"]');
+  }
+
+  const matches: Array<{ index: number; text: string }> = [];
+  for (let index = 0; index < await choices.count(); index += 1) {
+    const choice = choices.nth(index);
+    const text = await choice.evaluate((element) => {
+      if (element instanceof HTMLInputElement) {
+        return [...element.labels ?? []].map((label) => label.textContent ?? "").join(" ")
+          || element.getAttribute("aria-label")
+          || element.value;
+      }
+      return element.getAttribute("aria-label") || element.textContent || element.getAttribute("data-value") || "";
+    });
+    const normalized = normalizeText(text);
+    if (normalizeChoice(normalized) === normalizeChoice(expected)) matches.push({ index, text: normalized });
+  }
+  if (matches.length === 0) throw new Error("choice_option_not_found");
+  if (matches.length > 1) throw new Error("choice_option_ambiguous");
+
+  const selected = choices.nth(matches[0]!.index);
+  if (nativeRadio) await selected.check();
+  else await selected.click();
+  return matches[0]!.text;
+}
+
 function normalizeText(value: string): string {
   return value.normalize("NFKC").replace(/\s+/gu, " ").trim();
 }
@@ -35,4 +76,11 @@ function normalizeText(value: string): string {
 function normalizeOption(value: string): string {
   const normalized = normalizeText(value).replace(/[年月日]$/u, "");
   return /^\d{1,2}$/u.test(normalized) ? String(Number(normalized)) : normalized;
+}
+
+function normalizeChoice(value: string): string {
+  const normalized = normalizeText(value).toLocaleLowerCase();
+  if (["true", "yes", "y", "是", "同意", "接受"].includes(normalized)) return "true";
+  if (["false", "no", "n", "否", "不同意", "不接受"].includes(normalized)) return "false";
+  return normalized;
 }

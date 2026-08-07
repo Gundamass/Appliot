@@ -63,12 +63,87 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
     }
     return "";
   };
+  const labelledByText = (element) => normalized((element.getAttribute("aria-labelledby") ?? "")
+    .split(/\s+/)
+    .filter(Boolean)
+    .map((id) => document.getElementById(id)?.textContent ?? "")
+    .join(" "));
+  const radioOptionText = (element) => normalized(
+    [...(element.labels ?? [])].map((label) => label.textContent ?? "").join(" ")
+      || element.getAttribute("aria-label")
+      || element.value
+  );
   let fieldIndex = 0;
-  const fields = [...document.querySelectorAll("input:not([type=hidden]), textarea, select, [role=combobox]")]
+  const fields = [...document.querySelectorAll("input:not([type=hidden]), textarea, select, [role=combobox], [role=radiogroup]")]
     .flatMap((element, registryIndex) => {
     if (unavailable(element) || (!visible(element) && !resumableHiddenFile(element)) || internal(element)) return [];
     const index = fieldIndex++;
     const tag = element.tagName.toLocaleLowerCase();
+    const ariaChoiceGroup = element.getAttribute("role")?.toLocaleLowerCase() === "radiogroup";
+    const nativeRadio = element instanceof HTMLInputElement && element.type === "radio";
+    if (nativeRadio) {
+      const group = element.name
+        ? [...document.querySelectorAll('input[type="radio"]')].filter((candidate) => candidate.name === element.name)
+        : [...(element.closest("fieldset")?.querySelectorAll('input[type="radio"]') ?? [element])];
+      if (group[0] !== element) {
+        fieldIndex -= 1;
+        return [];
+      }
+      const fieldset = element.closest("fieldset");
+      const legend = normalized(fieldset?.querySelector(":scope > legend")?.textContent);
+      const ariaLabelledBy = labelledByText(fieldset ?? element);
+      const options = group.map(radioOptionText).filter(Boolean);
+      const selected = group.find((candidate) => candidate.checked);
+      const questionLabel = legend
+        || normalized((fieldset ?? element).getAttribute("aria-label"))
+        || ariaLabelledBy
+        || formItemLabel(element)
+        || normalized(element.name);
+      if (!questionLabel || options.length === 0) return [];
+      return [{
+        path: "field:" + index,
+        registryIndex,
+        tag: "input",
+        inputType: "radio",
+        name: element.name,
+        required: Boolean(fieldset?.hasAttribute("required")) || required(element, questionLabel),
+        value: selected ? radioOptionText(selected) : "",
+        options,
+        controlKind: "native",
+        interactionMode: "choice_group",
+        explicitLabel: legend,
+        wrappingLabel: "",
+        ariaLabel: normalized((fieldset ?? element).getAttribute("aria-label")),
+        ariaLabelledBy,
+        nearbyText: questionLabel
+      }];
+    }
+    if (ariaChoiceGroup) {
+      const choices = [...element.querySelectorAll('[role="radio"]')]
+        .filter((choice) => visible(choice) && !unavailable(choice));
+      const options = choices.map((choice) => normalized(choice.getAttribute("aria-label") || choice.textContent)).filter(Boolean);
+      const selectedIndex = choices.findIndex((choice) => (choice.getAttribute("aria-checked") ?? "").toLocaleLowerCase() === "true");
+      const ariaLabelledBy = labelledByText(element);
+      const questionLabel = normalized(element.getAttribute("aria-label")) || ariaLabelledBy || formItemLabel(element);
+      if (!questionLabel || options.length === 0) return [];
+      return [{
+        path: "field:" + index,
+        registryIndex,
+        tag: "input",
+        inputType: "radio",
+        name: element.getAttribute("name") ?? "",
+        required: required(element, questionLabel),
+        value: selectedIndex < 0 ? "" : options[selectedIndex],
+        options,
+        controlKind: "custom",
+        interactionMode: "choice_group",
+        explicitLabel: "",
+        wrappingLabel: "",
+        ariaLabel: normalized(element.getAttribute("aria-label")),
+        ariaLabelledBy,
+        nearbyText: questionLabel
+      }];
+    }
     const roleCombobox = element.getAttribute("role")?.toLocaleLowerCase() === "combobox";
     const textBackedSelect = element instanceof HTMLInputElement
       && Boolean(element.closest("[class*='Select-container']"));
@@ -86,15 +161,16 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       ? normalized(document.querySelector('label[for="' + CSS.escape(element.id) + '"]')?.textContent)
       : "";
     const wrappingLabel = normalized(element.closest("label")?.textContent);
-    const ariaLabelledBy = normalized((element.getAttribute("aria-labelledby") ?? "")
-      .split(/\s+/)
-      .filter(Boolean)
-      .map((id) => document.getElementById(id)?.textContent ?? "")
-      .join(" "));
+    const ariaLabelledBy = labelledByText(element);
     const previous = element.previousElementSibling;
-    const uploadText = resumableHiddenFile(element)
-      ? normalized(element.closest(".ant-upload-wrapper, .ant-upload, [class*='upload']")?.textContent)
-      : "";
+    const uploadWrapper = resumableHiddenFile(element)
+      ? element.closest(".ant-upload-wrapper, .ant-upload, [class*='upload']")
+      : null;
+    const uploadContent = normalized(uploadWrapper?.textContent);
+    const uploadHeading = normalized(uploadWrapper
+      ?.querySelector("label, [data-field-label], h1, h2, h3, h4, legend, [role=heading]")?.textContent);
+    const uploadKeyword = uploadContent.match(/上传简历|简历|resume|curriculum vitae|\bcv\b/iu)?.[0] ?? "";
+    const uploadText = uploadHeading || uploadKeyword || uploadContent;
     const nearbyText = roleCombobox
       ? normalized(element.getAttribute("aria-label"))
       : textBackedSelect
@@ -144,7 +220,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
   let actionIndex = 0;
   const actions = [...document.querySelectorAll('button, input[type="button"], input[type="submit"], a[href], a[role="button"]')]
     .flatMap((element, registryIndex) => {
-    if (unavailable(element) || !visible(element) || internal(element)) return [];
+    if (unavailable(element) || !visible(element) || internal(element) || element.closest('[role="radiogroup"]')) return [];
     return [{
       path: "action:" + actionIndex++,
       registryIndex,

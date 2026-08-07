@@ -362,6 +362,56 @@ describe("controlled browser executor", () => {
     expect(result.snapshot.title).toBe("第二步");
   }, 30_000);
 
+  it("selects and reads back native and ARIA choice groups", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Apply</title>
+        <fieldset required>
+          <legend>Are you willing to relocate?</legend>
+          <label><input type="radio" name="relocate" value="Yes" checked>Yes</label>
+          <label><input type="radio" name="relocate" value="No">No</label>
+        </fieldset>
+        <div role="radiogroup" aria-label="Will you require sponsorship?" aria-required="true">
+          <button type="button" role="radio" aria-checked="true">Yes</button>
+          <button type="button" role="radio" aria-checked="false">No</button>
+        </div>
+        <script>
+          document.querySelector('[role=radiogroup]').addEventListener('click', (event) => {
+            const selected = event.target.closest('[role=radio]');
+            if (!selected) return;
+            for (const choice of document.querySelectorAll('[role=radiogroup] [role=radio]')) {
+              choice.setAttribute('aria-checked', String(choice === selected));
+            }
+          });
+        </script>`);
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-choice-groups-"));
+    temporaryDirectories.push(profileDir);
+    const key = Buffer.alloc(32, 5);
+    const policy = new ActionPolicy(key);
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    sessions.push(session);
+    await session.start(key.toString("base64url"));
+    await session.open("task-choice-groups", `http://127.0.0.1:${address.port}/apply`);
+
+    let snapshot = await session.observe("task-choice-groups");
+    const relocate = snapshot.fields.find((field) => field.label === "Are you willing to relocate?");
+    if (!relocate) throw new Error("native radio group was not observed");
+    let result = await session.execute(approvedSelect(policy, snapshot, relocate.id, "false"));
+    expect(result).toMatchObject({ status: "applied", actualValue: "No" });
+
+    snapshot = result.snapshot;
+    const sponsorship = snapshot.fields.find((field) => field.label === "Will you require sponsorship?");
+    if (!sponsorship) throw new Error("ARIA radio group was not observed");
+    result = await session.execute(approvedSelect(policy, snapshot, sponsorship.id, "No"));
+    expect(result).toMatchObject({ status: "applied", actualValue: "No" });
+  }, 30_000);
+
   it("selects a custom year combobox by opening and choosing a visible option", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");

@@ -196,4 +196,16 @@ describe("字段语义解析器", () => {
       reason: "embedding_unavailable"
     });
   });
+
+  it.each([
+    ["Legal Name", "text", "basics.name"],
+    ["Phone Number", "text", "basics.phone"],
+    ["Where are you currently located?", "text", "basics.currentLocation"],
+    ["When can you start a new role?", "text", "preferences.availability"],
+    ["Are you willing to relocate?", "radio", "preferences.willingToRelocate"]
+  ] as const)("maps common ATS label %s deterministically", async (label, type, semantic) => {
+    const resolver = createFieldSemanticResolver();
+    await expect(resolver.resolve({ label, type, options: type === "radio" ? ["Yes", "No"] : [] }, {}, "deterministic"))
+      .resolves.toMatchObject({ status: "mapped", semantic, source: "exact_alias" });
+  });
 });

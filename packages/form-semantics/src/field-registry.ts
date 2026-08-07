@@ -185,11 +185,28 @@ export const FIELD_DEFINITIONS: readonly FieldDefinition[] = RAW_FIELD_DEFINITIO
     : { profileOptions: PROFILE_FIELD_METADATA[field.semantic]!.options })
 }));
 
+const COMMON_ATS_ALIASES: Readonly<Record<string, string>> = {
+  "legalname": "basics.name",
+  "fullname": "basics.name",
+  "phonenumber": "basics.phone",
+  "mobilenumber": "basics.phone",
+  "whereareyoucurrentlylocated": "basics.currentLocation",
+  "currentlocation": "basics.currentLocation",
+  "whencanyoustartanewrole": "preferences.availability",
+  "earlieststartdate": "preferences.availability",
+  "areyouwillingtorelocate": "preferences.willingToRelocate",
+  "willingtorelocate": "preferences.willingToRelocate"
+};
+
 export function resolveDeterministicSemantic(input: SemanticFieldInput): FieldSemanticMatch | undefined {
   const hinted = input.semanticHint === undefined
     ? undefined
     : FIELD_DEFINITIONS.find((candidate) => matchesSemantic(candidate, input.semanticHint!));
-  const definition = hinted ?? FIELD_DEFINITIONS.find((candidate) =>
+  const commonAliasSemantic = COMMON_ATS_ALIASES[normalize(input.label)];
+  const commonAlias = commonAliasSemantic === undefined
+    ? undefined
+    : FIELD_DEFINITIONS.find((candidate) => candidate.semantic === commonAliasSemantic);
+  const definition = hinted ?? commonAlias ?? FIELD_DEFINITIONS.find((candidate) =>
     [candidate.label, ...candidate.aliases].some((alias) => normalize(alias) === normalize(input.label))
   );
   if (!definition || !definition.types.includes(input.type)) return undefined;
@@ -278,5 +295,5 @@ function materializeSemantic(template: string, entryContext: string | undefined)
 }
 
 function normalize(value: string): string {
-  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s:：*＊]/gu, "").trim();
+  return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s:：*＊?？]/gu, "").trim();
 }

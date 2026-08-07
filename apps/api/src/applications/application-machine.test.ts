@@ -695,6 +695,39 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("leaves legal acknowledgements unchecked for final user review", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "field-certification",
+        label: "I certify that the information is true and agree to the privacy policy",
+        type: "checkbox",
+        required: true,
+        options: [],
+        currentValue: false
+      }],
+      actions: [{ id: "action-submit", text: "Submit Application", class: "terminal_submit" }]
+    };
+    const execute = vi.fn();
+    const resolveField = vi.fn(async () => ({ status: "verified" as const, value: true }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute },
+      resolveField,
+      approve: () => "unused"
+    });
+
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+
+    expect(service.state("task-1").value).toBe("review_locked");
+    expect(resolveField).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+    database.close();
+  });
+
   it("stops when the browser reports success but leaves a required field empty", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

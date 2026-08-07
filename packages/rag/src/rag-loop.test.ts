@@ -549,10 +549,24 @@ describe("deterministic verification", () => {
     expect(decision).toMatchObject({ status: "blocked", evidence: [], confidence: 0 });
   });
 
-  it("blocks sensitive commitments even when supported", async () => {
+  it("allows a sensitive commitment only when the user explicitly confirmed it", async () => {
     const decision = await resolveCandidate(
       { ...emailRequest, semantic: "preferences.expectedSalary", label: "Expected salary" },
       fact({ fieldPath: "preferences.expectedSalary", value: "CNY 30000", evidence: [evidence("CNY 30000")] })
+    );
+
+    expect(decision).toMatchObject({ status: "verified_auto", value: "CNY 30000" });
+  });
+
+  it("blocks a sensitive commitment inferred from resume evidence", async () => {
+    const decision = await resolveCandidate(
+      { ...emailRequest, semantic: "preferences.expectedSalary", label: "Expected salary" },
+      fact({
+        fieldPath: "preferences.expectedSalary",
+        value: "CNY 30000",
+        status: "extracted",
+        evidence: [evidence("Expected salary: CNY 30000", "pdf_text")]
+      })
     );
 
     expect(decision.status).toBe("blocked");

@@ -50,11 +50,16 @@ export function verifyField(
   }
 
   const selected = candidates[0]!;
-  if (!plan.autoFillEligible || plan.risk !== "none") {
+  const eligibleLifecycle = selected.fact.status === "user_confirmed" || selected.fact.status === "user_corrected";
+  const explicitlyProvided = selected.source === "exact"
+    && eligibleLifecycle
+    && selected.fact.evidence.length > 0
+    && selected.fact.evidence.every((item) => item.extraction === "user");
+  const explicitSensitiveAnswer = plan.risk === "sensitive_commitment" && explicitlyProvided;
+  if ((!plan.autoFillEligible || plan.risk !== "none") && !explicitSensitiveAnswer) {
     return blocked(base, selected.fact.evidence, safeConfidence(selected.fact.confidence));
   }
 
-  const eligibleLifecycle = selected.fact.status === "user_confirmed" || selected.fact.status === "user_corrected";
   const automatic = selected.source === "exact"
     && eligibleLifecycle
     && selected.fact.confidence >= AUTO_CONFIDENCE;

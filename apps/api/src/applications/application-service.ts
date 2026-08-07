@@ -698,7 +698,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         return true;
       };
 
-      const deterministicFields = current.fields.filter((field) => !hasUserValue(field.currentValue));
+      const deterministicFields = current.fields.filter((field) =>
+        !hasUserValue(field.currentValue) && !isLegalAcknowledgementField(field));
       deterministicFields.forEach((field) => seenFieldIds.add(field.id));
       const deterministic = await resolvePass(deterministicFields, "deterministic");
       if (!runIsCurrent(taskId, runGeneration, actor)) return;
@@ -713,6 +714,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       for (let semanticRound = 0; semanticRound < 2; semanticRound += 1) {
         const semanticFields = current.fields.filter((field) =>
           !hasUserValue(field.currentValue)
+          && !isLegalAcknowledgementField(field)
           && (semanticIds.has(field.id) || !seenFieldIds.has(field.id))
         );
         if (semanticFields.length === 0) break;
@@ -775,6 +777,14 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           status: reviewDecision.decision.contentReview?.status ?? "needs_review"
         });
         sendApplicationEvent(actor, { type: "CONTENT_REVIEW_REQUIRED" });
+        persist(actor, current);
+        return;
+      }
+
+      const legalReviewFields = current.fields.filter((field) =>
+        isLegalAcknowledgementField(field) && !hasUserValue(field.currentValue));
+      if (legalReviewFields.length > 0) {
+        sendApplicationEvent(actor, { type: "REVIEW_REACHED" });
         persist(actor, current);
         return;
       }
@@ -1223,4 +1233,9 @@ function fieldCommand(
     value,
     approval
   };
+}
+
+function isLegalAcknowledgementField(field: FormField): boolean {
+  if (field.type !== "checkbox" && field.type !== "radio") return false;
+  return /privacy\s*(?:policy|notice)|terms\s*(?:and|of)\s*(?:conditions|use)|\bi\s*(?:certify|declare|acknowledge)\b|真实性|隐私政策|隐私声明|用户协议|法律声明|本人承诺.*(?:真实|准确)/iu.test(field.label);
 }
