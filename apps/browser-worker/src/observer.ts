@@ -7,6 +7,7 @@ import { opaqueId } from "./opaque-id.js";
 
 const EMPTY_PAGE_SAMPLE_MS = 100;
 const EMPTY_PAGE_WAIT_CAP_MS = 5_000;
+const MAX_FIELD_OPTIONS = 100;
 
 const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
   const normalized = (value) => (value ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
@@ -112,6 +113,9 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       normalized(element.getAttribute("name"))
     ].find(Boolean);
     if (!usableLabel) return [];
+    const allOptions = element instanceof HTMLSelectElement
+      ? [...element.options].filter((option) => option.value !== "").map((option) => normalized(option.textContent))
+      : [];
     return {
       path: "field:" + index,
       registryIndex,
@@ -120,16 +124,16 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       name: element.getAttribute("name") ?? "",
       required: required(element, [explicitLabel, wrappingLabel, ariaLabelledBy, itemLabel, nearbyText].filter(Boolean).join(" ")),
       value: roleCombobox
-        ? normalized(element.textContent)
+        ? element instanceof HTMLInputElement ? element.value : normalized(element.textContent)
         : textBackedSelect
         ? customDisplayValue || element.value
         : element instanceof HTMLInputElement && ["checkbox", "radio"].includes(element.type)
         ? element.checked
         : element.value,
-      options: element instanceof HTMLSelectElement
-        ? [...element.options].filter((option) => option.value !== "").map((option) => normalized(option.textContent))
-        : [],
+      options: allOptions.slice(0, ${MAX_FIELD_OPTIONS}),
+      optionsTruncated: allOptions.length > ${MAX_FIELD_OPTIONS} || undefined,
       controlKind: customSelect ? "custom" : "native",
+      interactionMode: customSelect ? "search" : element instanceof HTMLInputElement && element.type === "file" ? "file" : "native",
       explicitLabel,
       wrappingLabel: itemLabel || wrappingLabel,
       ariaLabel: normalized(element.getAttribute("aria-label")),

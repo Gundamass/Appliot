@@ -69,4 +69,21 @@ describe("form semantics", () => {
 
     expect(snapshot.fields.map((field) => field.label)).toEqual(["开始时间 年", "开始时间 月"]);
   });
+
+  it("bounds large native option lists and records that the list was truncated", () => {
+    const options = Array.from({ length: 2_000 }, (_, index) => `<option>School ${index}</option>`).join("");
+    const dom = new JSDOM(`<form><label for="school">School</label><select id="school">${options}</select></form>`, {
+      url: "https://ats.example.test/application"
+    });
+
+    const snapshot = normalizeForm(collectRawFormObservation(dom.window.document), {
+      taskId: "task-large-options",
+      url: dom.window.location.href,
+      title: "Application",
+      stage: "application_form"
+    });
+
+    expect(snapshot.fields[0]?.options).toHaveLength(100);
+    expect(snapshot.fields[0]?.optionsTruncated).toBe(true);
+  });
 });

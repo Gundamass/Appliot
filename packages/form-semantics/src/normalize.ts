@@ -44,8 +44,10 @@ function normalizeField(raw: RawFormField): FormField {
     type: fieldType(raw),
     required: raw.required,
     options: raw.options,
+    ...(raw.optionsTruncated === undefined ? {} : { optionsTruncated: raw.optionsTruncated }),
     currentValue: raw.value,
     ...(raw.controlKind === undefined ? {} : { controlKind: raw.controlKind }),
+    ...(raw.interactionMode === undefined ? {} : { interactionMode: raw.interactionMode }),
     ...(raw.name === "" ? {} : { semanticHint: raw.name })
   };
 }

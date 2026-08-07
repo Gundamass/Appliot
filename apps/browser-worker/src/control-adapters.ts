@@ -8,6 +8,13 @@ export interface CustomSelectResult {
 export async function selectCustomControl(locator: Locator, expected: string): Promise<CustomSelectResult> {
   await locator.click();
   const options = locator.page().locator('[role="option"]:visible, [data-option]:visible, [class*="option"]:visible, [class*="Select-menu-item"]:visible, [class*="Select-item"]:visible, [class*="Menu-content-item"]:visible');
+  const searchable = await locator.evaluate((element) => element instanceof HTMLInputElement
+    && (element.getAttribute("role")?.toLocaleLowerCase() === "combobox"
+      || element.hasAttribute("aria-autocomplete")));
+  if (searchable) {
+    await locator.fill(expected);
+    await options.first().waitFor({ state: "visible", timeout: 1_500 }).catch(() => undefined);
+  }
   const count = await options.count();
   const texts = await options.allTextContents();
   const expectedNormalized = normalizeOption(expected);

@@ -6,13 +6,17 @@ export interface RawFormField {
   required: boolean;
   value: string | boolean;
   options: string[];
+  optionsTruncated?: boolean;
   controlKind?: "native" | "custom";
+  interactionMode?: "native" | "search" | "choice_group" | "date_group" | "file";
   explicitLabel: string;
   wrappingLabel: string;
   ariaLabel: string;
   ariaLabelledBy: string;
   nearbyText: string;
 }
+
+const MAX_FIELD_OPTIONS = 100;
 
 export interface RawPageAction {
   path: string;
@@ -62,6 +66,9 @@ function fieldObservation(
   const labelText = [explicitLabel, wrappingLabel, normalized(element.getAttribute("aria-label")), labelledBy]
     .filter(Boolean)
     .join(" ");
+  const allOptions = element instanceof document.defaultView!.HTMLSelectElement
+    ? [...element.options].filter((option) => option.value !== "").map((option) => normalized(option.textContent))
+    : [];
   return {
     path: elementPath(element),
     tag,
@@ -75,9 +82,11 @@ function fieldObservation(
     value: element instanceof document.defaultView!.HTMLInputElement && ["checkbox", "radio"].includes(element.type)
       ? element.checked
       : element.value,
-    options: element instanceof document.defaultView!.HTMLSelectElement
-      ? [...element.options].filter((option) => option.value !== "").map((option) => normalized(option.textContent))
-      : [],
+    options: allOptions.slice(0, MAX_FIELD_OPTIONS),
+    ...(allOptions.length > MAX_FIELD_OPTIONS ? { optionsTruncated: true } : {}),
+    interactionMode: element instanceof document.defaultView!.HTMLInputElement && element.type === "file"
+      ? "file"
+      : "native",
     explicitLabel,
     wrappingLabel,
     ariaLabel: normalized(element.getAttribute("aria-label")),

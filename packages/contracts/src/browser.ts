@@ -14,8 +14,10 @@ export const FormFieldSchema = z.object({
   type: z.enum(["text", "textarea", "select", "radio", "checkbox", "date", "file"]),
   required: z.boolean(),
   options: z.array(z.string()),
+  optionsTruncated: z.boolean().optional(),
   currentValue: z.unknown(),
   controlKind: z.enum(["native", "custom"]).optional(),
+  interactionMode: z.enum(["native", "search", "choice_group", "date_group", "file"]).optional(),
   semanticHint: z.string().optional(),
   semanticSource: z.enum(["dji_catalog"]).optional()
 }).strict().superRefine((field, context) => {
