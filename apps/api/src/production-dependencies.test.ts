@@ -254,6 +254,48 @@ describe("production dependency composition", () => {
       .resolves.toMatchObject({ status: "verified", value: "2026-04-12" });
   });
 
+  it("binds a split award month to its entry and returns the page's unpadded option", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "awards[0].date",
+        source: "embedding" as const,
+        confidence: 0.97
+      }))
+    };
+    const ragService = {
+      resolveField: vi.fn(async () => ({
+        fieldId: "award-month",
+        status: "verified_auto" as const,
+        value: "2026-04-12",
+        evidence: [],
+        confidence: 1,
+        validators: []
+      }))
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService,
+      profileRepository: { resolveForTask: vi.fn() }
+    });
+    const field = applicationField("起止时间 月", {
+      id: "award-month",
+      type: "select",
+      options: ["3", "4", "5"],
+      semanticHint: "awards[0]"
+    });
+
+    await expect(resolveField("task-1", field, "semantic")).resolves.toMatchObject({
+      status: "verified",
+      fieldPath: "awards[0].date",
+      value: "4"
+    });
+    expect(semanticResolver.resolve).toHaveBeenCalledWith(field, {
+      section: "awards",
+      entryContext: "awards[0]"
+    }, "semantic");
+  });
+
   it("validates a full profile date before projecting it into a select option", async () => {
     const fact: ProfileFact = {
       id: "start-date",

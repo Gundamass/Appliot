@@ -203,6 +203,43 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("asks once when multiple required controls share the same semantic path", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [
+        { id: "lab-first", label: "是否有实验室经历", type: "select", required: true, options: ["是", "否"], currentValue: "" },
+        { id: "lab-second", label: "是否有实验室经历", type: "select", required: true, options: ["是", "否"], currentValue: "" }
+      ]
+    };
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: {
+        observe: async () => form,
+        execute: vi.fn(async () => { throw new Error("不应执行填写"); })
+      },
+      resolveField: async (_taskId, field, phase) => phase === "deterministic"
+        ? { status: "deferred" as const }
+        : {
+            status: "needs_question" as const,
+            fieldPath: "application.fieldAnswers.laboratoryExperience",
+            question: `请补充“${field.label}”`
+          },
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(service.state("task-1").context.questions).toHaveLength(1);
+    expect(service.state("task-1").context.questions[0]).toMatchObject({
+      fieldPath: "application.fieldAnswers.laboratoryExperience",
+      label: "是否有实验室经历"
+    });
+    database.close();
+  });
+
   it("automatically retries a transient safe fill after a matching page readback", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
@@ -324,7 +361,71 @@ describe("application machine", () => {
     database.close();
   });
 
-  it.each(["blocked", "failed"] as const)("pauses on a %s browser fill and can retry only after a fresh observation", async (status) => {
+  it("re-observes and re-resolves once after a non-terminal field execution failure", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{ id: "field-award", label: "赛事名称", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ id: "preview", text: "预览并提交", class: "terminal_submit" }]
+    };
+    const filled: FormSnapshot = {
+      ...form,
+      id: "snapshot-award-filled",
+      fields: [{ ...form.fields[0]!, currentValue: "全国大学生软件创新大赛一等奖" }]
+    };
+    const observe = vi.fn(async () => form);
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        type: "execution_result" as const,
+        taskId: "task-1",
+        snapshotId: form.id,
+        commandType: "fill" as const,
+        status: "failed" as const,
+        actualValue: "",
+        snapshot: form,
+        errors: ["field_execution_failed"]
+      })
+      .mockResolvedValueOnce({
+        type: "execution_result" as const,
+        taskId: "task-1",
+        snapshotId: filled.id,
+        commandType: "fill" as const,
+        status: "applied" as const,
+        actualValue: "全国大学生软件创新大赛一等奖",
+        snapshot: filled,
+        errors: []
+      });
+    const resolveField = vi.fn(async (_taskId: string, _field: FormField, phase?: "deterministic" | "semantic") => ({
+      status: "verified" as const,
+      value: phase === "semantic" ? "全国大学生软件创新大赛一等奖" : "旧候选值",
+      fieldPath: "awards[0].name"
+    }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute },
+      resolveField,
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(resolveField).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({ id: "field-award" }),
+      "semantic"
+    );
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls[1]?.[0]).toMatchObject({
+      type: "fill",
+      value: "全国大学生软件创新大赛一等奖"
+    });
+    expect(service.state("task-1").value).toBe("review_locked");
+    database.close();
+  });
+
+  it.each(["blocked", "failed"] as const)("automatically re-observes and retries a %s browser fill once", async (status) => {
     const database = new Database(":memory:");
     migrateDatabase(database);
     const form: FormSnapshot = {
@@ -369,13 +470,10 @@ describe("application machine", () => {
 
     await service.runUntilPause("task-1");
 
-    expect(service.state("task-1").value).toBe("needs_questions");
-    expect(service.progress("task-1")).toMatchObject({
-      status: "idle",
-      recovery: [],
-      lastResult: { operation: { status: "failed" } }
-    });
-    expect(service.state("task-1").context.questions).toHaveLength(1);
+    expect(observe).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(service.state("task-1").value).toBe("review_locked");
+    expect(service.state("task-1").context.questions).toHaveLength(0);
     database.close();
   });
 
@@ -2213,6 +2311,16 @@ describe("application machine", () => {
       .mockResolvedValueOnce({
         type: "execution_result" as const,
         taskId: "task-1",
+        snapshotId: form.id,
+        commandType: "select" as const,
+        status: "failed" as const,
+        actualValue: null,
+        snapshot: form,
+        errors: ["option_not_found"]
+      })
+      .mockResolvedValueOnce({
+        type: "execution_result" as const,
+        taskId: "task-1",
         snapshotId: filledEmail.id,
         commandType: "fill" as const,
         status: "applied" as const,
@@ -2244,7 +2352,7 @@ describe("application machine", () => {
 
     await service.runUntilPause("task-1");
 
-    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute).toHaveBeenCalledTimes(3);
     expect(service.fieldCoverage("task-1")?.fields).toEqual(expect.arrayContaining([
       expect.objectContaining({ fieldId: "field-month", status: "missing", reason: "option_not_found" }),
       expect.objectContaining({ fieldId: "field-email", status: "filled" })

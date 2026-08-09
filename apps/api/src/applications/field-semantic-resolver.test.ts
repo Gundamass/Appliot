@@ -57,6 +57,53 @@ class StubEmbeddingProvider implements EmbeddingProvider {
 }
 
 describe("字段语义解析器", () => {
+  it("将赛事名称在语义阶段映射到当前获奖经历名称", async () => {
+    const awardDefinitions: FieldDefinition[] = [
+      {
+        semantic: "awards[].name",
+        label: "获奖名称",
+        aliases: ["奖项名称"],
+        types: ["text"],
+        sections: ["awards"],
+        risk: "normal",
+        description: "奖项或荣誉名称"
+      },
+      {
+        semantic: "awards[].description",
+        label: "获奖描述",
+        aliases: ["奖项描述"],
+        types: ["text", "textarea"],
+        sections: ["awards"],
+        risk: "normal",
+        description: "奖项的原文说明"
+      }
+    ];
+    const embedding = new StubEmbeddingProvider([[1, 0], [0, 1]], [1, 0]);
+    const resolver = createFieldSemanticResolver({
+      embeddingProvider: embedding,
+      definitions: awardDefinitions,
+      minimumSimilarity: 0.8,
+      minimumMargin: 0.1
+    });
+    const field = {
+      label: "赛事名称",
+      type: "text" as const,
+      options: [],
+      semanticHint: "awards[0]"
+    };
+    const context = { section: "awards" as const, entryContext: "awards[0]" };
+
+    await expect(resolver.resolve(field, context, "deterministic")).resolves.toEqual({
+      status: "unresolved",
+      reason: "exact_match_not_found"
+    });
+    await expect(resolver.resolve(field, context, "semantic")).resolves.toMatchObject({
+      status: "mapped",
+      semantic: "awards[0].name",
+      source: "embedding"
+    });
+  });
+
   it("精确别名命中时不调用向量服务", async () => {
     const embedding = new StubEmbeddingProvider([], [], new Error("不应调用"));
     const resolver = createFieldSemanticResolver({ embeddingProvider: embedding });

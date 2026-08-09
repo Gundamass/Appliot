@@ -682,6 +682,54 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
               persist(actor, current);
               return false;
             }
+            if (command.type === "fill" || command.type === "select") {
+              await invalidateExecution(taskId);
+              if (!runIsCurrent(taskId, runGeneration, actor)) return false;
+              const observed = withDerivedEntrySemantics(await dependencies.browser.observe(taskId));
+              if (!runIsCurrent(taskId, runGeneration, actor)) return false;
+              latestSnapshots.set(taskId, observed);
+              const retryField = observed.fields.find((candidate) => candidate.id === field.id);
+              if (sameStructure(current, observed)
+                && retryField !== undefined
+                && !hasUserValue(retryField.currentValue)) {
+                const [retryResolution] = await resolvePass([retryField], "semantic");
+                if (!runIsCurrent(taskId, runGeneration, actor)) return false;
+                if (retryResolution?.decision.status === "verified"
+                  && !retryResolution.decision.requiresContentReview) {
+                  const retryCommand = fieldCommand(
+                    observed,
+                    retryField,
+                    retryResolution.decision.value,
+                    dependencies.approve,
+                    dependencies.resolveFileId
+                  );
+                  if (retryCommand.type === "fill" || retryCommand.type === "select") {
+                    try {
+                      result = await progress.runWithPolicy(
+                        fillOperation,
+                        () => executeWithFreshEpoch(retryCommand)
+                      );
+                    } catch (error) {
+                      if (isCancellation(error) || progress.snapshot(taskId).status === "paused") return false;
+                      throw error;
+                    }
+                    if (!runIsCurrent(taskId, runGeneration, actor)) return false;
+                    current = withDerivedEntrySemantics(result.snapshot);
+                    latestSnapshots.set(taskId, current);
+                    if (result.status === "applied") {
+                      fieldCoverageStore.markFilled(taskId, field.id, result.warnings ?? []);
+                      persist(actor, current);
+                      continue;
+                    }
+                    if (isTerminalSafetyBlock(result)) {
+                      pauseAfterExecutionFailure(actor, fillOperation, result);
+                      persist(actor, current);
+                      return false;
+                    }
+                  }
+                }
+              }
+            }
             progress.recordFailure(
               fillOperation,
               result.status === "blocked" ? "READBACK_MISMATCH" : "PAGE_ERROR",
@@ -734,13 +782,15 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         const observed = current.fields.find((candidate) => candidate.id === field.id);
         return !hasUserValue(observed?.currentValue) && decision.status !== "deferred";
       });
-      const questions = unresolved
-        .filter(({ field, decision }) => field.required
-          && (decision.status === "needs_question" || failedFieldIds.has(field.id)))
-        .map(({ field, decision }): ApplicationQuestion => ({
+      const questionsByPath = new Map<string, ApplicationQuestion>();
+      for (const { field, decision } of unresolved) {
+        if (!field.required || (decision.status !== "needs_question" && !failedFieldIds.has(field.id))) continue;
+        const fieldPath = decision.fieldPath ?? field.semanticHint ?? field.id;
+        if (questionsByPath.has(fieldPath)) continue;
+        questionsByPath.set(fieldPath, {
           id: field.id,
           fieldId: field.id,
-          fieldPath: decision.fieldPath ?? field.semanticHint ?? field.id,
+          fieldPath,
           label: field.label,
           text: decision.question ?? "请补充：" + field.label,
           pageText: field.label,
@@ -750,7 +800,9 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           inputType: questionInputType(field.type),
           options: field.options,
           required: field.required
-        }));
+        });
+      }
+      const questions = [...questionsByPath.values()];
       if (questions.length > 0) {
         sendApplicationEvent(actor, { type: "QUESTIONS_REQUIRED", questions });
         persist(actor, current);

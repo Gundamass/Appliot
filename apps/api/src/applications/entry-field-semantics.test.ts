@@ -77,4 +77,46 @@ describe("deriveEntrySemanticHints", () => {
       "education[0].major"
     ]);
   });
+
+  it("maps repeated competition fields to separate award entries", () => {
+    const fields = deriveEntrySemanticHints([
+      field("award-1-name", "赛事名称"),
+      field("award-1-date", "赛事时间"),
+      { ...field("award-1-level", "奖项级别"), type: "select", options: ["国家级", "校级"] },
+      field("award-1-description", "赛事描述"),
+      field("award-2-name", "获奖名称"),
+      field("award-2-date", "获奖时间"),
+      field("award-2-description", "奖项描述")
+    ]);
+
+    expect(fields.map((candidate) => candidate.semanticHint)).toEqual([
+      "awards[0]",
+      "awards[0]",
+      "awards[0]",
+      "awards[0]",
+      "awards[1]",
+      "awards[1]",
+      "awards[1]"
+    ]);
+  });
+
+  it("keeps split year and month controls inside the current award entry", () => {
+    const fields = deriveEntrySemanticHints([
+      field("award-1-name", "赛事名称"),
+      { ...field("award-1-year", "起止时间 年"), type: "select", options: ["2025", "2026"] },
+      { ...field("award-1-month", "起止时间 月"), type: "select", options: ["3", "4"] },
+      field("award-2-name", "获奖名称"),
+      { ...field("award-2-year", "起止时间 年"), type: "select", options: ["2024", "2025"] },
+      { ...field("award-2-month", "起止时间 月"), type: "select", options: ["8", "9"] }
+    ]);
+
+    expect(fields.map((candidate) => candidate.semanticHint)).toEqual([
+      "awards[0]",
+      "awards[0]",
+      "awards[0]",
+      "awards[1]",
+      "awards[1]",
+      "awards[1]"
+    ]);
+  });
 });

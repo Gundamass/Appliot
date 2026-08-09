@@ -6,7 +6,7 @@ import type {
   FieldSemanticContext,
   FieldSemanticResolver
 } from "./field-semantic-resolver.js";
-import { isCanonicalDateSemantic, projectDateComponent } from "./control-value.js";
+import { isCanonicalDateSemantic, matchControlOption, projectDateComponent } from "./control-value.js";
 
 interface ProductionFieldResolverDependencies {
   semanticResolver: FieldSemanticResolver;
@@ -83,12 +83,17 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
     const resolvedValue = decision.value === undefined
       ? undefined
       : projectDateComponent(field.label, semantic, decision.value);
+    const matchedSplitDateOption = splitDateSelect
+      && typeof resolvedValue === "string"
+      && field.controlKind !== "custom"
+      ? matchControlOption(resolvedValue, field.options)
+      : resolvedValue;
     const projectedOptionMismatch = splitDateSelect
       && (decision.status === "verified_auto" || decision.status === "needs_review")
       && (typeof resolvedValue !== "string"
-        || (field.controlKind !== "custom" && !field.options.includes(resolvedValue)));
+        || (field.controlKind !== "custom" && matchedSplitDateOption === undefined));
     const decisionStatus = projectedOptionMismatch ? "blocked" as const : decision.status;
-    const effectiveValue = projectedOptionMismatch ? undefined : resolvedValue;
+    const effectiveValue = projectedOptionMismatch ? undefined : matchedSplitDateOption;
     const requiresContentReview = decisionStatus === "needs_review"
       || (semantic === "selfEvaluation" && existing?.scope === "profile");
     const assessmentStatus = requiresContentReview
