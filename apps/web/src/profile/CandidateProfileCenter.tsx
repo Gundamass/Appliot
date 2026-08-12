@@ -269,6 +269,16 @@ export const CandidateProfileCenter = forwardRef<CandidateProfileCenterHandle, C
             missing={activeMissing}
             completenessAvailable={completeness !== undefined}
             saving={saving}
+            uploadAvatar={async (file) => {
+              try {
+                const uploaded = await api.uploadAvatar(file);
+                setSaveError(undefined);
+                return uploaded.fileId;
+              } catch {
+                setSaveError("头像上传失败，请选择 5 MB 以内的 JPG、PNG 或 WebP 图片");
+                return "";
+              }
+            }}
             onScalarChange={changeValue}
             onEntryChange={(values) => Object.entries(values).forEach(([path, value]) => changeValue(path, value))}
             onAdd={addEntry}
@@ -282,6 +292,7 @@ export const CandidateProfileCenter = forwardRef<CandidateProfileCenterHandle, C
 });
 
 function ProfileSection({
+  uploadAvatar,
   section,
   label,
   repeatable,
@@ -296,6 +307,7 @@ function ProfileSection({
   onRemove,
   onControl
 }: {
+  uploadAvatar(file: File): Promise<string>;
   section: FieldSection;
   label: string;
   repeatable: boolean;
@@ -333,6 +345,7 @@ function ProfileSection({
               missing={missing.includes(field.semantic)}
               disabled={saving}
               onChange={(value) => onScalarChange(field.semantic, value)}
+              onFile={field.profileControl === "file" ? uploadAvatar : undefined}
               onControl={(control) => onControl(field.semantic, control)}
             />
           ))}
@@ -342,11 +355,11 @@ function ProfileSection({
   );
 }
 
-function ScalarField({ field, value, missing, disabled, onChange, onControl }: { field: FieldDefinition; value: string; missing: boolean; disabled: boolean; onChange(value: string): void; onControl(control: ProfileControlElement | null): void }) {
+function ScalarField({ field, value, missing, disabled, onChange, onFile, onControl }: { field: FieldDefinition; value: string; missing: boolean; disabled: boolean; onChange(value: string): void; onFile?: ((file: File) => Promise<string>) | undefined; onControl(control: ProfileControlElement | null): void }) {
   return (
     <label className={field.profileControl === "textarea" ? "profile-field profile-field-wide" : "profile-field"}>
       <span>{field.label}{missing && <small>缺失，可减少追问</small>}</span>
-      <ProfileFieldControl field={field} value={value} disabled={disabled} onChange={onChange} onControl={onControl} />
+      <ProfileFieldControl field={field} value={value} disabled={disabled} onChange={onChange} onFile={onFile} onControl={onControl} />
     </label>
   );
 }

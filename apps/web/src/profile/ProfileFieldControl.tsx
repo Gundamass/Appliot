@@ -8,10 +8,11 @@ interface ProfileFieldControlProps {
   value: string;
   disabled: boolean;
   onChange(value: string): void;
+  onFile?: ((file: File) => Promise<string>) | undefined;
   onControl(control: ProfileControlElement | null): void;
 }
 
-export function ProfileFieldControl({ field, value, disabled, onChange, onControl }: ProfileFieldControlProps) {
+export function ProfileFieldControl({ field, value, disabled, onChange, onFile, onControl }: ProfileFieldControlProps) {
   const label = field.label;
   const controlProps = {
     "aria-label": label,
@@ -33,6 +34,21 @@ export function ProfileFieldControl({ field, value, disabled, onChange, onContro
 
   if (field.profileControl === "textarea") {
     return <textarea ref={onControl} {...controlProps} />;
+  }
+
+  if (field.profileControl === "file") {
+    return <input
+      ref={onControl}
+      aria-label={label}
+      disabled={disabled}
+      type="file"
+      accept="image/jpeg,image/png,image/webp"
+      onChange={(event) => {
+        const file = event.target.files?.[0];
+        if (file && onFile) void onFile(file).then((fileId) => { if (fileId) onChange(fileId); });
+        event.currentTarget.value = "";
+      }}
+    />;
   }
 
   if (field.profileControl === "suggestion") {

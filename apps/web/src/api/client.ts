@@ -33,6 +33,7 @@ export class ProfileApiError extends Error {
 
 export interface ProfileApi {
   upload(file: File): Promise<{ documentId: string }>;
+  uploadAvatar(file: File): Promise<{ fileId: string }>;
   listFacts(): Promise<ProfileFact[]>;
   upsert(fieldPath: string, value: unknown): Promise<ProfileFact>;
   remove(fieldPaths: string[]): Promise<void>;
@@ -51,6 +52,12 @@ export function createProfileApi(baseUrl = ""): ProfileApi {
       const payload = await readResponse(response);
       const parsed = DocumentResponseSchema.parse(payload);
       return { documentId: parsed.documentId };
+    },
+    async uploadAvatar(file) {
+      const form = new FormData();
+      form.append("file", file);
+      const payload = await readResponse(await fetch(`${baseUrl}/api/profile/avatar`, { method: "POST", body: form }));
+      return z.object({ fileId: z.string().regex(/^avatar-[0-9a-f-]+\.(?:jpg|png|webp)$/u) }).parse(payload);
     },
 
     async listFacts() {

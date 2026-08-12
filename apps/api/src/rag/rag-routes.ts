@@ -21,6 +21,7 @@ export function registerRagRoutes(
       async search(input: KeywordSearchInput) {
         const terms = `${input.query} ${input.jobDescription ?? ""}`.toLowerCase().split(/[^\p{L}\p{N}]+/u).filter(Boolean);
         return dependencies.profileRepository.listForTask(input.taskId)
+          .filter((fact) => fact.fieldPath !== "basics.avatar")
           .filter((fact) => {
             const searchable = `${fact.fieldPath} ${JSON.stringify(fact.value)} ${fact.evidence.map((item) => item.text).join(" ")}`.toLowerCase();
             return terms.some((term) => searchable.includes(term));

@@ -138,7 +138,9 @@ function eligibleFacts(facts: ProfileFact[]): ProfileFact[] {
 }
 
 function isEligible(fact: ProfileFact): boolean {
-  return fact.scope === "profile" && (fact.status === "user_confirmed" || fact.status === "user_corrected");
+  return fact.fieldPath !== "basics.avatar"
+    && fact.scope === "profile"
+    && (fact.status === "user_confirmed" || fact.status === "user_corrected");
 }
 
 function isVisibleToTask(fact: ProfileFact, taskId: string): boolean {

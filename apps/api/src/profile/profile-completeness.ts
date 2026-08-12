@@ -17,7 +17,9 @@ export function calculateProfileCompleteness(facts: ProfileFact[]): ProfileCompl
   const profileFacts = facts.filter((fact) => fact.scope === "profile" && fact.status !== "superseded");
   const sections = PROFILE_SECTION_DEFINITIONS.map((section) => {
     const definitions = FIELD_DEFINITIONS.filter((definition) =>
-      definition.sections.includes(section.id) && definition.semantic.includes("[]") === section.repeatable
+      definition.sections.includes(section.id)
+      && definition.semantic.includes("[]") === section.repeatable
+      && definition.profileRequired !== false
     );
     const entries = section.repeatable ? entryContexts(profileFacts, section.id) : [undefined];
 

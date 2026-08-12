@@ -31,6 +31,52 @@ describe("字段注册表确定性映射", () => {
     expect(definition("awards[].level")?.profileOptions).toContain("国家级");
   });
 
+  it("注册国内 ATS 通用补充字段并使用正确档案控件", () => {
+    expect(definition("basics.avatar")).toMatchObject({
+      label: "个人头像",
+      profileControl: "file",
+      risk: "sensitive"
+    });
+    expect(definition("education[].isExchange")).toMatchObject({
+      profileControl: "boolean",
+      profileOptions: ["是", "否"]
+    });
+    expect(definition("education[].isJointProgram")?.profileControl).toBe("boolean");
+    expect(definition("education[].majorCategory")?.profileControl).toBe("text");
+    expect(definition("education[].schoolLocation")?.profileControl).toBe("suggestion");
+    expect(definition("education[].advisor")?.profileControl).toBe("text");
+    expect(definition("education[].isNationalKeyLab")?.profileControl).toBe("boolean");
+    expect(definition("education[].laboratory")?.profileControl).toBe("text");
+    expect(definition("work[].department")?.profileControl).toBe("text");
+    expect(definition("projects[].url")?.profileControl).toBe("text");
+    expect(definition("projects[].url")?.profileRequired).toBe(false);
+  });
+
+  it("将新增重复经历字段精确映射到当前条目", () => {
+    expect(resolveDeterministicSemantic({
+      label: "是否交流学习",
+      type: "radio",
+      entryContext: "education[1]"
+    })?.semantic).toBe("education[1].isExchange");
+    expect(resolveDeterministicSemantic({
+      label: "任职部门",
+      type: "text",
+      entryContext: "work[2]"
+    })?.semantic).toBe("work[2].department");
+    expect(resolveDeterministicSemantic({
+      label: "项目链接",
+      type: "text",
+      entryContext: "projects[3]"
+    })?.semantic).toBe("projects[3].url");
+  });
+
+  it("不把公司专属问题加入长期候选人档案", () => {
+    expect(definition("basics.interviewLocation")).toBeUndefined();
+    expect(definition("basics.recruitmentSource")).toBeUndefined();
+    expect(definition("basics.referralCode")).toBeUndefined();
+    expect(definition("basics.oppoRelative")).toBeUndefined();
+  });
+
   it("将常见个人信息别名映射到标准路径", () => {
     expect(resolveDeterministicSemantic({
       label: "个人联系电话",

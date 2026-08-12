@@ -21,7 +21,7 @@ interface ApplicationTaskPageProps {
 }
 
 const STATE_LABELS: Record<ApplicationTaskState, string> = {
-  created: "任务已创建", observing_page: "正在分析投递页面", waiting_for_login: "等待登录",
+  created: "任务已创建", observing_page: "等待进入简历填写页面", waiting_for_login: "等待登录",
   needs_questions: "等待补充信息", awaiting_content_review: "等待内容审核", filling: "正在填写",
   validating: "正在校验", navigating: "正在进入下一页", review_locked: "等待人工最终审核",
   cancelled: "任务已取消", failed: "任务失败"

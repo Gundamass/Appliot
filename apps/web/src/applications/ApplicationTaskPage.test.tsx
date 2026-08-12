@@ -56,6 +56,17 @@ function deferred<T>() {
 }
 
 describe("ApplicationTaskPage", () => {
+  it("explains that observing waits for the user to reach the resume form", async () => {
+    const waitingTask = { ...task, state: "observing_page" as const, commands: ["cancel", "open_browser"] as ApplicationTask["commands"] };
+    render(<ApplicationTaskPage
+      taskId={task.id}
+      api={{ get: vi.fn().mockResolvedValue(waitingTask), command: vi.fn() }}
+      connectEvents={eventHarness().connect}
+    />);
+
+    expect(await screen.findByRole("heading", { name: "等待进入简历填写页面" })).toBeVisible();
+  });
+
   it("opens review evidence without exposing profile field-source controls", async () => {
     const user = userEvent.setup();
     const events = eventHarness();
@@ -164,7 +175,7 @@ describe("ApplicationTaskPage", () => {
     expect(await screen.findByText("请在受控浏览器中完成登录")).toBeVisible();
     events.emit(event("observing_page"));
 
-    expect(await screen.findByText("正在分析投递页面")).toBeVisible();
+    expect(await screen.findByText("等待进入简历填写页面")).toBeVisible();
     expect(screen.queryByRole("button", { name: submissionActionName })).not.toBeInTheDocument();
   });
 
@@ -188,7 +199,7 @@ describe("ApplicationTaskPage", () => {
     await user.click(await screen.findByRole("button", { name: "我已完成登录，继续" }));
 
     expect(command).toHaveBeenCalledWith(task.id, { type: "resume" });
-    expect(await screen.findByRole("heading", { name: "正在分析投递页面" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "等待进入简历填写页面" })).toBeVisible();
     expect(screen.queryByRole("button", { name: "我已完成登录，继续" })).not.toBeInTheDocument();
   });
 
@@ -272,7 +283,7 @@ describe("ApplicationTaskPage", () => {
     oldSubscription?.onEvent(event("review_locked", "9"));
     oldSubscription?.onHistoryReset({ type: "history_reset", taskId: task.id, reason: "history_gap", requestedLastEventId: "1", oldestAvailableId: "8" });
     newTask.resolve(secondTask);
-    expect(await screen.findByRole("heading", { name: "正在分析投递页面" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "等待进入简历填写页面" })).toBeVisible();
     oldTask.resolve(task);
 
     expect(await screen.findByText("jobs.example.net")).toBeVisible();

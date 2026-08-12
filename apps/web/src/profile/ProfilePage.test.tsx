@@ -39,7 +39,8 @@ function deferred<T>() {
 function fakeProfileApi(initialFacts: ProfileFact[] = []) {
   let facts = initialFacts;
   const api: ProfileApi = {
-    upload: vi.fn(async () => ({ documentId: "document-1" })),
+      upload: vi.fn(async () => ({ documentId: "document-1" })),
+      uploadAvatar: vi.fn(async () => ({ fileId: "avatars/avatar-1.webp" })),
     listFacts: vi.fn(async () => facts),
     upsert: vi.fn(async (fieldPath, value) => makeFact({ fieldPath, value: value as JsonValue, status: "user_corrected" })),
     remove: vi.fn(async () => undefined),

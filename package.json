@@ -11,7 +11,11 @@
     "test:e2e": "node scripts/run-playwright.mjs test",
     "typecheck": "tsc --noEmit",
     "build": "corepack pnpm -r build",
-    "start:api": "corepack pnpm --filter @resume/api start"
+    "start:api": "corepack pnpm --filter @resume/api start",
+    "start:web": "node scripts/serve-web.mjs",
+    "services:status": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/service-control.ps1 status",
+    "services:start": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/service-control.ps1 start",
+    "services:stop": "powershell -NoProfile -ExecutionPolicy Bypass -File scripts/service-control.ps1 stop"
   },
   "devDependencies": {
     "@playwright/test": "1.53.1",

@@ -15,6 +15,17 @@ const indexConfig = {
 };
 
 describe("FactEmbeddingSearch", () => {
+  it("never sends avatar asset IDs to the embedding provider", async () => {
+    const avatar = confirmedFact("avatar", 1, "avatar-0f8fad5b-d9cb-469f-a165-70867728950e.webp", "basics.avatar");
+    const profile = confirmedFact("name", 1, "陈晨", "basics.name");
+    const harness = createHarness([avatar, profile]);
+
+    await harness.service.search(searchInput("姓名"));
+
+    expect(harness.provider.embedDocuments).toHaveBeenCalledWith([factEmbeddingText(profile)]);
+    expect(activeVectors(harness.database).map((row) => row.fact_id)).toEqual(["name"]);
+  });
+
   it("builds the first index from confirmed facts in deterministic ID order", async () => {
     const harness = createHarness([confirmedFact("b", 1), confirmedFact("a", 1), extractedFact("ignored")]);
 

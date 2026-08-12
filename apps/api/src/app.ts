@@ -10,6 +10,7 @@ import { MAX_PDF_BYTES } from "./profile/import-service.js";
 import { type ProfileRepository } from "./profile/profile-repository.js";
 import { registerProfileRoutes } from "./profile/profile-routes.js";
 import type { OriginalDocumentStore } from "./profile/original-document-store.js";
+import type { AvatarStore } from "./profile/avatar-store.js";
 import { createSelfEvaluationReviewRepository, type SelfEvaluationReviewRepository } from "./reviews/review-repository.js";
 import { registerReviewRoutes } from "./reviews/review-routes.js";
 import { registerRagRoutes } from "./rag/rag-routes.js";
@@ -26,6 +27,7 @@ export interface AppDependencies {
   database: SqliteDatabase;
   profileRepository: ProfileRepository;
   originalDocumentStore: OriginalDocumentStore;
+  avatarStore?: AvatarStore;
   reviewRepository?: SelfEvaluationReviewRepository;
   extractPdf(bytes: Uint8Array): Promise<ExtractedDocument>;
   extractFacts(document: ExtractedDocument): Promise<ProfileFact[]>;

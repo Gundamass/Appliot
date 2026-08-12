@@ -58,4 +58,13 @@ describe("calculateProfileCompleteness", () => {
       missing: ["awards[2].date", "awards[2].level", "awards[2].description"]
     });
   });
+
+  it("不把选填项目链接计入缺失字段", () => {
+    const result = calculateProfileCompleteness([
+      fact("projects[0].name", "简历投递助手", "user_corrected")
+    ]);
+
+    expect(result.sections.find((section) => section.id === "projects")?.missing)
+      .not.toContain("projects[0].url");
+  });
 });

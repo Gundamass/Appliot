@@ -29,6 +29,7 @@ import type { ApiConfig } from "./config.js";
 import { createSqliteDatabase } from "./db/client.js";
 import { migrateDatabase } from "./db/migrate.js";
 import { createLocalOriginalDocumentStore } from "./profile/original-document-store.js";
+import { createLocalAvatarStore } from "./profile/avatar-store.js";
 import { createDocumentRepository } from "./profile/document-repository.js";
 import { createProductionExtraction } from "./profile/production-extraction.js";
 import { createProfileRepository } from "./profile/profile-repository.js";
@@ -234,9 +235,15 @@ export function createProductionDependencies(
       validateContentReview(review, editedValue) {
         return validateEditedSelfEvaluation(review.original, editedValue, review.evidence);
       },
-      resolveFileId() {
+      resolveFileId(_taskId, field) {
+        if (/avatar|photo|头像|照片|证件照/iu.test(`${field.semanticHint ?? ""} ${field.label}`)) {
+          const avatar = profileRepository.resolveForTask(_taskId, "basics.avatar")?.value;
+          return typeof avatar === "string" && /^avatar-[0-9a-f-]+\.(?:jpg|png|webp)$/u.test(avatar) ? avatar : undefined;
+        }
         const document = documentRepository.findLatestCompleted();
-        return document === undefined ? undefined : `${document.fingerprint}.pdf`;
+        return /resume|cv|简历/iu.test(`${field.semanticHint ?? ""} ${field.label}`) && document !== undefined
+          ? `${document.fingerprint}.pdf`
+          : undefined;
       }
     });
 
@@ -244,6 +251,7 @@ export function createProductionDependencies(
       database,
       profileRepository,
       originalDocumentStore: createLocalOriginalDocumentStore(originalsDirectory),
+      avatarStore: createLocalAvatarStore(originalsDirectory),
       ...extraction,
       ...(structuredProvider === undefined ? {} : { selfEvaluationModelProvider: structuredProvider }),
       ...(embeddingSearch === undefined ? {} : { embeddingSearch }),

@@ -16,6 +16,22 @@ const fact = ProfileFactSchema.parse({
 afterEach(() => vi.unstubAllGlobals());
 
 describe("ProfileApi HTTP contract", () => {
+  it("uploads an avatar through a separate image multipart endpoint", async () => {
+    const fileId = "avatar-0f8fad5b-d9cb-469f-a165-70867728950e.webp";
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({ fileId }), {
+      status: 201,
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await expect(createProfileApi().uploadAvatar(new File(["image"], "头像.webp", { type: "image/webp" })))
+      .resolves.toEqual({ fileId });
+
+    expect(fetchMock).toHaveBeenCalledWith("/api/profile/avatar", expect.objectContaining({ method: "POST", body: expect.any(FormData) }));
+    const body = fetchMock.mock.calls[0]?.[1]?.body as FormData;
+    expect(body.get("file")).toBeInstanceOf(File);
+  });
+
   it("upserts a profile field with the strict profile input contract", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify({
       ...fact,

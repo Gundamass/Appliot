@@ -15,6 +15,7 @@ import { extractPdf as parsePdf } from "@resume/profile-domain/src/pdf/extract-p
 import { createScannedPdf } from "../../../../tests/fixtures/create-pdf.js";
 import { createProductionExtraction } from "./production-extraction.js";
 import { createAdapterHealthRegistry } from "../health/adapter-health.js";
+import { createLocalAvatarStore } from "./avatar-store.js";
 
 const MAX_PDF_BYTES = 15 * 1024 * 1024;
 
@@ -91,6 +92,7 @@ async function buildTestContext(overrides: Partial<AppDependencies> = {}) {
     adapterHealth: createAdapterHealthRegistry(),
     profileRepository: createProfileRepository(database),
     originalDocumentStore: createLocalOriginalDocumentStore(storageRoot),
+    avatarStore: createLocalAvatarStore(storageRoot),
     extractPdf: async (bytes) => ({
       fingerprint: createHash("sha256").update(bytes).digest("hex"),
       pages: [{ page: 1, text: "Ada Lovelace ada@example.com", source: "pdf_text" }]
@@ -122,6 +124,92 @@ function tableCount(database: InstanceType<typeof Database>, table: "documents" 
 }
 
 describe("profile routes", () => {
+  it("stores a valid avatar under an opaque local file ID", async () => {
+    const { app } = await buildTestContext();
+    const bytes = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x10, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/profile/avatar",
+      ...multipart([{ type: "file", bytes, filename: "头像.webp", mimeType: "image/webp" }])
+    });
+
+    expect(response.statusCode).toBe(201);
+    const body = response.json() as { fileId: string };
+    expect(body.fileId).toMatch(/^avatar-[0-9a-f-]+\.webp$/u);
+    const root = testStorageRoots.at(-1)!;
+    await expect(readFile(join(root, body.fileId))).resolves.toEqual(bytes);
+  });
+
+  it("rejects non-image avatar uploads", async () => {
+    const app = await buildTestApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/profile/avatar",
+      ...multipart([{ type: "file", bytes: pdfBytes(), filename: "resume.pdf", mimeType: "application/pdf" }])
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ code: "invalid_avatar_upload" });
+  });
+
+  it("rejects an avatar whose MIME type does not match its bytes", async () => {
+    const app = await buildTestApp();
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/profile/avatar",
+      ...multipart([{ type: "file", bytes: Buffer.from("not an image"), filename: "avatar.webp", mimeType: "image/webp" }])
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ code: "invalid_avatar_upload" });
+  });
+
+  it("rejects an avatar larger than 5 MiB instead of retaining truncated bytes", async () => {
+    const app = await buildTestApp();
+    const bytes = Buffer.alloc(5 * 1024 * 1024 + 1);
+    Buffer.from("RIFF").copy(bytes, 0);
+    Buffer.from("WEBP").copy(bytes, 8);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/profile/avatar",
+      ...multipart([{ type: "file", bytes, filename: "avatar.webp", mimeType: "image/webp" }])
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ code: "invalid_avatar_upload" });
+  });
+
+  it("rejects avatar multipart input containing extra fields", async () => {
+    const app = await buildTestApp();
+    const bytes = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x10, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/profile/avatar",
+      ...multipart([
+        { type: "file", bytes, filename: "avatar.webp", mimeType: "image/webp" },
+        { type: "field", name: "path", value: "C:\\Users\\admin\\avatar.webp" }
+      ])
+    });
+
+    expect(response.statusCode).toBe(400);
+    expect(response.json()).toMatchObject({ code: "invalid_avatar_upload" });
+  });
+
+  it("reports avatar storage failures as internal errors instead of invalid input", async () => {
+    const app = await buildTestApp({
+      avatarStore: { async save() { throw new Error("disk unavailable"); } }
+    });
+    const bytes = Buffer.from([0x52, 0x49, 0x46, 0x46, 0x10, 0x00, 0x00, 0x00, 0x57, 0x45, 0x42, 0x50]);
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/profile/avatar",
+      ...multipart([{ type: "file", bytes, filename: "avatar.webp", mimeType: "image/webp" }])
+    });
+
+    expect(response.statusCode).toBe(500);
+    expect(response.json()).toMatchObject({ error: "Internal server error" });
+  });
+
   it("returns no latest profile document before a resume is imported", async () => {
     const app = await buildTestApp();
 

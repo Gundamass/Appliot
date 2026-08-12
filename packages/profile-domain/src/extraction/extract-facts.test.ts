@@ -72,6 +72,28 @@ describe("extractFacts", () => {
     ]));
   });
 
+  it("允许抽取通用新增字段但不要求模型生成本地头像或公司专属字段", async () => {
+    const provider = providerReturning({ facts: [] });
+
+    await extractFacts(documentWithPage("联合培养，导师张老师，项目链接 https://example.com"), provider);
+
+    const system = provider.generateStructured.mock.calls[0]?.[0].system as string;
+    expect(system).toContain("education[index].isExchange");
+    expect(system).toContain("education[index].isJointProgram");
+    expect(system).toContain("education[index].majorCategory");
+    expect(system).toContain("education[index].schoolLocation");
+    expect(system).toContain("education[index].advisor");
+    expect(system).toContain("education[index].isNationalKeyLab");
+    expect(system).toContain("education[index].laboratory");
+    expect(system).toContain("work[index].department");
+    expect(system).toContain("projects[index].url");
+    expect(system).not.toContain("basics.avatar");
+    expect(system).not.toContain("interviewLocation");
+    expect(system).not.toContain("recruitmentSource");
+    expect(system).not.toContain("referralCode");
+    expect(system).not.toContain("oppoRelative");
+  });
+
   it("returns evidence-backed work, project, skill, and self-evaluation facts together", async () => {
     const provider = new FakeStructuredModelProvider({
       facts: [

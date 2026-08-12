@@ -158,6 +158,34 @@ describe("production dependency composition", () => {
     }));
   });
 
+  it("resolves a mapped avatar file directly from the profile without sending it to RAG", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "basics.avatar",
+        source: "exact_alias" as const,
+        confidence: 1
+      }))
+    };
+    const avatar = "avatar-0f8fad5b-d9cb-469f-a165-70867728950e.webp";
+    const ragService = { resolveField: vi.fn() };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService,
+      profileRepository: {
+        resolveForTask: vi.fn(() => ({
+          id: "avatar-fact", fieldPath: "basics.avatar", value: avatar,
+          status: "user_corrected" as const, confidence: 1, scope: "profile" as const,
+          evidence: [{ documentId: "user", page: 1, text: "用户上传头像", extraction: "user" as const }], revision: 1
+        }))
+      }
+    });
+
+    await expect(resolveField("task-1", applicationField("个人头像", { type: "file" }), "deterministic"))
+      .resolves.toMatchObject({ status: "verified", value: avatar, fieldPath: "basics.avatar" });
+    expect(ragService.resolveField).not.toHaveBeenCalled();
+  });
+
   it("resolves truncated native selects by exact profile value instead of a partial option list", async () => {
     const semanticResolver: FieldSemanticResolver = {
       resolve: vi.fn(async () => ({

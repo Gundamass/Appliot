@@ -52,6 +52,7 @@ const emptyCompleteness: ProfileCompleteness = {
 function api(): ProfileApi {
   return {
     upload: vi.fn(),
+    uploadAvatar: vi.fn(async () => ({ fileId: "avatar-0f8fad5b-d9cb-469f-a165-70867728950e.webp" })),
     listFacts: vi.fn(async () => []),
     upsert: vi.fn(async (fieldPath, value) => fact(fieldPath, value, "user_corrected")),
     remove: vi.fn(async () => undefined),
@@ -63,6 +64,20 @@ function api(): ProfileApi {
 }
 
 describe("CandidateProfileCenter", () => {
+  it("uploads an avatar as an opaque draft and saves it only with the whole profile", async () => {
+    const user = userEvent.setup();
+    const profileApi = api();
+    const ref = createRef<CandidateProfileCenterHandle>();
+    render(<CandidateProfileCenter ref={ref} api={profileApi} facts={[]} completeness={emptyCompleteness} onFactsChanged={vi.fn()} />);
+
+    await user.upload(screen.getByLabelText("个人头像"), new File(["image"], "avatar.webp", { type: "image/webp" }));
+
+    expect(profileApi.uploadAvatar).toHaveBeenCalledTimes(1);
+    expect(profileApi.upsert).not.toHaveBeenCalled();
+    await ref.current?.save();
+    expect(profileApi.upsert).toHaveBeenCalledWith("basics.avatar", "avatar-0f8fad5b-d9cb-469f-a165-70867728950e.webp");
+  });
+
   it("moves focus to the first missing field when the completion action is requested", async () => {
     const ref = createRef<CandidateProfileCenterHandle>();
     render(<CandidateProfileCenter ref={ref} api={api()} facts={[fact("basics.name", "陈同学")]} completeness={incompletePreferences} onFactsChanged={vi.fn()} />);
@@ -239,6 +254,31 @@ describe("CandidateProfileCenter", () => {
     expect(screen.getByLabelText("职责和成果")).toHaveValue("负责接口开发与联调");
     expect(screen.queryByRole("button", { name: /生成项目要点/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /生成实习描述/ })).not.toBeInTheDocument();
+  });
+
+  it("保存新增教育、部门和可选项目链接字段", async () => {
+    const user = userEvent.setup();
+    const profileApi = api();
+    const ref = createRef<CandidateProfileCenterHandle>();
+    render(<CandidateProfileCenter ref={ref} api={profileApi} facts={[
+      fact("education[0].institution", "合肥工业大学"),
+      fact("work[0].company", "示例公司"),
+      fact("projects[0].name", "简历投递助手")
+    ]} completeness={complete} onFactsChanged={vi.fn()} />);
+
+    await user.click(screen.getByRole("button", { name: /教育经历/ }));
+    await user.selectOptions(screen.getByLabelText("是否交流学习"), "否");
+    await user.type(screen.getByLabelText("导师姓名"), "张老师");
+    await user.click(screen.getByRole("button", { name: /实习与工作/ }));
+    await user.type(screen.getByLabelText("任职部门"), "研发部");
+    await user.click(screen.getByRole("button", { name: /项目经历/ }));
+    await user.type(screen.getByLabelText("项目链接"), "https://example.com/project");
+    await ref.current?.save();
+
+    expect(profileApi.upsert).toHaveBeenCalledWith("education[0].isExchange", "否");
+    expect(profileApi.upsert).toHaveBeenCalledWith("education[0].advisor", "张老师");
+    expect(profileApi.upsert).toHaveBeenCalledWith("work[0].department", "研发部");
+    expect(profileApi.upsert).toHaveBeenCalledWith("projects[0].url", "https://example.com/project");
   });
 
   it("removes field-level save, confirmation and source controls", () => {

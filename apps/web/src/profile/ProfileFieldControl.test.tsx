@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { FieldDefinition } from "@resume/form-semantics/field-registry";
 import { ProfileFieldControl } from "./ProfileFieldControl.js";
@@ -14,6 +15,28 @@ const BASE_FIELD: FieldDefinition = {
 };
 
 describe("ProfileFieldControl", () => {
+  it("uses an image file control without exposing a local path", async () => {
+    const onChange = vi.fn();
+    const onFile = vi.fn(async () => "avatar-0f8fad5b-d9cb-469f-a165-70867728950e.webp");
+    render(<ProfileFieldControl
+      field={{ ...BASE_FIELD, semantic: "basics.avatar", label: "头像", profileControl: "file" }}
+      value=""
+      disabled={false}
+      onChange={onChange}
+      onFile={onFile}
+      onControl={() => undefined}
+    />);
+
+    const input = screen.getByLabelText("头像");
+    expect(input).toHaveAttribute("type", "file");
+    const file = new File(["image"], "avatar.webp", { type: "image/webp" });
+    await userEvent.upload(input, file);
+
+    expect(onFile).toHaveBeenCalledWith(file);
+    expect(onChange).toHaveBeenCalledWith("avatar-0f8fad5b-d9cb-469f-a165-70867728950e.webp");
+    expect(onChange).not.toHaveBeenCalledWith(expect.stringContaining("fakepath"));
+  });
+
   it("保留不在新标准选项中的历史值", () => {
     render(<ProfileFieldControl
       field={{ ...BASE_FIELD, profileControl: "enum", profileOptions: ["男", "女"] }}

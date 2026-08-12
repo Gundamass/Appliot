@@ -139,6 +139,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
   const recoveryCheckpoints = new Map<string, ApplicationCheckpoint>();
   const lastPublishedStates = new Map<string, ApplicationTaskState>();
   const stableActivities = new Map<string, Promise<void>>();
+  const applicationFormsReached = new Set<string>();
   const runGenerations = new Map<string, number>();
   const executionEpochs = new Map<string, number>();
   const fieldCoverageStore = createFieldCoverageStore();
@@ -165,7 +166,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     if (["created", "observing", "filling", "validating", "navigating"].includes(checkpoint.state)) {
       recoveryCheckpoints.set(taskId, checkpoint);
     }
-    if (checkpoint.snapshot) latestSnapshots.set(taskId, checkpoint.snapshot);
+    if (checkpoint.snapshot) {
+      latestSnapshots.set(taskId, checkpoint.snapshot);
+      if (isApplicationFormReady(checkpoint.snapshot)) applicationFormsReached.add(taskId);
+    }
     if (checkpoint.contentReview) contentReviews.set(taskId, checkpoint.contentReview);
     if (checkpoint.fieldCoverage) fieldCoverageStore.restore(taskId, checkpoint.fieldCoverage);
     const storedProgress = dependencies.checkpoints.latestProgress(taskId);
@@ -498,6 +502,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       recoveryCheckpoints.delete(taskId);
       lastPublishedStates.delete(taskId);
       stableActivities.delete(taskId);
+      applicationFormsReached.delete(taskId);
       runGenerations.delete(taskId);
       executionEpochs.delete(taskId);
       if (activeBrowserTaskId === taskId) activeBrowserTaskId = undefined;
@@ -535,6 +540,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         }
         persist(actor, page);
         return;
+      }
+      if (!applicationFormsReached.has(taskId)) {
+        if (!isApplicationFormReady(page)) return;
+        applicationFormsReached.add(taskId);
       }
 
       const resumeField = page.fields.find((field) =>
@@ -947,6 +956,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         activity: toApplicationActivity(activity)
       });
       if (activity.type === "user_activity") {
+        const currentPage = latestSnapshots.get(activity.taskId);
+        if (actor.getSnapshot().value === "observing"
+          && currentPage !== undefined
+          && !applicationFormsReached.has(activity.taskId)
+          && !isApplicationFormReady(currentPage)) return;
         invalidateRun(activity.taskId);
         if (latestSnapshots.has(activity.taskId)) {
           progress.handleUserActivity(activity.taskId, activity.fieldId);
@@ -959,6 +973,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         return;
       }
       if (activity.type === "page_unstable") {
+        const currentPage = latestSnapshots.get(activity.taskId);
+        if (actor.getSnapshot().value === "observing"
+          && currentPage !== undefined
+          && !applicationFormsReached.has(activity.taskId)
+          && !isApplicationFormReady(currentPage)) return;
         invalidateRun(activity.taskId);
         progress.pause(activity.taskId, "page_unstable");
         return;
@@ -977,6 +996,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           }
           sendApplicationEvent(actor, { type: "RESUME" });
           progress.resumeIfCheckpointMatches(activity.taskId, true);
+          persist(actor, observed);
+          await service.runUntilPause(activity.taskId, observed);
+          return;
+        }
+        if (!applicationFormsReached.has(activity.taskId)) {
           persist(actor, observed);
           await service.runUntilPause(activity.taskId, observed);
           return;
@@ -1170,6 +1194,16 @@ function hasUserValue(value: unknown): boolean {
 function isResumeUploadField(field: FormField): boolean {
   if (field.type !== "file") return false;
   return /resume|cv|简历/u.test(`${field.semanticHint ?? ""} ${field.label}`);
+}
+
+function isApplicationFormReady(snapshot: FormSnapshot): boolean {
+  if (snapshot.stage !== "application_form") return false;
+  if (snapshot.fields.some((field) => isResumeUploadField(field) || field.required)) return true;
+  return snapshot.actions.some((action) =>
+    action.class === "intermediate_navigation"
+    || action.class === "intermediate_save"
+    || action.class === "terminal_submit"
+  );
 }
 
 function displayCategory(field: FormField): ApplicationDisplayCategory {

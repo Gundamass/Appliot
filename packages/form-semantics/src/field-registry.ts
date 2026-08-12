@@ -1,7 +1,7 @@
 import type { FormField } from "@resume/contracts";
 
 export type SemanticFieldType = FormField["type"];
-export type ProfileFieldControl = "text" | "textarea" | "date" | "enum" | "boolean" | "suggestion";
+export type ProfileFieldControl = "text" | "textarea" | "date" | "enum" | "boolean" | "suggestion" | "file";
 export type FieldSection =
   | "basics"
   | "preferences"
@@ -25,6 +25,7 @@ export interface FieldDefinition {
   description: string;
   profileControl?: ProfileFieldControl;
   profileOptions?: readonly string[];
+  profileRequired?: boolean;
 }
 
 export interface ProfileSectionDefinition {
@@ -79,6 +80,7 @@ const RAW_FIELD_DEFINITIONS = [
   definition("basics.maritalStatus", "婚姻状况", ["婚姻状态"], TEXT_SELECT_TYPES, ["basics"], "候选人的婚姻状况", "sensitive"),
   definition("basics.currentLocation", "现居住地", ["现居地", "当前所在地", "居住城市"], TEXT_SELECT_TYPES, ["basics"], "候选人当前居住城市", "sensitive"),
   definition("basics.hukouLocation", "户籍所在地", ["户口所在地", "户籍地"], TEXT_SELECT_TYPES, ["basics"], "候选人的户籍所在地", "sensitive"),
+  definition("basics.avatar", "个人头像", ["头像", "个人照片", "证件照"], ["file"], ["basics"], "候选人的个人头像", "sensitive"),
   definition("identity.idType", "证件类型", ["证件类别"], ["select", "radio", "text"], ["basics"], "身份凭证类型", "sensitive"),
   definition("identity.idNumber", "证件号码", ["身份证号", "身份证号码"], TEXT_TYPES, ["basics"], "身份凭证号码", "sensitive"),
 
@@ -94,27 +96,36 @@ const RAW_FIELD_DEFINITIONS = [
   repeated("education[].degreeType", "学历类型", ["学习形式", "教育类型"], TEXT_SELECT_TYPES, "education", "全日制、非全日制等学历类型"),
   repeated("education[].enrollmentType", "培养类别", ["培养类型", "招生方式"], TEXT_SELECT_TYPES, "education", "统招、定向、委培等培养方式"),
   repeated("education[].major", "专业名称", ["专业", "所学专业", "major"], TEXT_TYPES, "education", "教育经历的专业"),
+  repeated("education[].majorCategory", "专业类别", ["学科类别", "专业大类"], TEXT_SELECT_TYPES, "education", "教育经历的专业类别"),
   repeated("education[].department", "院系名称", ["学院", "院系", "department"], TEXT_TYPES, "education", "教育经历所在学院或院系"),
+  repeated("education[].schoolLocation", "学校所在地", ["院校所在地"], TEXT_SELECT_TYPES, "education", "学校所在地区"),
   repeated("education[].startDate", "入学时间", ["教育开始时间", "就读开始时间"], DATE_TYPES, "education", "教育经历开始日期"),
   repeated("education[].endDate", "毕业时间", ["教育结束时间", "就读结束时间"], DATE_TYPES, "education", "教育经历结束日期"),
   repeated("education[].isHighest", "是否为最高学历", ["最高学历标识"], ["select", "radio", "checkbox"], "education", "当前教育经历是否为最高学历"),
+  repeated("education[].isExchange", "是否交流学习", ["交流学习", "是否交换学习"], ["select", "radio", "checkbox"], "education", "该教育经历是否为交流学习"),
+  repeated("education[].isJointProgram", "是否联合办学", ["联合办学", "是否联合培养"], ["select", "radio", "checkbox"], "education", "该教育经历是否为联合办学"),
   repeated("education[].gpa", "GPA", ["绩点", "平均绩点"], TEXT_TYPES, "education", "教育经历的平均绩点"),
   repeated("education[].rank", "成绩排名", ["专业排名", "班级排名"], TEXT_SELECT_TYPES, "education", "教育经历的成绩或专业排名"),
+  repeated("education[].advisor", "导师姓名", ["导师", "指导教师"], TEXT_TYPES, "education", "教育经历中的导师姓名"),
+  repeated("education[].isNationalKeyLab", "是否国家重点实验室", ["国家重点实验室"], ["select", "radio", "checkbox"], "education", "所在实验室是否为国家重点实验室"),
+  repeated("education[].laboratory", "所在实验室", ["实验室名称"], TEXT_TYPES, "education", "教育经历中的实验室"),
   repeated("education[].description", "教育经历描述", ["在校经历", "教育描述"], ["textarea", "text"], "education", "教育经历的原文描述"),
 
   repeated("work[].company", "单位名称", ["公司", "公司名称", "实习单位", "工作单位", "company"], TEXT_TYPES, "work", "工作或实习经历中的单位"),
   repeated("work[].position", "职位名称", ["职位", "岗位", "岗位名称", "职务", "position", "title"], TEXT_TYPES, "work", "工作或实习经历中的职位", ["work[].title"]),
+  repeated("work[].department", "任职部门", ["所在部门", "所属部门"], TEXT_TYPES, "work", "工作或实习所在部门"),
   repeated("work[].employmentType", "用工类型", ["工作类型", "实习类型", "employment type"], TEXT_SELECT_TYPES, "work", "实习、全职等用工类型"),
   repeated("work[].startDate", "工作开始时间", ["入职时间", "实习开始时间"], DATE_TYPES, "work", "工作或实习经历开始日期"),
   repeated("work[].endDate", "工作结束时间", ["离职时间", "实习结束时间"], DATE_TYPES, "work", "工作或实习经历结束日期"),
   repeated("work[].description", "职责和成果", ["工作职责", "实习内容", "工作描述"], ["textarea", "text"], "work", "工作或实习职责和成果原文"),
 
   repeated("projects[].name", "项目名称", ["项目名", "project name"], TEXT_TYPES, "projects", "项目经历的名称"),
-  repeated("projects[].role", "担任角色", ["项目角色", "职责角色"], TEXT_TYPES, "projects", "候选人在项目中的角色"),
+  repeated("projects[].role", "项目角色", ["担任角色", "职责角色"], TEXT_TYPES, "projects", "候选人在项目中的角色"),
   repeated("projects[].startDate", "项目开始时间", ["项目起始时间"], DATE_TYPES, "projects", "项目开始日期"),
   repeated("projects[].endDate", "项目结束时间", ["项目截止时间"], DATE_TYPES, "projects", "项目结束日期"),
   repeated("projects[].description", "项目描述", ["项目简介", "实践概述", "project description"], ["textarea", "text"], "projects", "项目经历的原文描述"),
   repeated("projects[].technologies", "技术栈", ["开发工具", "项目技术"], TEXT_TYPES, "projects", "项目使用的技术和工具"),
+  repeated("projects[].url", "项目链接", ["项目地址", "项目网址", "代码仓库", "project url"], TEXT_TYPES, "projects", "项目演示、主页或代码仓库链接"),
   repeated("projects[].highlights[0]", "项目要点", ["项目成果", "项目亮点", "项目职责"], ["textarea", "text"], "projects", "项目经历中的原文要点"),
 
   repeated("campus[].name", "实践名称", ["在校实践名称", "活动名称"], TEXT_TYPES, "campus", "在校实践或活动名称"),
@@ -155,7 +166,9 @@ const ETHNICITY_OPTIONS = [
 const PROFILE_FIELD_METADATA: Readonly<Record<string, {
   control: ProfileFieldControl;
   options?: readonly string[];
+  required?: boolean;
 }>> = {
+  "basics.avatar": { control: "file", required: false },
   "basics.gender": { control: "enum", options: GENDER_OPTIONS },
   "basics.nationality": { control: "suggestion", options: NATIONALITY_OPTIONS },
   "basics.ethnicity": { control: "enum", options: ETHNICITY_OPTIONS },
@@ -173,13 +186,19 @@ const PROFILE_FIELD_METADATA: Readonly<Record<string, {
   "education[].degreeType": { control: "enum", options: DEGREE_TYPE_OPTIONS },
   "education[].enrollmentType": { control: "enum", options: ENROLLMENT_TYPE_OPTIONS },
   "education[].isHighest": { control: "boolean", options: ["是", "否"] },
+  "education[].isExchange": { control: "boolean", options: ["是", "否"] },
+  "education[].isJointProgram": { control: "boolean", options: ["是", "否"] },
+  "education[].isNationalKeyLab": { control: "boolean", options: ["是", "否"] },
+  "education[].schoolLocation": { control: "suggestion" },
   "work[].employmentType": { control: "enum", options: EMPLOYMENT_TYPE_OPTIONS },
-  "awards[].level": { control: "enum", options: AWARD_LEVEL_OPTIONS }
+  "awards[].level": { control: "enum", options: AWARD_LEVEL_OPTIONS },
+  "projects[].url": { control: "text", required: false }
 };
 
 export const FIELD_DEFINITIONS: readonly FieldDefinition[] = RAW_FIELD_DEFINITIONS.map((field) => ({
   ...field,
   profileControl: PROFILE_FIELD_METADATA[field.semantic]?.control ?? defaultProfileControl(field.types),
+  profileRequired: PROFILE_FIELD_METADATA[field.semantic]?.required ?? true,
   ...(PROFILE_FIELD_METADATA[field.semantic]?.options === undefined
     ? {}
     : { profileOptions: PROFILE_FIELD_METADATA[field.semantic]!.options })

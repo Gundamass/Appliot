@@ -14,15 +14,15 @@
 | --- | --- |
 | React 本地 Web 界面 | 已实现，可单独启动 |
 | PDF 原件本地留存 | 已实现 |
-| PDF 文本解析与 OCR 接口 | 已实现，生产 OCR 适配器尚未配置 |
-| 模型结构化提取接口 | 已实现，生产模型适配器尚未配置 |
+| PDF 文本解析与 OCR 接口 | 已实现，支持通过 SSH 隧道连接远程 GPU OCR Worker |
+| 模型结构化提取接口 | 已实现，DeepSeek 与远程 Embedding 可由本地配置接入 |
 | 资料确认、修正和版本记录 | 已实现 |
 | RAG 规划、检索、验证、追问和修正 | 已实现 |
 | 岗位相关自我评价审核 | 已实现 |
 | 受控浏览器自动填写 | 已实现，包含页面观察、字段填写、回读验证和中间操作 |
 | 最终投递 | 明确禁止自动执行 |
 
-由于真实 OCR 和模型适配器尚未接入，当前 API 会在监听端口前主动停止，并显示清晰的配置提示。这是预期的安全保护，不是模块加载故障。因此目前可以查看和操作前端界面，但上传解析、自我评价生成等依赖 API 的完整流程暂时不可用。
+生产适配器由根目录 `.env.local` 配置。远程 OCR 与 Embedding 只监听服务器回环地址，本地通过受管 SSH 隧道访问，不直接暴露到局域网或公网。
 
 ## 环境要求
 
@@ -37,7 +37,56 @@
 corepack pnpm install --frozen-lockfile
 ```
 
-## 启动前端
+## 长期运行与登录自启
+
+推荐使用统一服务控制脚本。它会管理远程 OCR/Embedding、本地 SSH 隧道、API、受控浏览器 Worker和生产前端。
+
+首次安装前需要满足：
+
+- `.env.local` 已配置 DeepSeek、OCR 与 Embedding 参数。
+- 当前用户可以无交互 SSH 登录远程 GPU 服务器。
+- 远程服务器已经部署 `resume-ai` 控制器和 Worker。
+- 已执行 `corepack pnpm install --frozen-lockfile`。
+
+首次安装：
+
+```powershell
+.\scripts\service-control.ps1 install `
+  -SshHost "远程服务器地址" `
+  -SshUser "远程用户名" `
+  -SshPort 22 `
+  -RemoteRoot "/home/远程用户名/resume-ai"
+```
+
+该命令会构建生产产物、把非秘密远程连接信息写入被 Git 忽略的 `.runtime/services/service-config.json`，并注册当前用户的 `Appliot Services` 登录任务。受控浏览器依赖桌面会话，因此是在 Windows 用户登录后自启，而不是在尚未登录时启动。
+
+日常命令：
+
+```powershell
+.\scripts\service-control.ps1 status
+.\scripts\service-control.ps1 start
+.\scripts\service-control.ps1 stop
+.\scripts\service-control.ps1 restart
+.\scripts\service-control.ps1 logs
+.\scripts\service-control.ps1 uninstall
+```
+
+`stop` 会停止前端、API、浏览器 Worker、SSH 隧道和远程 OCR/Embedding。`uninstall` 还会删除登录任务，但不会删除数据库、候选人档案、模型、配置或日志。
+
+守护器会检查进程存活和功能健康。API、前端或隧道退出后按退避策略恢复；远程 Worker 连续异常时先检查远程控制器，再执行受控重启。模型冷启动期间显示为启动中，不会反复重启。
+
+状态和日志位于：
+
+```text
+.runtime/services/runtime-state.json
+.runtime/services/logs/
+```
+
+日志会轮转且不记录 `.env.local` 内容、Authorization Token、SSH 私钥或请求正文。
+
+## 开发模式
+
+### 启动前端
 
 在项目根目录运行：
 
@@ -59,7 +108,7 @@ http://127.0.0.1:43120
 
 如果只启动前端，可以浏览界面，但涉及服务端的操作会提示请求失败。
 
-## API 状态
+### 启动 API
 
 构建 API：
 
@@ -73,11 +122,19 @@ corepack pnpm --filter @resume/api build
 corepack pnpm --filter @resume/api start
 ```
 
-在生产 OCR 和模型提取适配器配置完成前，启动命令会按设计退出，并显示：
+如果必需适配器配置不完整，启动命令会按设计退出，并显示：
 
 ```text
 Local PDF and fact extraction dependencies must be configured before starting the API
 ```
+
+## 长期运行故障排查
+
+- `status` 显示 SSH 隧道异常：检查网络、SSH Agent 和无交互登录；守护器会自动重连。
+- OCR 或 Embedding 长时间启动中：首次加载 GPU 模型可能需要较长时间，可通过 `logs` 查看远程控制日志。
+- API 启动失败：确认本机 Node.js 至少为 `24.14.1`，并检查 `.env.local` 和 `api.stderr.log`。
+- 前端端口不可用：检查 `5173` 是否被非 Appliot 进程占用；守护器不会盲目终止未知进程。
+- 执行 `stop` 后仍有异常：再次运行 `status`。控制脚本会在守护器已退出但仍有受管资源时启动一次清理流程。
 
 API 完成配置后只监听回环地址 `127.0.0.1:43120`，不会默认暴露到局域网或公网。
 

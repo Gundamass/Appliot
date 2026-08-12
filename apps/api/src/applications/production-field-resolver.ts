@@ -71,6 +71,9 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
     if (existing?.scope === "application") {
       return resolvedTaskAnswer(field, semantic, existing.value, existing.evidence);
     }
+    if (field.type === "file" && existing?.scope === "profile" && typeof existing.value === "string" && existing.value.trim() !== "") {
+      return resolvedProfileFile(field, semantic, existing.value, existing.evidence, semanticDecision.confidence);
+    }
     const decision = await dependencies.ragService.resolveField({
       taskId,
       fieldId: field.id,
@@ -179,6 +182,28 @@ function resolvedTaskAnswer(
       source: "user",
       confidence: 1,
       reason: "本次投递已确认该字段的用户答案",
+      evidence
+    })
+  };
+}
+
+function resolvedProfileFile(
+  field: FormField,
+  fieldPath: string,
+  value: string,
+  evidence: ApplicationFieldAssessment["evidence"],
+  confidence: number
+) {
+  return {
+    status: "verified" as const,
+    value,
+    fieldPath,
+    assessment: fieldAssessment(field, {
+      semantic: fieldPath,
+      status: "ready",
+      source: "exact",
+      confidence,
+      reason: "文件字段已精确映射到本地候选人档案",
       evidence
     })
   };

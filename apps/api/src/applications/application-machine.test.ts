@@ -734,6 +734,69 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("waits on a job list until the user opens a resume form, then fills it automatically", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const jobList: FormSnapshot = {
+      ...snapshot("application_form"),
+      id: "snapshot-4399-jobs",
+      url: "https://hr.4399om.com/weixin/?r=job/agent",
+      title: "四三九九2027校园招聘",
+      fields: [{ id: "field-keyword", label: "请输入关键词", type: "text", required: false, options: [], currentValue: "" }],
+      actions: [{ id: "action-job", text: "Java开发工程师", class: "unknown_side_effect" }]
+    };
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      id: "snapshot-4399-form",
+      url: "https://hr.4399om.com/weixin/?r=job/apply&id=1",
+      fields: [{ id: "field-name", label: "姓名", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ id: "action-submit", text: "提交", class: "terminal_submit" }]
+    };
+    const filled: FormSnapshot = {
+      ...form,
+      id: "snapshot-4399-filled",
+      fields: [{ ...form.fields[0]!, currentValue: "张三" }]
+    };
+    const observe = vi.fn(async () => form);
+    const execute = vi.fn(async (): Promise<Extract<WorkerResponse, { type: "execution_result" }>> => ({
+      type: "execution_result",
+      taskId: "task-1",
+      snapshotId: filled.id,
+      commandType: "fill",
+      status: "applied",
+      actualValue: "张三",
+      snapshot: filled,
+      errors: []
+    }));
+    const resolveField = vi.fn(async () => ({ status: "verified" as const, value: "张三" }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute },
+      resolveField,
+      approve: () => "approved-token"
+    });
+
+    service.start({ taskId: "task-1", applicationUrl: jobList.url });
+    await service.runUntilPause("task-1", jobList);
+
+    expect(service.state("task-1").value).toBe("observing");
+    expect(service.progress("task-1").status).toBe("idle");
+    expect(resolveField).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+
+    await service.handleActivity({ type: "user_activity", taskId: "task-1", fieldId: "action-job", activity: "click" });
+    expect(service.progress("task-1").status).toBe("idle");
+    await service.handleActivity({ type: "page_unstable", taskId: "task-1", fingerprint: "4399-job-navigation" });
+    expect(service.progress("task-1").status).toBe("idle");
+    await service.handleActivity({ type: "page_stable", taskId: "task-1", fingerprint: "4399-application-form" });
+
+    expect(observe).toHaveBeenCalledOnce();
+    expect(resolveField).toHaveBeenCalledWith("task-1", expect.objectContaining({ id: "field-name" }), "deterministic");
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({ type: "fill", fieldId: "field-name" }), expect.any(Number));
+    expect(service.state("task-1").value).toBe("review_locked");
+    database.close();
+  });
+
   it("hands off for human review when preview and submit is the only remaining action", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

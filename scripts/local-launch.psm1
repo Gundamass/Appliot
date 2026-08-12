@@ -169,6 +169,11 @@ function Get-ModelTunnelSshArguments {
 
   return @(
     "-N",
+    "-o", "BatchMode=yes",
+    "-o", "ConnectTimeout=8",
+    "-o", "ExitOnForwardFailure=yes",
+    "-o", "ServerAliveInterval=15",
+    "-o", "ServerAliveCountMax=3",
     "-L", "18080:127.0.0.1:18080",
     "-L", "43121:127.0.0.1:43121",
     "$User@$normalizedHost",

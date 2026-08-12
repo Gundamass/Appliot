@@ -14,6 +14,7 @@ import {
   ProfileFactUpsertInputSchema
 } from "@resume/contracts";
 import { renderPdfPage as renderProfilePdfPage } from "@resume/profile-domain/src/pdf/extract-pdf.js";
+import type { AvatarMimeType, AvatarStore } from "./avatar-store.js";
 import { sendError } from "../http-response.js";
 import {
   DuplicateDocumentError,
@@ -50,6 +51,7 @@ class MultipartInputError extends Error {
 
 export interface ProfileRouteDependencies extends ProfileImportDependencies {
   profileRepository: ProfileRepository;
+  avatarStore?: AvatarStore;
   renderPdfPage?: (bytes: Uint8Array, page: number) => Promise<Uint8Array>;
 }
 
@@ -84,6 +86,20 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
       }
       throw error;
     }
+  });
+
+  app.post("/api/profile/avatar", async (request, reply) => {
+    if (dependencies.avatarStore === undefined || !request.isMultipart()) return sendError(reply, 400, "Invalid request", "invalid_request");
+    let upload: Awaited<ReturnType<typeof readAvatarUpload>>;
+    try {
+      upload = await readAvatarUpload(request);
+    } catch {
+      return sendError(reply, 400, "头像文件无效", "invalid_avatar_upload");
+    }
+    if (upload === undefined || !hasImageSignature(upload.bytes, upload.mimeType)) {
+      return sendError(reply, 400, "头像文件无效", "invalid_avatar_upload");
+    }
+    return reply.code(201).send(await dependencies.avatarStore.save(upload.bytes, upload.mimeType));
   });
 
   app.get("/api/profile/facts", async (_request, reply) => {
@@ -288,6 +304,46 @@ function consumeFile(
   file.on("end", () => {
     if (file.truncated) onInvalid();
     onComplete(Buffer.concat(chunks));
+  });
+}
+
+function hasImageSignature(bytes: Uint8Array, mimeType: AvatarMimeType): boolean {
+  if (mimeType === "image/jpeg") return bytes[0] === 0xff && bytes[1] === 0xd8 && bytes[2] === 0xff;
+  if (mimeType === "image/png") return Buffer.from(bytes.subarray(0, 8)).equals(Buffer.from([137, 80, 78, 71, 13, 10, 26, 10]));
+  return Buffer.from(bytes.subarray(0, 4)).toString("ascii") === "RIFF"
+    && Buffer.from(bytes.subarray(8, 12)).toString("ascii") === "WEBP";
+}
+
+function readAvatarUpload(request: FastifyRequest): Promise<{ bytes: Buffer; mimeType: AvatarMimeType } | undefined> {
+  return new Promise((resolve, reject) => {
+    let parser: BusboyParser;
+    try {
+      parser = new BusboyConstructor({
+        headers: request.headers as { "content-type": string },
+        limits: { files: 1, fields: 0, parts: 1, fileSize: 5 * 1024 * 1024 }
+      });
+    } catch {
+      request.raw.resume();
+      reject(new MultipartInputError());
+      return;
+    }
+    let result: { bytes: Buffer; mimeType: AvatarMimeType } | undefined;
+    let invalid = false;
+    parser.on("file", (fieldname, file, _filename, _encoding, mimetype) => {
+      const allowed = new Set<AvatarMimeType>(["image/jpeg", "image/png", "image/webp"]);
+      if (fieldname !== "file" || !allowed.has(mimetype as AvatarMimeType)) {
+        file.resume();
+        return;
+      }
+      consumeFile(file, (bytes) => { result = { bytes, mimeType: mimetype as AvatarMimeType }; }, () => { invalid = true; });
+    });
+    parser.on("partsLimit", () => { invalid = true; });
+    parser.on("filesLimit", () => { invalid = true; });
+    parser.on("fieldsLimit", () => { invalid = true; });
+    parser.on("field", () => { invalid = true; });
+    parser.once("error", () => { invalid = true; });
+    parser.once("finish", () => resolve(invalid ? undefined : result));
+    request.raw.pipe(parser);
   });
 }
 

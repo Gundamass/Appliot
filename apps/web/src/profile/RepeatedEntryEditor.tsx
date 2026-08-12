@@ -31,15 +31,17 @@ const SECTION_NAMES: Partial<Record<FieldSection, string>> = {
 };
 
 const FIELD_ORDERS: Partial<Record<FieldSection, readonly string[]>> = {
-  projects: ["name", "startDate", "endDate", "description", "technologies", "highlights[0]", "role"],
+  projects: ["name", "role", "startDate", "endDate", "technologies", "url", "description", "highlights[0]"],
   work: ["company", "position", "startDate", "endDate", "description", "employmentType"],
   awards: ["name", "date", "level", "description"]
 };
 
+const PROJECT_WIDE_FIELDS = new Set(["technologies", "url", "description", "highlights[0]"]);
+
 export function RepeatedEntryEditor({ section, entries, disabled = false, onChange, onAdd, onRemove, onControl = () => undefined }: RepeatedEntryEditorProps) {
   const fields = useMemo(() => orderedFields(section), [section]);
   const name = SECTION_NAMES[section] ?? "经历";
-  const visibleEntries = entries.slice().sort((left, right) => left.index - right.index);
+  const visibleEntries = sortEntries(section, entries);
 
   return (
     <div className="repeated-entry-editor">
@@ -71,6 +73,7 @@ export function RepeatedEntryEditor({ section, entries, disabled = false, onChan
                 return (
                   <ProfileControl
                     key={path}
+                    section={section}
                     field={field}
                     value={entry.values[path] ?? ""}
                     disabled={disabled}
@@ -87,10 +90,12 @@ export function RepeatedEntryEditor({ section, entries, disabled = false, onChan
   );
 }
 
-function ProfileControl({ field, value, disabled, onChange, onControl }: { field: FieldDefinition; value: string; disabled: boolean; onChange(value: string): void; onControl(control: ProfileControlElement | null): void }) {
+function ProfileControl({ section, field, value, disabled, onChange, onControl }: { section: FieldSection; field: FieldDefinition; value: string; disabled: boolean; onChange(value: string): void; onControl(control: ProfileControlElement | null): void }) {
+  const wide = field.profileControl === "textarea"
+    || section === "projects" && PROJECT_WIDE_FIELDS.has(fieldLeaf(field.semantic));
   return (
-    <label className={field.profileControl === "textarea" ? "profile-field profile-field-wide" : "profile-field"}>
-      <span>{field.label}</span>
+    <label className={wide ? "profile-field profile-field-wide" : "profile-field"}>
+      <span>{field.label}{field.profileRequired === false && <small>选填</small>}</span>
       <ProfileFieldControl field={field} value={value} disabled={disabled} onChange={onChange} onControl={onControl} />
     </label>
   );
@@ -104,9 +109,39 @@ function orderedFields(section: FieldSection): FieldDefinition[] {
 }
 
 function fieldOrder(semantic: string, order: readonly string[]): number {
-  const leaf = semantic.slice(semantic.indexOf("].") + 2);
+  const leaf = fieldLeaf(semantic);
   const index = order.indexOf(leaf);
   return index === -1 ? order.length : index;
+}
+
+function fieldLeaf(semantic: string): string {
+  return semantic.slice(semantic.indexOf("].") + 2);
+}
+
+function sortEntries(section: FieldSection, entries: RepeatedEntry[]): RepeatedEntry[] {
+  if (section !== "projects") return entries.slice().sort((left, right) => left.index - right.index);
+  return entries.slice().sort((left, right) => {
+    const leftStart = projectDateKey(left, "startDate");
+    const rightStart = projectDateKey(right, "startDate");
+    if (leftStart !== rightStart) return rightStart - leftStart;
+    if (leftStart > 0) {
+      const endDifference = projectDateKey(right, "endDate") - projectDateKey(left, "endDate");
+      if (endDifference !== 0) return endDifference;
+    }
+    return left.index - right.index;
+  });
+}
+
+function projectDateKey(entry: RepeatedEntry, leaf: "startDate" | "endDate"): number {
+  const value = entry.values[`projects[${entry.index}].${leaf}`]?.trim();
+  if (!value) return 0;
+  const match = value.match(/^(\d{4})[-/](\d{1,2})(?:[-/](\d{1,2}))?$/u);
+  if (!match) return 0;
+  const year = Number(match[1]);
+  const month = Number(match[2]);
+  const day = Number(match[3] ?? 1);
+  if (month < 1 || month > 12 || day < 1 || day > 31) return 0;
+  return year * 10_000 + month * 100 + day;
 }
 
 function materialize(semantic: string, index: number): string {

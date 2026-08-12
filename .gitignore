@@ -9,6 +9,7 @@ test-results/
 .worktrees/
 .superpowers/
 .codegraph/
+.runtime/
 *.log
 playwright-artifacts/
 apps/api/browser-profile/

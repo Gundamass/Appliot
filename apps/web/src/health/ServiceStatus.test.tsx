@@ -14,7 +14,8 @@ const statuses: AdapterStatus[] = [
 ];
 
 const profileApi: ProfileApi = {
-  upload: vi.fn(),
+    upload: vi.fn(),
+    uploadAvatar: vi.fn(),
   listFacts: vi.fn(async () => []),
   upsert: vi.fn(),
   remove: vi.fn(async () => undefined),
