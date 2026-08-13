@@ -94,6 +94,26 @@ describe("extractFacts", () => {
     expect(system).not.toContain("oppoRelative");
   });
 
+  it("将获奖、在校实践和论文纳入结构化抽取契约", async () => {
+    const provider = providerReturning({ facts: [] });
+
+    await extractFacts(documentWithPage("获奖：全国大学生竞赛一等奖"), provider);
+
+    const system = provider.generateStructured.mock.calls[0]?.[0].system as string;
+    expect(system).toContain("awards[index].name");
+    expect(system).toContain("awards[index].date");
+    expect(system).toContain("campus[index].name");
+    expect(system).toContain("publications[index].title");
+  });
+
+  it("拒绝模型返回未注册的档案字段路径", async () => {
+    const provider = new FakeStructuredModelProvider({
+      facts: [{ fieldPath: "awards[0].unknown", value: "不应写入", page: 1, quote: "不应写入", confidence: 0.9 }]
+    });
+
+    await expect(extractFacts(documentWithPage("不应写入"), provider)).rejects.toBeInstanceOf(ZodError);
+  });
+
   it("returns evidence-backed work, project, skill, and self-evaluation facts together", async () => {
     const provider = new FakeStructuredModelProvider({
       facts: [

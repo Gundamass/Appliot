@@ -130,7 +130,10 @@ const RAW_FIELD_DEFINITIONS = [
 
   repeated("campus[].name", "实践名称", ["在校实践名称", "活动名称"], TEXT_TYPES, "campus", "在校实践或活动名称"),
   repeated("campus[].role", "实践角色", ["担任角色", "活动角色"], TEXT_TYPES, "campus", "在校实践中担任的角色"),
+  repeated("campus[].startDate", "实践开始时间", ["活动开始时间", "实践起始时间"], DATE_TYPES, "campus", "在校实践或活动开始日期"),
+  repeated("campus[].endDate", "实践结束时间", ["活动结束时间", "实践截止时间"], DATE_TYPES, "campus", "在校实践或活动结束日期"),
   repeated("campus[].description", "实践描述", ["实践概述", "活动描述"], ["textarea", "text"], "campus", "在校实践的原文描述"),
+  repeated("campus[].highlights[0]", "实践成果", ["实践亮点", "活动成果"], ["textarea", "text"], "campus", "在校实践中的原文成果"),
 
   repeated("awards[].name", "获奖名称", ["奖项名称", "获奖项目"], TEXT_TYPES, "awards", "奖项或荣誉名称"),
   repeated("awards[].date", "获奖时间", ["奖项时间"], DATE_TYPES, "awards", "获得奖项的日期"),
@@ -138,7 +141,11 @@ const RAW_FIELD_DEFINITIONS = [
   repeated("awards[].description", "获奖描述", ["奖项描述"], ["textarea", "text"], "awards", "奖项的原文说明"),
 
   repeated("publications[].title", "论文名称", ["论文题目", "专著名称"], TEXT_TYPES, "publications", "论文或专著名称"),
+  repeated("publications[].type", "成果类型", ["论文类型", "出版物类型"], TEXT_SELECT_TYPES, "publications", "论文、专著或其他成果类型"),
+  repeated("publications[].publisher", "发表或出版方", ["期刊名称", "出版社", "发表机构"], TEXT_TYPES, "publications", "论文或专著的发表或出版方"),
   repeated("publications[].date", "发表时间", ["出版时间"], DATE_TYPES, "publications", "论文或专著发表日期"),
+  repeated("publications[].authors", "作者", ["论文作者", "作者列表"], TEXT_TYPES, "publications", "论文或专著作者信息"),
+  repeated("publications[].url", "成果链接", ["论文链接", "出版物链接"], TEXT_TYPES, "publications", "论文或专著的链接"),
   repeated("publications[].description", "成果描述", ["论文描述", "专著描述"], ["textarea", "text"], "publications", "论文或专著的原文说明"),
 
   repeated("certificates[].name", "证书名称", ["资格证书", "认证名称"], TEXT_TYPES, "certificates", "证书或资格认证名称"),
@@ -315,4 +322,44 @@ function materializeSemantic(template: string, entryContext: string | undefined)
 
 function normalize(value: string): string {
   return value.normalize("NFKC").toLocaleLowerCase().replace(/[\s:：*＊?？]/gu, "").trim();
+}
+
+const LEGACY_EXTRACTION_FIELD_PATH_TEMPLATES = [
+  "basics.address",
+  "basics.location",
+  "education[].school",
+  "education[].details",
+  "work[].title",
+  "work[].location",
+  "work[].highlights[0]",
+  "projects[].technologies",
+  "projects[].highlights[0]",
+  "skills[]",
+  "certificates[].credentialId",
+  "certificates[].url",
+  "links.website",
+  "links.github",
+  "links.linkedin",
+  "links.portfolio",
+  "self.summary",
+  "preferences.salary"
+] as const;
+
+export function listExtractableFieldPathTemplates(): readonly string[] {
+  return [...new Set([
+    ...FIELD_DEFINITIONS
+      .filter((definition) => definition.profileControl !== "file")
+      .map((definition) => definition.semantic),
+    ...LEGACY_EXTRACTION_FIELD_PATH_TEMPLATES
+  ])];
+}
+
+export function isAllowedExtractedFieldPath(path: string): boolean {
+  if (typeof path !== "string" || path.trim() === "") return false;
+  return listExtractableFieldPathTemplates().some((template) => {
+    const escaped = template
+      .replace(/[.*+?^${}()|[\]\\]/g, "\\$&")
+      .replaceAll("\\[\\]", "\\[(?:0|[1-9]\\d*)\\]");
+    return new RegExp(`^${escaped}$`, "u").test(path);
+  });
 }

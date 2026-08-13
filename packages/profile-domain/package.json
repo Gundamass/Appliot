@@ -10,6 +10,7 @@
   "dependencies": {
     "@napi-rs/canvas": "0.1.70",
     "@resume/contracts": "workspace:*",
+    "@resume/form-semantics": "workspace:*",
     "@resume/model-provider": "workspace:*",
     "pdfjs-dist": "5.3.31",
     "zod": "3.25.67"

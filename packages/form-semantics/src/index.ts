@@ -3,6 +3,8 @@ export {
   FIELD_DEFINITIONS,
   PROFILE_SECTION_DEFINITIONS,
   fieldDefinitionText,
+  isAllowedExtractedFieldPath,
+  listExtractableFieldPathTemplates,
   profileSectionFor,
   resolveDeterministicSemantic,
   semanticLookupPaths,

@@ -206,6 +206,9 @@ importers:
       '@resume/contracts':
         specifier: workspace:*
         version: link:../contracts
+      '@resume/form-semantics':
+        specifier: workspace:*
+        version: link:../form-semantics
       '@resume/model-provider':
         specifier: workspace:*
         version: link:../model-provider

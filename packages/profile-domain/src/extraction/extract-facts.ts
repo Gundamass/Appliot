@@ -1,5 +1,6 @@
 import { randomUUID } from "node:crypto";
 import { ProfileFactSchema, type ProfileFact } from "@resume/contracts";
+import { listExtractableFieldPathTemplates } from "@resume/form-semantics";
 import type { StructuredModelProvider } from "@resume/model-provider";
 import type { ExtractedDocument, ExtractedPage } from "../pdf/types.js";
 import { ExtractionSchema, type ExtractionOutput } from "./extraction-schema.js";
@@ -8,11 +9,11 @@ export const EXTRACTION_RULES = [
   "Extract only facts explicitly supported by the supplied pages.",
   "Each fact must quote exact evidence from one referenced page.",
   "Do not infer or add unsupported claims.",
-  "Scan the entire resume and cover every explicitly present section: basics, education, internship and work experience, projects, skills, certificates, links, self-evaluation, and job preferences.",
+  "Scan the entire resume and cover every explicitly present section: basics, education, internship and work experience, projects, skills, certificates, links, self-evaluation, job preferences, campus practice, awards, and publications.",
   "Do not stop after extracting basic or education fields.",
-  "Use only these canonical field paths when the value is present: basics.name, basics.email, basics.phone, basics.wechat, basics.address, basics.birthDate, basics.location; education[index].school, education[index].degree, education[index].major, education[index].majorCategory, education[index].department, education[index].schoolLocation, education[index].startDate, education[index].endDate, education[index].isExchange, education[index].isJointProgram, education[index].gpa, education[index].rank, education[index].advisor, education[index].isNationalKeyLab, education[index].laboratory, education[index].description, education[index].details; work[index].company, work[index].title, work[index].department, work[index].employmentType, work[index].startDate, work[index].endDate, work[index].location, work[index].description, work[index].highlights[index]; projects[index].name, projects[index].role, projects[index].startDate, projects[index].endDate, projects[index].description, projects[index].technologies, projects[index].highlights[index], projects[index].url; skills[index]; certificates[index].name, certificates[index].issuer, certificates[index].date, certificates[index].credentialId, certificates[index].url; links.website, links.github, links.linkedin, links.portfolio; self.summary; preferences.targetRole, preferences.targetCity, preferences.employmentType, preferences.availability, preferences.salary.",
+  `Use only these canonical field paths when the value is present: ${listExtractableFieldPathTemplates().map(formatExtractionTemplate).join(", ")}`,
   "Treat internships as work entries. Put the exact role shown by the resume in work[index].title, including the internship wording when present, for example Java backend internship. Use work[index].employmentType only for the generic category such as internship or full-time, never as a substitute for the role.",
-  "Emit separate leaf facts for distinct values and use stable zero-based indexes for repeated education, work, project, skill, and certificate entries."
+  "Emit separate leaf facts for distinct values and use stable zero-based indexes for repeated education, work, project, skill, certificate, campus, award, and publication entries."
 ].join(" ");
 
 const EXTRACTION_JSON_EXAMPLE = {
@@ -170,4 +171,8 @@ function indexPages(pages: ExtractedPage[]): ReadonlyMap<number, ExtractedPage> 
 
 function serializePages(pages: ExtractedPage[]): string {
   return JSON.stringify(pages.map(({ page, text, source }) => ({ page, text, source })));
+}
+
+function formatExtractionTemplate(template: string): string {
+  return template.replaceAll("[]", "[index]").replaceAll("[0]", "[index]");
 }
