@@ -6,5 +6,7 @@ allowBuilds:
   esbuild: true
 overrides:
   node-gyp: 12.1.0
+  fast-uri@^3.0.0: 3.1.5
+  fast-uri@^4.0.0: 4.1.2
 patchedDependencies:
   better-sqlite3@11.10.0: patches/better-sqlite3@11.10.0.patch
