@@ -25,6 +25,15 @@ export async function selectCustomControl(locator: Locator, expected: string): P
   }
   const selectedValue = normalizeText(texts[index]!);
   await options.nth(index).click();
+  await locator.page().waitForTimeout(0);
+  const readback = normalizeText(await locator.evaluate((element) => {
+    if (!(element instanceof HTMLInputElement)) return element.textContent ?? "";
+    if (element.value.trim() !== "") return element.value;
+    return element.closest("label")?.textContent ?? "";
+  }));
+  if (normalizeOption(readback) !== normalizeOption(expected)) {
+    throw new Error("custom_readback_mismatch");
+  }
   return { selectedValue, recovered: selectedValue !== expected };
 }
 

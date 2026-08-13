@@ -11,6 +11,24 @@ import {
 const taskId = "91dc4bd6-425a-4cab-a38d-d13e33cda771";
 
 describe("application contracts", () => {
+  it("exposes persisted profile synchronization state on application tasks", () => {
+    const task = ApplicationTaskSchema.parse({
+      id: "734b72a5-bb6b-4946-b5cc-cfe8419bd0eb",
+      applicationUrl: "https://jobs.example.test/apply",
+      state: "filling",
+      commands: ["cancel"],
+      profileRevisionApplied: 4,
+      profileSyncStatus: "failed",
+      profileSyncError: "browser_unavailable"
+    });
+
+    expect(task).toMatchObject({
+      profileRevisionApplied: 4,
+      profileSyncStatus: "failed",
+      profileSyncError: "browser_unavailable"
+    });
+  });
+
   it("accepts a field coverage report on a task", () => {
     const task = ApplicationTaskSchema.parse({
       id: "734b72a5-bb6b-4946-b5cc-cfe8419bd0eb",
@@ -30,6 +48,10 @@ describe("application contracts", () => {
   });
   it("accepts the guarded profile resumption command", () => {
     expect(ApplicationCommandSchema.parse({ type: "resume_with_profile" })).toEqual({ type: "resume_with_profile" });
+  });
+
+  it("accepts the task-scoped profile synchronization command", () => {
+    expect(ApplicationCommandSchema.parse({ type: "sync_profile" })).toEqual({ type: "sync_profile" });
   });
 
   it("parses a redacted operation progress event", () => {

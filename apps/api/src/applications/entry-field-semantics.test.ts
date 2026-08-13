@@ -90,13 +90,29 @@ describe("deriveEntrySemanticHints", () => {
     ]);
 
     expect(fields.map((candidate) => candidate.semanticHint)).toEqual([
-      "awards[0]",
-      "awards[0]",
-      "awards[0]",
-      "awards[0]",
-      "awards[1]",
-      "awards[1]",
-      "awards[1]"
+      "awards[0].name",
+      "awards[0].date",
+      "awards[0].level",
+      "awards[0].description",
+      "awards[1].name",
+      "awards[1].date",
+      "awards[1].description"
+    ]);
+  });
+
+  it("maps DJI award fields to exact fact paths and date components", () => {
+    const fields = deriveEntrySemanticHints([
+      field("award-name", "\u8d5b\u4e8b\u540d\u79f0"),
+      { ...field("award-year", "\u8d5b\u4e8b\u65f6\u95f4 \u5e74"), type: "select", options: ["2024", "2025"] },
+      { ...field("award-month", "\u8d5b\u4e8b\u65f6\u95f4 \u6708"), type: "select", options: ["1", "2"] },
+      field("award-description", "\u8d5b\u4e8b\u63cf\u8ff0")
+    ]);
+
+    expect(fields.map((candidate) => candidate.semanticHint)).toEqual([
+      "awards[0].name",
+      "awards[0].date.year",
+      "awards[0].date.month",
+      "awards[0].description"
     ]);
   });
 
@@ -111,12 +127,12 @@ describe("deriveEntrySemanticHints", () => {
     ]);
 
     expect(fields.map((candidate) => candidate.semanticHint)).toEqual([
-      "awards[0]",
-      "awards[0]",
-      "awards[0]",
-      "awards[1]",
-      "awards[1]",
-      "awards[1]"
+      "awards[0].name",
+      "awards[0].date.year",
+      "awards[0].date.month",
+      "awards[1].name",
+      "awards[1].date.year",
+      "awards[1].date.month"
     ]);
   });
 });

@@ -26,6 +26,7 @@ export type { AdapterHealthRegistry } from "./health/adapter-health.js";
 export interface AppDependencies {
   database: SqliteDatabase;
   profileRepository: ProfileRepository;
+  onProfileUpdated?: () => Promise<void> | void;
   originalDocumentStore: OriginalDocumentStore;
   avatarStore?: AvatarStore;
   reviewRepository?: SelfEvaluationReviewRepository;
@@ -57,7 +58,8 @@ export async function createApp(dependencies: CreateAppDependencies) {
     await dependencies.close?.();
   });
   app.setErrorHandler((error, _request, reply) => {
-    const statusCode = error.statusCode !== undefined && error.statusCode >= 400 && error.statusCode < 500 ? 400 : 500;
+    const errorStatusCode = errorStatus(error);
+    const statusCode = errorStatusCode !== undefined && errorStatusCode >= 400 && errorStatusCode < 500 ? 400 : 500;
     return sendError(reply, statusCode, statusCode === 400 ? "Invalid request" : "Internal server error");
   });
   registerProfileRoutes(app, dependencies);
@@ -87,4 +89,9 @@ export async function createApp(dependencies: CreateAppDependencies) {
     });
   }
   return app;
+}
+
+function errorStatus(error: unknown): number | undefined {
+  if (typeof error !== "object" || error === null || !("statusCode" in error)) return undefined;
+  return typeof error.statusCode === "number" ? error.statusCode : undefined;
 }

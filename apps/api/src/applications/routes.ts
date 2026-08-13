@@ -38,6 +38,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     const commands = dependencies.applicationService.requiresRecovery(task.id)
       ? ["cancel", "resume"] as ApplicationTask["commands"]
       : commandsForState(state);
+    if (state === "failed" && task.profileSyncStatus === "failed") commands.push("sync_profile");
     const taskAnswers = dependencies.profileRepository.listForTask(task.id).filter((fact) =>
       fact.scope === "application" && fact.taskId === task.id
     );
@@ -62,6 +63,9 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
         fieldPath: answer.fieldPath,
         value: answer.value
       })),
+      profileRevisionApplied: task.profileRevisionApplied,
+      profileSyncStatus: task.profileSyncStatus,
+      ...(task.profileSyncError === undefined ? {} : { profileSyncError: task.profileSyncError }),
       ...(fieldCoverage === undefined ? {} : { fieldCoverage }),
       ...(contentReview === undefined ? {} : {
         contentReview: {
@@ -171,7 +175,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     try {
       await executeCommand(dependencies, task.id, command.data);
       emitState(task.id);
-      return reply.code(200).send(taskResponse(task));
+      return reply.code(200).send(taskResponse(dependencies.tasks.get(task.id) ?? task));
     } catch (error) {
       return sendError(reply, 409, "Application command cannot be applied", commandErrorCode(error));
     }
@@ -271,6 +275,9 @@ function commandErrorCode(error: unknown): string {
     "incomplete_question_answers",
     "manual_readback_failed",
     "profile_resumption_not_allowed",
+    "profile_sync_in_progress",
+    "profile_sync_not_allowed",
+    "profile_sync_incomplete",
     "recovery_not_allowed",
     "review_locked"
   ]);
@@ -296,6 +303,7 @@ function commandsForState(state: ApplicationTaskState): ApplicationTask["command
       return ["cancel"];
     case "review_locked":
     case "cancelled":
+      return [];
     case "failed":
       return [];
   }
@@ -321,6 +329,9 @@ async function executeCommand(dependencies: ApplicationRouteDependencies, taskId
       return;
     case "resume_with_profile":
       await service.resumeWithProfile(taskId);
+      return;
+    case "sync_profile":
+      await service.syncTaskFromProfile(taskId);
       return;
     case "answer_questions":
       const questions = service.state(taskId).context.questions;

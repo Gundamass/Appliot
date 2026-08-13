@@ -85,9 +85,16 @@ function entrySemanticHint(label: string, state: EntryState): string | undefined
   const field = fieldFor(active, normalized);
   if (state[active] < 0) return undefined;
   if (active === "awards") {
-    return field !== undefined || matches(CONTEXT_ONLY_FIELDS.awards, normalized)
-      ? `awards[${state.awards}]`
-      : undefined;
+    if (field !== undefined) {
+      if (field !== "date") return `awards[${state.awards}].${field}`;
+      const component = dateComponentForLabel(normalized);
+      return `awards[${state.awards}].date${component === undefined ? "" : `.${component}`}`;
+    }
+    if (!matches(CONTEXT_ONLY_FIELDS.awards, normalized)) return undefined;
+    const component = dateComponentForLabel(normalized);
+    return /起止时间/u.test(normalized) && component !== undefined
+      ? `awards[${state.awards}].date.${component}`
+      : `awards[${state.awards}]`;
   }
   if (field === undefined) {
     return matches(CONTEXT_ONLY_FIELDS[active], normalized)
@@ -95,6 +102,13 @@ function entrySemanticHint(label: string, state: EntryState): string | undefined
       : undefined;
   }
   return `${active}[${state[active]}].${field}`;
+}
+
+function dateComponentForLabel(label: string): "year" | "month" | "day" | undefined {
+  if (/[年]/u.test(label)) return "year";
+  if (/[月]/u.test(label)) return "month";
+  if (/[日号]/u.test(label)) return "day";
+  return undefined;
 }
 
 function fieldFor(kind: EntryKind, label: string): string | undefined {

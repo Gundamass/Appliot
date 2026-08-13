@@ -274,6 +274,11 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
 .task-header-band { align-items: flex-end; border-bottom: 1px solid #d9dee3; border-top: 1px solid #d9dee3; display: flex; justify-content: space-between; margin-top: 12px; padding: 22px 0; }
 .task-heading h2 { font-size: 22px; margin: 3px 0 4px; overflow-wrap: anywhere; }
 .task-heading a { align-items: center; color: #315b73; display: inline-flex; font-size: 12px; gap: 5px; text-decoration: none; }
+.profile-sync-warning { align-items: center; background: #fff4ed; border: 1px solid #edc8a8; color: #7f3d1c; display: flex; justify-content: space-between; gap: 16px; margin-top: 16px; padding: 12px 14px; }
+.profile-sync-warning div { align-items: center; display: flex; gap: 8px; min-width: 0; }
+.profile-sync-warning span { color: #9b6040; overflow-wrap: anywhere; }
+.profile-sync-warning small { color: #9b6040; white-space: nowrap; }
+.profile-sync-pending { align-items: center; color: #315b73; display: flex; gap: 7px; margin: 16px 0 0; }
 .connection-state { align-items: center; color: #69737d; display: flex; font-size: 12px; gap: 7px; white-space: nowrap; }
 .connection-state span { background: #a6afb6; border-radius: 50%; height: 8px; width: 8px; }
 .connection-state.connected { color: #176b45; }

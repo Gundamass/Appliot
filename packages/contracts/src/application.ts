@@ -58,6 +58,7 @@ export const ApplicationCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("open_browser") }).strict(),
   z.object({ type: z.literal("resume") }).strict(),
   z.object({ type: z.literal("resume_with_profile") }).strict(),
+  z.object({ type: z.literal("sync_profile") }).strict(),
   z.object({ type: z.literal("answer_questions"), answers: z.array(ApplicationAnswerSchema).min(1).max(100) }).strict(),
   z.object({ type: z.literal("approve_content"), reviewId: z.string().min(1).max(128), editedValue: z.string().min(1).max(12_000).optional() }).strict(),
   z.object({ type: z.literal("reject_content"), reviewId: z.string().min(1).max(128) }).strict(),
@@ -69,6 +70,7 @@ export const ApplicationCommandTypeSchema = z.enum([
   "open_browser",
   "resume",
   "resume_with_profile",
+  "sync_profile",
   "answer_questions",
   "approve_content",
   "reject_content",
@@ -137,6 +139,9 @@ export const ApplicationTaskSchema = z.object({
   recoveryCommands: z.array(ApplicationRecoveryCommandSchema).default([]),
   questions: z.array(ApplicationQuestionSchema).default([]),
   taskAnswers: z.array(ApplicationTaskAnswerSchema).default([]),
+  profileRevisionApplied: z.number().int().nonnegative().optional(),
+  profileSyncStatus: z.enum(["current", "pending", "failed"]).optional(),
+  profileSyncError: z.string().min(1).max(200).optional(),
   fieldCoverage: ApplicationFieldCoverageSchema.optional(),
   contentReview: ApplicationContentReviewSchema.optional()
 }).strict();

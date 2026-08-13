@@ -54,6 +54,330 @@ function snapshot(stage: FormSnapshot["stage"], options: { action?: boolean } = 
 }
 
 describe("application machine", () => {
+  it("deduplicates concurrent run requests for one task", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    let observations = 0;
+    const form = snapshot("application_form");
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: {
+        observe: async () => {
+          observations += 1;
+          await new Promise((resolve) => setTimeout(resolve, 20));
+          return form;
+        },
+        execute: vi.fn()
+      },
+      resolveField: async () => ({ status: "verified" as const, value: undefined }),
+      approve: () => "approved"
+    });
+    service.start({ taskId: "task-dedup", applicationUrl: form.url });
+
+    await Promise.all([
+      service.runUntilPause("task-dedup"),
+      service.runUntilPause("task-dedup")
+    ]);
+
+    expect(observations).toBe(1);
+    database.close();
+  });
+
+  it("refreshes unresolved application fields after the profile changes", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    let profileHasValue = false;
+    let currentValue = "";
+    const execute = vi.fn(async (command: ExecutableCommand): Promise<Extract<WorkerResponse, { type: "execution_result" }>> => {
+      currentValue = command.type === "fill" ? String(command.value) : currentValue;
+      const next = {
+        ...snapshot("application_form"),
+        fields: [{
+          id: "city",
+          label: "期望城市",
+          type: "text" as const,
+          required: true,
+          options: [],
+          currentValue,
+          semanticHint: "preferences.city"
+        }]
+      };
+      return {
+        type: "execution_result",
+        taskId: command.taskId,
+        snapshotId: next.id,
+        commandType: command.type,
+        status: "applied",
+        actualValue: currentValue,
+        snapshot: next,
+        errors: []
+      };
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: {
+        observe: async () => ({
+          ...snapshot("application_form"),
+          fields: [{
+            id: "city",
+            label: "期望城市",
+            type: "text" as const,
+            required: true,
+            options: [],
+            currentValue,
+            semanticHint: "preferences.city"
+          }]
+        }),
+        execute
+      },
+      resolveField: async () => profileHasValue
+        ? { status: "verified" as const, value: "深圳", fieldPath: "preferences.city" }
+        : { status: "needs_question" as const, question: "请补充期望城市", fieldPath: "preferences.city" },
+      approve: () => "approved"
+    });
+
+    service.start({ taskId: "task-refresh", applicationUrl: "https://jobs.example.test/apply" });
+    await service.runUntilPause("task-refresh");
+    expect(service.state("task-refresh").value).toBe("needs_questions");
+    expect(execute).not.toHaveBeenCalled();
+
+    profileHasValue = true;
+    await service.refreshFromProfile();
+
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      type: "fill",
+      fieldId: "city",
+      value: "深圳"
+    }), expect.any(Number));
+    database.close();
+  });
+
+  it("persists the applied profile revision and skips a duplicate refresh", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const tasks = createApplicationTaskRepository(database);
+    const taskId = "b8e9a1a4-12c9-46fd-bf4b-38dfd87bb7a1";
+    tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
+    let observations = 0;
+    const form = snapshot("review");
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      taskRepository: tasks,
+      profileRevision: () => 3,
+      browser: {
+        observe: async () => {
+          observations += 1;
+          return form;
+        },
+        execute: vi.fn()
+      },
+      resolveField: async () => ({ status: "verified" as const, value: undefined }),
+      approve: () => "approved"
+    });
+    service.start({ taskId, applicationUrl: form.url });
+
+    await service.refreshFromProfile();
+    await service.refreshFromProfile();
+
+    expect(observations).toBe(1);
+    expect(tasks.get(taskId)).toMatchObject({
+      profileRevisionApplied: 3,
+      profileSyncStatus: "current"
+    });
+    database.close();
+  });
+
+  it("recovers eligible persisted tasks after the application service is recreated", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const tasks = createApplicationTaskRepository(database);
+    const checkpoints = createCheckpointRepository(database);
+    const taskId = "c9f0b2b5-23da-47fe-c05c-49e0e98cc8b2";
+    tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
+    const form = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "name",
+        label: "姓名",
+        type: "text" as const,
+        required: true,
+        options: [],
+        currentValue: "",
+        semanticHint: "basics.name"
+      }]
+    };
+    const first = createApplicationService({
+      checkpoints,
+      taskRepository: tasks,
+      profileRevision: () => 1,
+      browser: { observe: async () => form, execute: vi.fn() },
+      resolveField: async () => ({
+        status: "needs_question" as const,
+        question: "请补充信息",
+        fieldPath: "basics.name"
+      }),
+      approve: () => "approved"
+    });
+    first.start({ taskId, applicationUrl: form.url });
+    await first.runUntilPause(taskId);
+    expect(first.state(taskId).value).toBe("needs_questions");
+
+    const execute = vi.fn();
+    const second = createApplicationService({
+      checkpoints,
+      taskRepository: tasks,
+      profileRevision: () => 1,
+      browser: { observe: async () => ({ ...form, stage: "review" as const }), execute },
+      resolveField: async () => ({ status: "verified" as const, value: undefined }),
+      approve: () => "approved"
+    });
+    await second.refreshFromProfile();
+
+    expect(second.state(taskId).value).toBe("review_locked");
+    expect(tasks.get(taskId)).toMatchObject({
+      profileRevisionApplied: 1,
+      profileSyncStatus: "current"
+    });
+    expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ type: "submit" }), expect.anything());
+    database.close();
+  });
+
+  it("records an incomplete profile refresh as failed instead of leaving it pending", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const tasks = createApplicationTaskRepository(database);
+    const taskId = "daf1c3c6-34eb-48af-d16d-5af1fa9dd9c3";
+    tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
+    const form = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "name",
+        label: "姓名",
+        type: "text" as const,
+        required: true,
+        options: [],
+        currentValue: "",
+        semanticHint: "basics.name"
+      }]
+    };
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      taskRepository: tasks,
+      profileRevision: () => 2,
+      browser: { observe: async () => form, execute: vi.fn() },
+      resolveField: async () => ({
+        status: "needs_question" as const,
+        question: "请补充姓名",
+        fieldPath: "basics.name"
+      }),
+      approve: () => "approved"
+    });
+    service.start({ taskId, applicationUrl: form.url });
+
+    await service.refreshFromProfile();
+
+    expect(tasks.get(taskId)).toMatchObject({
+      profileRevisionApplied: 0,
+      profileSyncStatus: "failed",
+      profileSyncError: "profile_sync_incomplete"
+    });
+    database.close();
+  });
+
+  it("does not revive terminal application failures during an automatic profile refresh", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const tasks = createApplicationTaskRepository(database);
+    const taskId = "eb02d4d7-45fc-49b0-e27e-6b02ab0eead4";
+    tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
+    const form = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "name",
+        label: "姓名",
+        type: "text" as const,
+        required: true,
+        options: [],
+        currentValue: "",
+        semanticHint: "basics.name"
+      }]
+    };
+    const observe = vi.fn(async () => form);
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      taskRepository: tasks,
+      profileRevision: () => 2,
+      browser: { observe, execute: vi.fn() },
+      resolveField: async () => ({ status: "blocked" as const }),
+      approve: () => "approved"
+    });
+    service.start({ taskId, applicationUrl: form.url });
+    await service.runUntilPause(taskId);
+    expect(service.state(taskId).value).toBe("failed");
+    observe.mockClear();
+
+    await service.refreshFromProfile();
+
+    expect(observe).not.toHaveBeenCalled();
+    expect(service.state(taskId).value).toBe("failed");
+    database.close();
+  });
+
+  it("revives a failed task only when the user explicitly synchronizes the profile", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const tasks = createApplicationTaskRepository(database);
+    const taskId = "fc13e5f9-67fe-4c2d-9d90-8e8de74d27b0";
+    tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
+    const applicationForm = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "name",
+        label: "姓名",
+        type: "text" as const,
+        required: true,
+        options: [],
+        currentValue: "",
+        semanticHint: "basics.name"
+      }]
+    };
+    const review = snapshot("review");
+    const observe = vi.fn()
+      .mockResolvedValueOnce(applicationForm)
+      .mockResolvedValueOnce(review);
+    const execute = vi.fn();
+    let canResolve = false;
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      taskRepository: tasks,
+      profileRevision: () => 4,
+      browser: { observe, execute },
+      resolveField: async () => canResolve
+        ? { status: "verified" as const, value: undefined }
+        : { status: "blocked" as const },
+      approve: () => "approved"
+    });
+    service.start({ taskId, applicationUrl: applicationForm.url });
+    await service.runUntilPause(taskId);
+    expect(service.state(taskId).value).toBe("failed");
+    observe.mockClear();
+
+    await service.refreshFromProfile();
+    expect(observe).not.toHaveBeenCalled();
+
+    canResolve = true;
+    await service.syncTaskFromProfile(taskId);
+
+    expect(observe).toHaveBeenCalledOnce();
+    expect(service.state(taskId).value).toBe("review_locked");
+    expect(tasks.get(taskId)).toMatchObject({
+      profileRevisionApplied: 4,
+      profileSyncStatus: "current"
+    });
+    expect(execute).not.toHaveBeenCalledWith(expect.objectContaining({ type: "submit" }), expect.anything());
+    database.close();
+  });
+
   it("allows only explicit page transitions and makes review_locked terminal", () => {
     const actor = createActor(applicationMachine, {
       input: { taskId: "task-1", applicationUrl: "https://jobs.example.test/apply" }

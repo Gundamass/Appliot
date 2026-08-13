@@ -142,6 +142,36 @@ describe("ApplicationTaskPage", () => {
     await waitFor(() => expect(deleteTask).toHaveBeenCalledWith(task.id));
   });
 
+  it("shows profile sync failures and retries only the current task sync", async () => {
+    const user = userEvent.setup();
+    const events = eventHarness();
+    const syncTask: ApplicationTask = {
+      ...task,
+      state: "failed",
+      commands: ["sync_profile"],
+      profileRevisionApplied: 2,
+      profileSyncStatus: "failed",
+      profileSyncError: "profile_sync_incomplete"
+    };
+    const command = vi.fn().mockResolvedValue({
+      ...syncTask,
+      state: "review_locked",
+      commands: [],
+      profileRevisionApplied: 3,
+      profileSyncStatus: "current",
+      profileSyncError: undefined
+    });
+    render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(syncTask), command }} connectEvents={events.connect} />);
+
+    expect(await screen.findByText("档案同步失败")).toBeVisible();
+    expect(screen.getByText("最新档案仍缺少当前页面所需资料")).toBeVisible();
+    expect(screen.queryByText("profile_sync_incomplete")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "重新同步档案" }));
+
+    expect(command).toHaveBeenCalledWith(task.id, { type: "sync_profile" });
+    expect(screen.queryByRole("button", { name: /提交/ })).not.toBeInTheDocument();
+  });
+
   it("shows field coverage inside the task workspace", async () => {
     const events = eventHarness();
     const coveredTask: ApplicationTask = {

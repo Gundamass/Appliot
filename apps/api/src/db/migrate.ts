@@ -79,8 +79,17 @@ export function migrateDatabase(database: SqliteDatabase): void {
       name TEXT,
       application_url TEXT NOT NULL,
       created_at TEXT NOT NULL,
-      updated_at TEXT NOT NULL
+      updated_at TEXT NOT NULL,
+      profile_revision_applied INTEGER NOT NULL DEFAULT 0 CHECK (profile_revision_applied >= 0),
+      profile_sync_status TEXT NOT NULL DEFAULT 'current' CHECK (profile_sync_status IN ('current', 'pending', 'failed')),
+      profile_sync_error TEXT
     );
+
+    CREATE TABLE IF NOT EXISTS profile_metadata (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      revision INTEGER NOT NULL DEFAULT 0 CHECK (revision >= 0)
+    );
+    INSERT OR IGNORE INTO profile_metadata (id, revision) VALUES (1, 0);
 
     CREATE TABLE IF NOT EXISTS application_task_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -178,6 +187,15 @@ export function migrateDatabase(database: SqliteDatabase): void {
   const taskColumns = database.prepare("PRAGMA table_info(application_tasks)").all() as Array<{ name: string }>;
   if (!taskColumns.some((column) => column.name === "name")) {
     database.exec("ALTER TABLE application_tasks ADD COLUMN name TEXT");
+  }
+  if (!taskColumns.some((column) => column.name === "profile_revision_applied")) {
+    database.exec("ALTER TABLE application_tasks ADD COLUMN profile_revision_applied INTEGER NOT NULL DEFAULT 0 CHECK (profile_revision_applied >= 0)");
+  }
+  if (!taskColumns.some((column) => column.name === "profile_sync_status")) {
+    database.exec("ALTER TABLE application_tasks ADD COLUMN profile_sync_status TEXT NOT NULL DEFAULT 'current' CHECK (profile_sync_status IN ('current', 'pending', 'failed'))");
+  }
+  if (!taskColumns.some((column) => column.name === "profile_sync_error")) {
+    database.exec("ALTER TABLE application_tasks ADD COLUMN profile_sync_error TEXT");
   }
 
   const checkpointColumns = database.prepare("PRAGMA table_info(application_checkpoints)").all() as Array<{ name: string }>;

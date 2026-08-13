@@ -14,4 +14,9 @@ describe("application control values", () => {
     expect(matchControlOption("04", ["03", "04", "05"])).toBe("04");
     expect(matchControlOption("2026-04-12", ["2026", "2027"])).toBeUndefined();
   });
+
+  it("projects award date values when the semantic already names a component", () => {
+    expect(projectDateComponent("\u8d5b\u4e8b\u65f6\u95f4 \u5e74", "awards[0].date.year", "2025-03-01")).toBe("2025");
+    expect(projectDateComponent("\u8d5b\u4e8b\u65f6\u95f4 \u6708", "awards[0].date.month", "2025-03-01")).toBe("03");
+  });
 });

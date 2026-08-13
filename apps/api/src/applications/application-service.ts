@@ -26,6 +26,7 @@ import type {
   CheckpointRepository,
   StoredContentReview
 } from "./checkpoint-repository.js";
+import type { ApplicationTaskRepository } from "./application-task-repository.js";
 import type { TaskEventBus } from "./task-events.js";
 import {
   createApplicationProgressCoordinator,
@@ -36,6 +37,7 @@ import {
 import { deriveEntrySemanticHints } from "./entry-field-semantics.js";
 import { annotateDjiFields } from "./dji-field-catalog.js";
 import { createFieldCoverageStore } from "./field-coverage.js";
+import { planRepeatedSectionActions } from "./repeated-section-planner.js";
 
 type ExecutionResult = Extract<WorkerResponse, { type: "execution_result" }>;
 
@@ -56,6 +58,8 @@ export interface ApplicationService {
   openBrowser(taskId: string): Promise<void>;
   resume(taskId: string): Promise<void>;
   resumeWithProfile(taskId: string): Promise<void>;
+  refreshFromProfile(): Promise<void>;
+  syncTaskFromProfile(taskId: string): Promise<void>;
   answerQuestions(taskId: string, answers: Record<string, unknown>): Promise<void>;
   contentReview(taskId: string): ContentReview | undefined;
   fieldCoverage(taskId: string): ApplicationFieldCoverage | undefined;
@@ -86,6 +90,8 @@ interface FieldResolution {
 
 interface ApplicationServiceDependencies {
   checkpoints: CheckpointRepository;
+  taskRepository?: ApplicationTaskRepository;
+  profileRevision?: () => number;
   taskEvents?: Pick<TaskEventBus, "emit" | "emitProgress">;
   browser: BrowserPort;
   resolveField(
@@ -107,6 +113,7 @@ interface ApplicationServiceDependencies {
   ) => Promise<void> | void;
   validateContentReview?: (review: ContentReview, editedValue: string) => string[];
   resolveFileId?: (taskId: string, field: FormField) => string | undefined;
+  listProfileFacts?: () => readonly import("@resume/contracts").ProfileFact[];
 }
 
 export interface StartApplicationInput {
@@ -139,6 +146,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
   const recoveryCheckpoints = new Map<string, ApplicationCheckpoint>();
   const lastPublishedStates = new Map<string, ApplicationTaskState>();
   const stableActivities = new Map<string, Promise<void>>();
+  const activeRuns = new Map<string, Promise<void>>();
   const applicationFormsReached = new Set<string>();
   const runGenerations = new Map<string, number>();
   const executionEpochs = new Map<string, number>();
@@ -272,7 +280,9 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     }
   };
 
-  const service: ApplicationService = {
+  const service: ApplicationService & {
+    runUntilPauseInternal(taskId: string, initialSnapshot?: FormSnapshot): Promise<void>;
+  } = {
     start(input: StartApplicationInput): void {
       if (actors.has(input.taskId)) throw new Error(`投递任务已存在：${input.taskId}`);
       const actor = createActor(applicationMachine, { input }).start();
@@ -428,6 +438,76 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       }
     },
 
+    async refreshFromProfile(): Promise<void> {
+      const revision = dependencies.profileRevision?.();
+      const taskIds = dependencies.taskRepository === undefined
+        ? [...actors.keys()]
+        : dependencies.taskRepository.list().map((task) => task.id);
+      const candidates = taskIds.filter((taskId) => {
+        const actor = actors.get(taskId);
+        if (actor === undefined && dependencies.taskRepository?.get(taskId) === undefined) return false;
+        if (revision !== undefined) {
+          const task = dependencies.taskRepository?.get(taskId);
+          if (task !== undefined && task.profileSyncStatus === "current" && task.profileRevisionApplied >= revision) return false;
+        }
+        const state = actor?.getSnapshot().value ?? dependencies.checkpoints.latest(taskId)?.state;
+        return state === "needs_questions" || (actor !== undefined && state === "observing");
+      });
+      for (const taskId of candidates) {
+        dependencies.taskRepository?.markProfileSyncPending(taskId);
+        try {
+          const actor = requireActor(taskId);
+          if (actor.getSnapshot().value === "needs_questions") {
+            await service.resumeWithProfile(taskId);
+          } else await service.runUntilPause(taskId);
+          const finalState = requireActor(taskId).getSnapshot().value;
+          if (revision !== undefined && dependencies.taskRepository !== undefined
+            && finalState !== "failed" && finalState !== "needs_questions") {
+            dependencies.taskRepository.markProfileSyncSucceeded(taskId, revision);
+          } else if (finalState === "failed") {
+            dependencies.taskRepository?.markProfileSyncFailed(taskId, "profile_refresh_failed");
+          } else if (finalState === "needs_questions") {
+            dependencies.taskRepository?.markProfileSyncFailed(taskId, "profile_sync_incomplete");
+          }
+        } catch (error) {
+          dependencies.taskRepository?.markProfileSyncFailed(
+            taskId,
+            error instanceof Error ? error.message.slice(0, 200) : "profile_refresh_failed"
+          );
+        }
+      }
+    },
+
+    async syncTaskFromProfile(taskId: string): Promise<void> {
+      const revision = dependencies.profileRevision?.();
+      const task = dependencies.taskRepository?.get(taskId);
+      if (task !== undefined && task.profileSyncStatus === "pending") throw new Error("profile_sync_in_progress");
+      dependencies.taskRepository?.markProfileSyncPending(taskId);
+      try {
+        const actor = requireActor(taskId);
+        const state = actor.getSnapshot().value;
+        if (["review_locked", "cancelled", "awaiting_login"].includes(String(state))) {
+          throw new Error("profile_sync_not_allowed");
+        }
+        if (state === "needs_questions") {
+          await service.resumeWithProfile(taskId);
+        } else {
+          if (state === "failed") sendApplicationEvent(actor, { type: "RECOVER" });
+          await service.runUntilPause(taskId);
+        }
+        const finalState = requireActor(taskId).getSnapshot().value;
+        if (finalState === "failed" || finalState === "needs_questions") throw new Error("profile_sync_incomplete");
+        if (revision !== undefined) dependencies.taskRepository?.markProfileSyncSucceeded(taskId, revision);
+      } catch (error) {
+        dependencies.taskRepository?.markProfileSyncFailed(
+          taskId,
+          error instanceof Error ? error.message.slice(0, 200) : "profile_sync_failed"
+        );
+        throw error;
+      }
+    },
+
+
     async approveReview(taskId: string, reviewId: string, editedValue?: string): Promise<void> {
       const actor = requireActor(taskId);
       if (actor.getSnapshot().value !== "awaiting_content_review") {
@@ -509,6 +589,18 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     },
 
     async runUntilPause(taskId: string, initialSnapshot?: FormSnapshot): Promise<void> {
+      const active = activeRuns.get(taskId);
+      if (active) return active;
+      const run = service.runUntilPauseInternal(taskId, initialSnapshot);
+      activeRuns.set(taskId, run);
+      try {
+        await run;
+      } finally {
+        if (activeRuns.get(taskId) === run) activeRuns.delete(taskId);
+      }
+    },
+
+    async runUntilPauseInternal(taskId: string, initialSnapshot?: FormSnapshot): Promise<void> {
       const actor = requireActor(taskId);
       if (actor.getSnapshot().value === "review_locked") return;
       if (progress.snapshot(taskId).status === "paused") return;
@@ -544,6 +636,38 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       if (!applicationFormsReached.has(taskId)) {
         if (!isApplicationFormReady(page)) return;
         applicationFormsReached.add(taskId);
+      }
+
+      const repeatedAction = planRepeatedSectionActions(
+        page,
+        dependencies.listProfileFacts?.() ?? []
+      )[0];
+      if (repeatedAction) {
+        const approval = dependencies.approve({
+          taskId,
+          snapshotId: page.id,
+          targetId: repeatedAction.actionId,
+          operation: "click_intermediate"
+        }, page);
+        const operation = operationInput(taskId, "navigate", repeatedAction.actionId, "项目经历", 1, 1, 15_000);
+        const result = await progress.runWithPolicy(operation, () => executeWithFreshEpoch({
+          type: "click_intermediate",
+          taskId,
+          snapshotId: page.id,
+          actionId: repeatedAction.actionId,
+          approval
+        }));
+        if (!runIsCurrent(taskId, runGeneration, actor)) return;
+        const expanded = withDerivedEntrySemantics(result.snapshot);
+        latestSnapshots.set(taskId, expanded);
+        persist(actor, expanded);
+        if (result.status !== "applied") {
+          pauseAfterExecutionFailure(actor, operation, result);
+          persist(actor, expanded);
+          return;
+        }
+        await service.runUntilPauseInternal(taskId, expanded);
+        return;
       }
 
       const resumeField = page.fields.find((field) =>
@@ -940,7 +1064,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       }
       sendApplicationEvent(actor, { type: "PAGE_NAVIGATED" });
       persist(actor, nextPage);
-      await service.runUntilPause(taskId, nextPage);
+      await service.runUntilPauseInternal(taskId, nextPage);
     },
 
     async requestIntermediateClick(taskId: string, _actionId: string): Promise<void> {

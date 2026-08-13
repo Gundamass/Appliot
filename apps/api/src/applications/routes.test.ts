@@ -864,6 +864,36 @@ describe("application task routes", () => {
     expect(rejected.json().contentReview).toBeUndefined();
   });
 
+  it("returns the latest persisted profile synchronization state after a sync command", async () => {
+    const { app, database, applicationService } = await buildApp();
+    const taskId = "91dc4bd6-425a-4cab-a38d-d13e33cda771";
+    const tasks = createApplicationTaskRepository(database);
+    tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
+    applicationService.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+    tasks.markProfileSyncFailed(taskId, "profile_sync_incomplete");
+    const snapshot = applicationService.state(taskId);
+    vi.spyOn(applicationService, "state").mockReturnValue({
+      ...snapshot,
+      value: "failed"
+    } as ReturnType<typeof applicationService.state>);
+    vi.spyOn(applicationService, "syncTaskFromProfile").mockImplementation(async () => {
+      tasks.markProfileSyncSucceeded(taskId, 5);
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/applications/${taskId}/commands`,
+      payload: { type: "sync_profile" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      profileRevisionApplied: 5,
+      profileSyncStatus: "current"
+    });
+    expect(response.json()).not.toHaveProperty("profileSyncError");
+  });
+
   it("returns persisted field coverage for one task", async () => {
     const { app, applicationService } = await buildApp();
     const created = await app.inject({

@@ -90,6 +90,28 @@ export const applicationAnswers = sqliteTable("application_answers", {
   check("application_answers_evidence_json_valid", sql`json_valid(${table.evidenceJson}) AND json_type(${table.evidenceJson}) = 'array' AND json_array_length(${table.evidenceJson}) > 0`)
 ]);
 
+export const profileMetadata = sqliteTable("profile_metadata", {
+  id: integer("id").primaryKey(),
+  revision: integer("revision").notNull().default(0)
+}, (table) => [
+  check("profile_metadata_singleton", sql`${table.id} = 1`),
+  check("profile_metadata_revision_nonnegative", sql`${table.revision} >= 0`)
+]);
+
+export const applicationTasks = sqliteTable("application_tasks", {
+  id: text("id").primaryKey(),
+  name: text("name"),
+  applicationUrl: text("application_url").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull(),
+  profileRevisionApplied: integer("profile_revision_applied").notNull().default(0),
+  profileSyncStatus: text("profile_sync_status", { enum: ["current", "pending", "failed"] }).notNull().default("current"),
+  profileSyncError: text("profile_sync_error")
+}, (table) => [
+  check("application_tasks_profile_revision_nonnegative", sql`${table.profileRevisionApplied} >= 0`),
+  check("application_tasks_profile_sync_status_valid", sql`${table.profileSyncStatus} IN ('current', 'pending', 'failed')`)
+]);
+
 export const embeddings = sqliteTable("embeddings", {
   id: text("id").primaryKey(),
   documentChunkId: text("document_chunk_id").notNull().references(() => documentChunks.id),

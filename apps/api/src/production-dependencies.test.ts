@@ -279,7 +279,7 @@ describe("production dependency composition", () => {
       semanticHint: "work[0].description"
     }))).resolves.toMatchObject({ status: "verified", value: "2026-04-12" });
     await expect(resolveField("task-1", applicationField("开始时间 年份", { id: "approximate-label" })))
-      .resolves.toMatchObject({ status: "verified", value: "2026-04-12" });
+      .resolves.toMatchObject({ status: "verified", value: "2026" });
   });
 
   it("binds a split award month to its entry and returns the page's unpadded option", async () => {

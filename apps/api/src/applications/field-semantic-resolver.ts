@@ -1,4 +1,6 @@
 import type { FormField } from "@resume/contracts";
+import { z } from "zod";
+import type { StructuredModelProvider } from "@resume/model-provider";
 import {
   FIELD_DEFINITIONS,
   fieldDefinitionText,
@@ -25,7 +27,7 @@ export type FieldSemanticDecision =
   | {
       status: "mapped";
       semantic: string;
-      source: "exact_alias" | "embedding";
+      source: "exact_alias" | "embedding" | "deepseek";
       confidence: number;
     }
   | {
@@ -48,6 +50,7 @@ export interface FieldSemanticResolver {
 
 export interface FieldSemanticResolverOptions {
   embeddingProvider?: EmbeddingProvider;
+  structuredProvider?: StructuredModelProvider;
   definitions?: readonly FieldDefinition[];
   minimumSimilarity?: number;
   minimumMargin?: number;
@@ -55,6 +58,10 @@ export interface FieldSemanticResolverOptions {
 
 const DEFAULT_MINIMUM_SIMILARITY = 0.9;
 const DEFAULT_MINIMUM_MARGIN = 0.08;
+const DEEPSEEK_SEMANTIC_SCHEMA = z.object({
+  semantic: z.string().min(1),
+  confidence: z.number().min(0).max(1)
+}).strict();
 
 export function createFieldSemanticResolver(options: FieldSemanticResolverOptions = {}): FieldSemanticResolver {
   const definitions = options.definitions ?? FIELD_DEFINITIONS;
@@ -97,7 +104,7 @@ export function createFieldSemanticResolver(options: FieldSemanticResolverOption
         return { status: "unresolved", reason: "exact_match_not_found" };
       }
       if (!options.embeddingProvider) {
-        return { status: "unresolved", reason: "embedding_unavailable" };
+        return deepSeekResolve(field, context, definitions, options.structuredProvider);
       }
 
       let vectors: number[][];
@@ -109,7 +116,7 @@ export function createFieldSemanticResolver(options: FieldSemanticResolverOption
         ]);
         query = validatedVector(query);
       } catch {
-        return { status: "unresolved", reason: "embedding_unavailable" };
+        return deepSeekResolve(field, context, definitions, options.structuredProvider);
       }
 
       const candidates = definitions.flatMap((definition, index): FieldSemanticCandidate[] => {
@@ -128,14 +135,20 @@ export function createFieldSemanticResolver(options: FieldSemanticResolverOption
       }).sort((left, right) => right.similarity - left.similarity || left.semantic.localeCompare(right.semantic));
 
       const top = candidates[0];
-      if (!top) return { status: "unresolved", reason: "incompatible_field" };
+      if (!top) return deepSeekResolve(field, context, definitions, options.structuredProvider);
       const reviewCandidates = candidates.slice(0, 3);
       if (top.similarity < minimumSimilarity) {
-        return { status: "review", candidates: reviewCandidates, reason: "similarity_below_threshold" };
+        const deepseek = await deepSeekResolve(field, context, definitions, options.structuredProvider);
+        return deepseek.status === "mapped"
+          ? deepseek
+          : { status: "review", candidates: reviewCandidates, reason: "similarity_below_threshold" };
       }
       const runnerUp = candidates[1];
       if (runnerUp && top.similarity - runnerUp.similarity < minimumMargin) {
-        return { status: "review", candidates: reviewCandidates, reason: "ambiguous_candidates" };
+        const deepseek = await deepSeekResolve(field, context, definitions, options.structuredProvider);
+        return deepseek.status === "mapped"
+          ? deepseek
+          : { status: "review", candidates: reviewCandidates, reason: "ambiguous_candidates" };
       }
       if (top.risk !== "normal") {
         return { status: "review", candidates: reviewCandidates, reason: "risk_requires_review" };
@@ -148,6 +161,45 @@ export function createFieldSemanticResolver(options: FieldSemanticResolverOption
       };
     }
   };
+}
+
+async function deepSeekResolve(
+  field: Pick<FormField, "label" | "type" | "options" | "semanticHint">,
+  context: FieldSemanticContext,
+  definitions: readonly FieldDefinition[],
+  provider: StructuredModelProvider | undefined
+): Promise<FieldSemanticDecision> {
+  if (!provider) return { status: "unresolved", reason: "embedding_unavailable" };
+  const candidates = definitions
+    .filter((definition) => definition.types.includes(field.type))
+    .filter((definition) => context.section === undefined || definition.sections.includes(context.section))
+    .map((definition) => ({ semantic: definition.semantic, label: definition.label, aliases: definition.aliases }))
+    .slice(0, 200);
+  try {
+    const result = await provider.generateStructured({
+      system: "你是招聘表单字段语义映射器。只能从候选字段中选择一个语义路径。无法确定时返回 confidence 0，不得编造路径。只返回 JSON。",
+      user: JSON.stringify({
+        field: { label: field.label, type: field.type, options: field.options, semanticHint: field.semanticHint },
+        context,
+        candidates
+      }),
+      schema: DEEPSEEK_SEMANTIC_SCHEMA,
+      jsonExample: { semantic: "education[].school", confidence: 0.95 }
+    });
+    const semantic = materialize(result.semantic, context.entryContext);
+    const definition = definitions.find((candidate) => candidate.semantic === result.semantic
+      || materialize(candidate.semantic, context.entryContext) === semantic);
+    if (!definition || semantic === undefined || result.confidence < 0.9) {
+      return { status: "unresolved", reason: "incompatible_field" };
+    }
+    if (!definition.types.includes(field.type)
+      || context.section !== undefined && !definition.sections.includes(context.section)) {
+      return { status: "unresolved", reason: "incompatible_field" };
+    }
+    return { status: "mapped", semantic, source: "deepseek", confidence: result.confidence };
+  } catch {
+    return { status: "unresolved", reason: "embedding_unavailable" };
+  }
 }
 
 function fieldQuery(

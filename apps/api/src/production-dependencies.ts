@@ -13,6 +13,7 @@ import {
   validateEditedSelfEvaluation
 } from "@resume/rag";
 import { createApplicationService } from "./applications/application-service.js";
+import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
 import { createCheckpointRepository } from "./applications/checkpoint-repository.js";
 import {
   createFieldSemanticResolver
@@ -147,7 +148,8 @@ export function createProductionDependencies(
       ? undefined
       : new RemoteEmbeddingProvider(config.embedding, adapters);
     const fieldSemanticResolver = createFieldSemanticResolver({
-      ...(embeddingProvider === undefined ? {} : { embeddingProvider })
+      ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
+      ...(structuredProvider === undefined ? {} : { structuredProvider })
     });
     const embeddingSearch = embeddingProvider === undefined
       ? undefined
@@ -172,8 +174,11 @@ export function createProductionDependencies(
       profileRepository
     });
     const taskEvents = createTaskEventBus(database);
+    const taskRepository = createApplicationTaskRepository(database);
     const applicationService = createApplicationService({
       checkpoints: createCheckpointRepository(database),
+      taskRepository,
+      profileRevision: () => profileRepository.currentRevision(),
       taskEvents,
       browser: {
         async open(taskId, url) {
@@ -214,6 +219,9 @@ export function createProductionDependencies(
         }
       },
       resolveField: resolveApplicationField,
+      listProfileFacts() {
+        return profileRepository.listActive();
+      },
       approve(input, snapshot) {
         return actionPolicy.approve(input, snapshot).token;
       },
@@ -257,6 +265,7 @@ export function createProductionDependencies(
       ...(embeddingSearch === undefined ? {} : { embeddingSearch }),
       applicationService,
       taskEvents,
+      onProfileUpdated: () => applicationService.refreshFromProfile(),
       adapterHealth,
       async close() {
         if (closingDependencies) return closingDependencies;

@@ -3,6 +3,50 @@ import { describe, expect, it } from "vitest";
 import { migrateDatabase } from "./migrate.js";
 
 describe("migrateDatabase", () => {
+  it("creates profile revision metadata and task synchronization columns idempotently", () => {
+    const database = new Database(":memory:");
+
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    expect(database.prepare("SELECT revision FROM profile_metadata WHERE id = 1").get())
+      .toEqual({ revision: 0 });
+    expect(database.prepare("PRAGMA table_info(application_tasks)").all()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ name: "profile_revision_applied" }),
+      expect.objectContaining({ name: "profile_sync_status" }),
+      expect.objectContaining({ name: "profile_sync_error" })
+    ]));
+    database.close();
+  });
+
+  it("adds profile synchronization metadata to legacy tasks without losing rows", () => {
+    const database = new Database(":memory:");
+    database.exec(`
+      CREATE TABLE application_tasks (
+        id TEXT PRIMARY KEY,
+        application_url TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      INSERT INTO application_tasks (id, application_url, created_at, updated_at)
+      VALUES ('legacy-task', 'https://jobs.example.test/apply', '2026-08-05T00:00:00.000Z', '2026-08-05T00:00:00.000Z');
+    `);
+
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    expect(database.prepare(`
+      SELECT id, profile_revision_applied, profile_sync_status, profile_sync_error
+      FROM application_tasks WHERE id = 'legacy-task'
+    `).get()).toEqual({
+      id: "legacy-task",
+      profile_revision_applied: 0,
+      profile_sync_status: "current",
+      profile_sync_error: null
+    });
+    database.close();
+  });
+
   it("creates the nullable task name column for a new database", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

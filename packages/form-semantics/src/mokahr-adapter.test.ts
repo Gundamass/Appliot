@@ -32,6 +32,16 @@ describe("Mokahr 动态区块适配", () => {
     ]);
   });
 
+  it("识别获奖和实验室区块的添加动作", () => {
+    expect(classifyMokahrAddActions([
+      { id: "add-award", text: "添加", nearbyText: "获奖经历" },
+      { id: "add-lab", text: "添加", nearbyText: "实验室经历" }
+    ])).toEqual([
+      { actionId: "add-award", section: "awards" },
+      { actionId: "add-lab", section: "laboratory" }
+    ]);
+  });
+
   it("为新增项目条目按稳定的填写顺序返回字段", () => {
     const fields: MokahrObservedField[] = [
       { id: "project-highlights", label: "项目要点" },

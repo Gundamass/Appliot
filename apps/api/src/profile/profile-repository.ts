@@ -33,6 +33,7 @@ interface ApplicationAnswerRow {
 
 export interface ProfileRepository {
   transaction<T>(operation: () => T): T;
+  currentRevision(): number;
   createExtracted(fact: ProfileFact): ProfileFact;
   upsertUserFact(input: ProfileFactUpsertInput): ProfileFact;
   removeProfileFacts(fieldPaths: string[]): number;
@@ -105,6 +106,8 @@ function withRequestedFieldPath(fact: ProfileFact, fieldPath: string): ProfileFa
 }
 
 export function createProfileRepository(database: SqliteDatabase, options: ProfileRepositoryOptions = {}): ProfileRepository {
+  const findProfileRevision = database.prepare("SELECT revision FROM profile_metadata WHERE id = 1");
+  const incrementProfileRevision = database.prepare("UPDATE profile_metadata SET revision = revision + 1 WHERE id = 1");
   const findFact = database.prepare("SELECT * FROM profile_facts WHERE id = ?");
   const insertFact = database.prepare(`
     INSERT INTO profile_facts (
@@ -232,9 +235,18 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
     return corrected;
   };
 
+  const bumpProfileRevision = (): void => {
+    if (incrementProfileRevision.run().changes !== 1) throw new Error("profile metadata is not initialized");
+  };
+
   return {
     transaction(operation) {
       return database.transaction(operation)();
+    },
+    currentRevision() {
+      const row = findProfileRevision.get() as { revision: number } | undefined;
+      if (!row) throw new Error("profile metadata is not initialized");
+      return row.revision;
     },
     createExtracted(fact) {
       const parsed = ProfileFactSchema.parse(fact);
@@ -261,7 +273,11 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
       const evidence = userValueEvidence(parsed.value);
       return database.transaction(() => {
         const existing = findReviewedProfileFact(parsed.fieldPath);
-        if (existing) return correctStoredFact(existing.id, parsed.value, evidence);
+        if (existing) {
+          const corrected = correctStoredFact(existing.id, parsed.value, evidence);
+          bumpProfileRevision();
+          return corrected;
+        }
 
         const timestamp = now();
         const created = ProfileFactSchema.parse({
@@ -288,6 +304,7 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
           timestamp
         );
         supersedeReviewedAlternatives(created, timestamp);
+        bumpProfileRevision();
         return created;
       })();
     },
@@ -308,6 +325,7 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
           snapshot(fact, timestamp);
           supersedeFact.run(fact.revision + 1, timestamp, fact.id);
         }
+        if (matches.size > 0) bumpProfileRevision();
         return matches.size;
       })();
     },
@@ -321,12 +339,17 @@ export function createProfileRepository(database: SqliteDatabase, options: Profi
         updateStatus.run("user_confirmed", timestamp, factId);
         const confirmed = { ...current, status: "user_confirmed" as const };
         supersedeReviewedAlternatives(confirmed, timestamp);
+        bumpProfileRevision();
         return confirmed;
       })();
     },
 
     correct(factId, value, evidence) {
-      return database.transaction(() => correctStoredFact(factId, value, evidence))();
+      return database.transaction(() => {
+        const corrected = correctStoredFact(factId, value, evidence);
+        bumpProfileRevision();
+        return corrected;
+      })();
     },
 
     putTaskAnswer(taskId, fieldPath, value, evidence) {

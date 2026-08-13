@@ -28,6 +28,20 @@ function createTestProfileRepository(options?: { afterSnapshot?: () => void }) {
 }
 
 describe("ProfileRepository", () => {
+  it("tracks one global revision for each successful profile change", () => {
+    const repository = createTestProfileRepository();
+    expect(repository.currentRevision()).toBe(0);
+
+    repository.upsertUserFact({ fieldPath: "basics.name", value: "何青" });
+    expect(repository.currentRevision()).toBe(1);
+
+    expect(repository.removeProfileFacts(["basics.missing"])).toBe(0);
+    expect(repository.currentRevision()).toBe(1);
+
+    expect(repository.removeProfileFacts(["basics.name"])).toBe(1);
+    expect(repository.currentRevision()).toBe(2);
+  });
+
   it("creates a user-corrected fact when a missing field is supplied", () => {
     const repository = createTestProfileRepository();
 

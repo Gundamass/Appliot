@@ -35,6 +35,26 @@ const PHASES = [
   { key: "review", label: "人工审核" }
 ] as const;
 
+function profileSyncErrorMessage(error: string | undefined): string {
+  switch (error) {
+    case "profile_sync_incomplete":
+      return "最新档案仍缺少当前页面所需资料";
+    case "browser_unavailable":
+    case "browser_worker_unavailable":
+    case "worker_disconnected":
+      return "受控浏览器当前不可用，请恢复连接后重试";
+    case "profile_sync_not_allowed":
+      return "当前任务状态不允许同步档案";
+    case "profile_sync_in_progress":
+      return "档案正在同步，请稍候";
+    case "profile_refresh_failed":
+    case "profile_sync_failed":
+      return "重新匹配档案后仍未能完成填写";
+    default:
+      return "档案同步未完成，请检查受控浏览器页面后重试";
+  }
+}
+
 export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: ApplicationTaskPageProps) {
   const [task, setTask] = useState<ApplicationTask>();
   const [loading, setLoading] = useState(true);
@@ -132,7 +152,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     }
     setSelectedAttentionId((current) => attentionItems.some((item) => item.id === current) ? current : attentionItems[0]!.id);
   }, [attentionItems]);
-  const hasVisibleCommand = currentTask?.commands.some((command) => ["open_browser", "resume", "cancel"].includes(command)) ?? false;
+  const hasVisibleCommand = currentTask?.commands.some((command) => ["open_browser", "resume", "resume_with_profile", "sync_profile", "cancel"].includes(command)) ?? false;
   const canDeleteTask = currentTask !== undefined
     && api.delete !== undefined
     && ["review_locked", "cancelled", "failed"].includes(currentTask.state);
@@ -224,6 +244,11 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
             <div className="task-heading"><span>投递任务</span><h2>{taskTitle}</h2><a href={currentTask.applicationUrl} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" size={14} />查看目标页面</a></div>
             <LiveBrowserStatus connection={connection} taskState={currentTask.state} activities={activities} />
           </section>
+          {currentTask.profileSyncStatus === "failed" && <section className="profile-sync-warning" role="alert">
+            <div><CircleAlert aria-hidden="true" size={17} /><strong>档案同步失败</strong><span>{profileSyncErrorMessage(currentTask.profileSyncError)}</span></div>
+            {currentTask.profileRevisionApplied !== undefined && <small>已应用档案版本：{currentTask.profileRevisionApplied}</small>}
+          </section>}
+          {currentTask.profileSyncStatus === "pending" && <p className="profile-sync-pending" role="status"><RotateCw aria-hidden="true" size={15} />正在将最新档案匹配到当前投递任务</p>}
           <h2 className="workbench-title">投递任务工作台</h2>
           <TaskStageStepper phase={displayPhase} counts={{ completed: completedCount, attention: attentionItems.length }} />
           <section className="task-workspace">
@@ -260,6 +285,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
               {currentTask.commands.includes("open_browser") && <button className="button secondary" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "open_browser" })}><MonitorUp aria-hidden="true" size={16} />打开受控浏览器</button>}
               {currentTask.commands.includes("resume") && <button className="button primary" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "resume" })}><RotateCw aria-hidden="true" size={16} />我已完成登录，继续</button>}
               {currentTask.commands.includes("resume_with_profile") && <button className="button primary" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "resume_with_profile" })}><RotateCw aria-hidden="true" size={16} />我已补全档案，重新匹配</button>}
+              {currentTask.commands.includes("sync_profile") && <button className="button primary" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "sync_profile" })}><RotateCw aria-hidden="true" size={16} />重新同步档案</button>}
               {currentTask.commands.includes("cancel") && <button className="button quiet danger" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "cancel" })}><X aria-hidden="true" size={16} />取消任务</button>}
               {canDeleteTask && <button className="button quiet danger" type="button" disabled={busyCommand !== undefined} onClick={() => void deleteTask()}><X aria-hidden="true" size={16} />删除任务</button>}
             </section>}

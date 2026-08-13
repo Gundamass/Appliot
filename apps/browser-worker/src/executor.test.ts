@@ -635,6 +635,44 @@ describe("controlled browser executor", () => {
     expect(result).toMatchObject({ status: "applied", actualValue: "Tongji University", errors: [] });
   }, 30_000);
 
+  it("does not accept a custom option when the control readback stays on the search text", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Apply</title>
+        <label for="school">School</label>
+        <input id="school" role="combobox" aria-label="School" aria-controls="school-options">
+        <div id="school-options" role="listbox"></div>
+        <script>
+          const input = document.querySelector('#school');
+          const list = document.querySelector('#school-options');
+          input.addEventListener('input', () => {
+            list.innerHTML = '<div role="option">Tongji University</div>';
+          });
+          list.addEventListener('click', () => { input.value = 'Other University'; list.innerHTML = ''; });
+        </script>`);
+    });
+    servers.push(server);
+    await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+    const address = server.address();
+    if (!address || typeof address === "string") throw new Error("test server has no port");
+
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-searchable-readback-"));
+    temporaryDirectories.push(profileDir);
+    const key = Buffer.alloc(32, 18);
+    const policy = new ActionPolicy(key);
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    sessions.push(session);
+    await session.start(key.toString("base64url"));
+    await session.open("task-searchable-readback", `http://127.0.0.1:${address.port}/apply`);
+
+    const snapshot = await session.observe("task-searchable-readback");
+    const school = snapshot.fields.find((field) => field.label === "School");
+    if (!school) throw new Error("searchable school control was not observed");
+    const result = await session.execute(approvedSelect(policy, snapshot, school.id, "Tongji University"));
+
+    expect(result).toMatchObject({ status: "failed", errors: ["custom_readback_mismatch"] });
+  }, 30_000);
+
   it("fails an intermediate click that produces no observable page change", async () => {
     const server = createServer((_request, response) => {
       response.setHeader("Content-Type", "text/html; charset=utf-8");

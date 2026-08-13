@@ -6,6 +6,41 @@ import { createTaskEventBus } from "./task-events.js";
 import { createApplicationTaskRepository } from "./application-task-repository.js";
 
 describe("application task repository", () => {
+  it("persists profile synchronization state without moving the applied revision backwards", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createApplicationTaskRepository(database);
+    const task = repository.create({
+      id: "91dc4bd6-425a-4cab-a38d-d13e33cda771",
+      name: "示例投递",
+      applicationUrl: "https://jobs.example.test/apply"
+    });
+
+    expect(task).toMatchObject({
+      profileRevisionApplied: 0,
+      profileSyncStatus: "current"
+    });
+    repository.markProfileSyncPending(task.id);
+    expect(repository.get(task.id)).toMatchObject({ profileSyncStatus: "pending" });
+
+    repository.markProfileSyncFailed(task.id, "browser_unavailable");
+    expect(repository.get(task.id)).toMatchObject({
+      profileRevisionApplied: 0,
+      profileSyncStatus: "failed",
+      profileSyncError: "browser_unavailable"
+    });
+
+    repository.markProfileSyncSucceeded(task.id, 4);
+    repository.markProfileSyncSucceeded(task.id, 2);
+    const synchronized = repository.get(task.id);
+    expect(synchronized).toMatchObject({
+      profileRevisionApplied: 4,
+      profileSyncStatus: "current"
+    });
+    expect(synchronized).not.toHaveProperty("profileSyncError");
+    database.close();
+  });
+
   it("persists task metadata across repository instances", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

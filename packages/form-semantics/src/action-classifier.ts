@@ -33,7 +33,7 @@ export function classifyAction(input: ActionContext): ActionClass {
   }
   if (input.stage !== "review"
     && SECTION_ADD_ACTIONS.some((pattern) => pattern.test(primary))
-    && /教育|实习|工作|项目/u.test(context)) {
+    && /教育|实习|工作|项目|获奖|赛事|竞赛|实验室|科研|研究/u.test(context)) {
     return "intermediate_navigation";
   }
   return "unknown_side_effect";

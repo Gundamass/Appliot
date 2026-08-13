@@ -1,5 +1,5 @@
 import { describe, expect, it } from "vitest";
-import type { EmbeddingProvider } from "@resume/model-provider";
+import type { EmbeddingProvider, StructuredModelProvider } from "@resume/model-provider";
 import type { FieldDefinition } from "@resume/form-semantics";
 import { createFieldSemanticResolver } from "./field-semantic-resolver.js";
 
@@ -56,7 +56,44 @@ class StubEmbeddingProvider implements EmbeddingProvider {
   }
 }
 
+class StubStructuredProvider implements StructuredModelProvider {
+  calls = 0;
+
+  async generateStructured<T>(): Promise<T> {
+    this.calls += 1;
+    return { semantic: "awards[].name", confidence: 0.96 } as T;
+  }
+}
+
 describe("字段语义解析器", () => {
+  it("uses DeepSeek only after deterministic and embedding mapping cannot resolve a field", async () => {
+    const provider = new StubStructuredProvider();
+    const resolver = createFieldSemanticResolver({
+      definitions: [{
+        semantic: "awards[].name",
+        label: "获奖名称",
+        aliases: ["奖项名称"],
+        types: ["text"],
+        sections: ["awards"],
+        risk: "normal",
+        description: "获奖名称"
+      }],
+      structuredProvider: provider
+    });
+
+    await expect(resolver.resolve({
+      label: "赛事项目",
+      type: "text",
+      options: [],
+      semanticHint: "awards[0]"
+    }, { section: "awards", entryContext: "awards[0]" }, "semantic")).resolves.toMatchObject({
+      status: "mapped",
+      semantic: "awards[0].name",
+      source: "deepseek",
+      confidence: 0.96
+    });
+    expect(provider.calls).toBe(1);
+  });
   it("将赛事名称在语义阶段映射到当前获奖经历名称", async () => {
     const awardDefinitions: FieldDefinition[] = [
       {

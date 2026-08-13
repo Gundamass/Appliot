@@ -140,6 +140,35 @@ describe("profile routes", () => {
     await expect(readFile(join(root, body.fileId))).resolves.toEqual(bytes);
   });
 
+  it("refreshes active applications after a profile fact is saved", async () => {
+    const onProfileUpdated = vi.fn();
+    const { app } = await buildTestContext({ onProfileUpdated });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/profile/facts",
+      payload: { fieldPath: "preferences.city", value: "深圳" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(onProfileUpdated).toHaveBeenCalledOnce();
+  });
+
+  it("keeps a successful profile save successful when application refresh fails", async () => {
+    const { app } = await buildTestContext({
+      onProfileUpdated: async () => { throw new Error("application refresh failed"); }
+    });
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/profile/facts",
+      payload: { fieldPath: "preferences.city", value: "深圳" }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({ fieldPath: "preferences.city", value: "深圳" });
+  });
+
   it("rejects non-image avatar uploads", async () => {
     const app = await buildTestApp();
     const response = await app.inject({

@@ -51,6 +51,7 @@ class MultipartInputError extends Error {
 
 export interface ProfileRouteDependencies extends ProfileImportDependencies {
   profileRepository: ProfileRepository;
+  onProfileUpdated?: () => Promise<void> | void;
   avatarStore?: AvatarStore;
   renderPdfPage?: (bytes: Uint8Array, page: number) => Promise<Uint8Array>;
 }
@@ -58,6 +59,14 @@ export interface ProfileRouteDependencies extends ProfileImportDependencies {
 export function registerProfileRoutes(app: FastifyInstance, dependencies: ProfileRouteDependencies): void {
   const documents = createDocumentRepository(dependencies.database);
   const renderPdfPage = dependencies.renderPdfPage ?? renderProfilePdfPage;
+  const notifyProfileUpdated = (): void => {
+    try {
+      const result = dependencies.onProfileUpdated?.();
+      if (result instanceof Promise) void result.catch(() => undefined);
+    } catch {
+      // Profile persistence has already succeeded; refresh is best effort.
+    }
+  };
 
   app.post("/api/documents", async (request, reply) => {
     if (!request.isMultipart()) return sendError(reply, 400, "Invalid request");
@@ -109,17 +118,19 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
   app.post("/api/profile/facts", async (request, reply) => {
     const body = ProfileFactUpsertInputSchema.safeParse(request.body);
     if (!body.success) return sendError(reply, 400, "Invalid request");
-    return reply.code(200).send(ProfileFactSchema.parse(
-      dependencies.profileRepository.upsertUserFact(body.data)
-    ));
+    const fact = ProfileFactSchema.parse(dependencies.profileRepository.upsertUserFact(body.data));
+    notifyProfileUpdated();
+    return reply.code(200).send(fact);
   });
 
   app.delete("/api/profile/facts", async (request, reply) => {
     const body = ProfileFactRemovalInputSchema.safeParse(request.body);
     if (!body.success) return sendError(reply, 400, "Invalid request");
-    return reply.code(200).send(ProfileFactRemovalResultSchema.parse({
+    const result = ProfileFactRemovalResultSchema.parse({
       removed: dependencies.profileRepository.removeProfileFacts(body.data.fieldPaths)
-    }));
+    });
+    if (result.removed > 0) notifyProfileUpdated();
+    return reply.code(200).send(result);
   });
 
   app.get("/api/profile/completeness", async (_request, reply) => {
@@ -200,7 +211,9 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
     const body = ConfirmationBodySchema.safeParse(request.body);
     if (!params.success || !body.success) return sendError(reply, 400, "Invalid request");
     try {
-      return reply.code(200).send(ProfileFactSchema.parse(dependencies.profileRepository.confirm(params.data.id)));
+      const fact = ProfileFactSchema.parse(dependencies.profileRepository.confirm(params.data.id));
+      notifyProfileUpdated();
+      return reply.code(200).send(fact);
     } catch (error) {
       return profileFactError(error, reply);
     }
@@ -211,14 +224,14 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
     const body = CorrectionBodySchema.safeParse(request.body);
     if (!params.success || !body.success) return sendError(reply, 400, "Invalid request");
     try {
-      return reply.code(200).send(ProfileFactSchema.parse(
-        dependencies.profileRepository.correct(params.data.id, body.data.value, [{
+      const fact = ProfileFactSchema.parse(dependencies.profileRepository.correct(params.data.id, body.data.value, [{
           documentId: "user",
           page: 1,
           text: `Corrected value: ${JSON.stringify(body.data.value)}`,
           extraction: "user"
-        }])
-      ));
+        }]));
+      notifyProfileUpdated();
+      return reply.code(200).send(fact);
     } catch (error) {
       return profileFactError(error, reply);
     }
