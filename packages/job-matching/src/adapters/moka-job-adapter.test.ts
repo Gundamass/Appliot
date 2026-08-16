@@ -1,6 +1,9 @@
 import { describe, expect, it } from "vitest";
 import { mokaJobAdapter } from "./moka-job-adapter.js";
 import {
+  campusMokaApplicationFixture,
+  campusMokaDetailFixture,
+  campusMokaListFixture,
   jobExpectationFixture,
   mokaApplicationFixture,
   mokaChallengeFixture,
@@ -17,6 +20,21 @@ describe("mokaJobAdapter", () => {
     expect(mokaJobAdapter.identify(mokaApplicationFixture)).toBe("application_form");
     expect(mokaJobAdapter.identify(mokaLoginFixture)).toBe("unsupported");
     expect(mokaJobAdapter.identify(mokaChallengeFixture)).toBe("unsupported");
+  });
+
+  it("identifies campus_apply entry kinds for arbitrary Mokahr tenants", () => {
+    expect(mokaJobAdapter.identify(campusMokaListFixture)).toBe("job_list");
+    expect(mokaJobAdapter.identify(campusMokaDetailFixture)).toBe("job_detail");
+    expect(mokaJobAdapter.identify(campusMokaApplicationFixture)).toBe("application_form");
+  });
+
+  it("preserves same-domain canonical URLs from campus_apply lists", () => {
+    expect(mokaJobAdapter.extractList(campusMokaListFixture).postings).toEqual([
+      expect.objectContaining({
+        sourceJobId: "java-lead",
+        canonicalUrl: "https://app.mokahr.com/campus_apply/acme-campus/39595#/jobs/java-lead"
+      })
+    ]);
   });
 
   it("maps supported site filters and keeps salary as local-only", () => {
@@ -57,8 +75,8 @@ describe("mokaJobAdapter", () => {
 
   it("rejects a posting URL outside the adapter source", () => {
     const foreignPosting = {
-      ...mokaListFixture,
-      jobCards: [{ ...mokaListFixture.jobCards[0]!, canonicalUrl: "https://jobs.example.test/job/1001" }]
+      ...campusMokaListFixture,
+      jobCards: [{ ...campusMokaListFixture.jobCards[0]!, canonicalUrl: "https://jobs.example.test/job/1001" }]
     };
 
     expect(() => mokaJobAdapter.extractList(foreignPosting))

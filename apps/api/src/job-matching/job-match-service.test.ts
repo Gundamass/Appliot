@@ -5,7 +5,7 @@ import type {
   JobPageSnapshot,
   JobPosting
 } from "@resume/contracts";
-import type { JobAdapter } from "@resume/job-matching";
+import { mokaJobAdapter, type JobAdapter } from "@resume/job-matching";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApplicationTaskRepository } from "../applications/application-task-repository.js";
 import { BrowserOwnershipLease } from "../browser/browser-ownership-lease.js";
@@ -25,11 +25,15 @@ const expectation: JobExpectationSnapshot = {
   criteria: [{ kind: "location", values: ["北京"], strength: "required" }]
 };
 
-function snapshot(entryHint: JobPageSnapshot["entryHint"], ownerId: string): JobPageSnapshot {
+function snapshot(
+  entryHint: JobPageSnapshot["entryHint"],
+  ownerId: string,
+  url = `https://jobs.example/${entryHint}`
+): JobPageSnapshot {
   return {
     id: `snapshot-${entryHint}`,
     ownerId,
-    url: `https://jobs.example/${entryHint}`,
+    url,
     title: entryHint,
     capturedAt: "2026-08-16T00:00:00.000Z",
     entryHint,
@@ -90,7 +94,9 @@ function result(value: JobPosting, conflict = false): JobMatchResult {
 function harness(
   entryHint: JobPageSnapshot["entryHint"] = "job_list",
   profileRevision = 7,
-  expectationSnapshot = expectation
+  expectationSnapshot = expectation,
+  adapterOverride?: JobAdapter,
+  url = `https://jobs.example/${entryHint}`
 ) {
   const database = new Database(":memory:");
   databases.push(database);
@@ -99,7 +105,7 @@ function harness(
   const applicationTasks = createApplicationTaskRepository(database);
   const browser = {
     open: vi.fn().mockResolvedValue(undefined),
-    observeJob: vi.fn(async (ownerId: string) => snapshot(entryHint, ownerId)),
+    observeJob: vi.fn(async (ownerId: string) => snapshot(entryHint, ownerId, url)),
     invalidateExecution: vi.fn().mockResolvedValue(undefined),
     releaseTask: vi.fn().mockResolvedValue(undefined),
     execute: vi.fn()
@@ -127,7 +133,7 @@ function harness(
     applicationTasks,
     browser,
     browserOwnershipLease,
-    adapters: [adapter],
+    adapters: [adapterOverride ?? adapter],
     expectationSnapshot: () => expectationSnapshot,
     profileRevision: () => profileRevision,
     extraction: {
@@ -145,7 +151,7 @@ function harness(
     applicationTasks,
     browser,
     browserOwnershipLease,
-    adapter,
+    adapter: adapterOverride ?? adapter,
     trace,
     get submissionCount() { return submissionCount; }
   };
@@ -219,6 +225,17 @@ describe("JobMatchService entry handling", () => {
     });
     expect(list.browser.execute).not.toHaveBeenCalled();
     expect(detail.browser.execute).not.toHaveBeenCalled();
+  });
+
+  it("creates a campus_apply list session with the real Mokahr adapter", async () => {
+    const campusUrl = "https://app.mokahr.com/campus_apply/acme-campus/39595#/jobs";
+    const value = harness("job_list", 7, expectation, mokaJobAdapter, campusUrl);
+
+    await expect(value.service.create({ url: campusUrl })).resolves.toMatchObject({
+      source: "moka",
+      entryKind: "job_list"
+    });
+    expect(value.browser.execute).not.toHaveBeenCalled();
   });
 
   it("persists the edited expectation when filters are confirmed", async () => {

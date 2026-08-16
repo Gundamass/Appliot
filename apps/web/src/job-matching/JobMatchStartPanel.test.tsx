@@ -3,7 +3,7 @@ import { render, screen, waitFor } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import type { ProfileApi } from "../api/client.js";
-import type { JobMatchApi } from "./api.js";
+import { JobMatchApiError, type JobMatchApi } from "./api.js";
 import { JobMatchStartPanel } from "./JobMatchStartPanel.js";
 
 function profileFact(
@@ -199,5 +199,22 @@ describe("JobMatchStartPanel", () => {
     await Promise.resolve();
     expect(onApplicationForm).not.toHaveBeenCalled();
     expect(onSessionCreated).not.toHaveBeenCalled();
+  });
+
+  it("explains when a supported source has an unrecognized page structure", async () => {
+    const reviewed = profileFact("role", "preferences.targetRole", "Java", "user_confirmed");
+    const profileApi = { listFacts: vi.fn().mockResolvedValue([reviewed]), confirm: vi.fn(), upsert: vi.fn() };
+    const jobMatchApi = {
+      create: vi.fn().mockRejectedValue(new JobMatchApiError("unsupported", "unsupported_job_entry"))
+    };
+    render(<JobMatchStartPanel {...props(profileApi, jobMatchApi)} />);
+
+    await screen.findByDisplayValue("Java");
+    await userEvent.type(screen.getByLabelText("招聘链接"), "https://app.mokahr.com/campus_apply/acme-campus/39595#/jobs");
+    await userEvent.click(screen.getByRole("button", { name: "确认岗位期望并开始匹配" }));
+
+    const alert = await screen.findByRole("alert");
+    expect(alert).toHaveTextContent("当前招聘页面结构尚未识别，请确认链接打开的是岗位列表或岗位详情页。");
+    expect(alert).not.toHaveTextContent("当前仅支持 Moka/Mokahr");
   });
 });

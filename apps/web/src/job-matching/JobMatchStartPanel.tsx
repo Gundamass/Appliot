@@ -38,7 +38,7 @@ type LoadState = "loading" | "ready" | "error";
 const ERROR_MESSAGES: Record<string, string> = {
   job_expectation_required: "请先确认至少一项岗位期望",
   browser_task_in_use: "受控浏览器正在处理另一个投递或匹配任务，请先完成当前任务。",
-  unsupported_job_entry: "当前仅支持 Moka/Mokahr 中文岗位页和 DJI 招聘路径。"
+  unsupported_job_entry: "当前招聘页面结构尚未识别，请确认链接打开的是岗位列表或岗位详情页。"
 };
 
 export function JobMatchStartPanel({

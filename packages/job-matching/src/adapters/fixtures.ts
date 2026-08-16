@@ -57,6 +57,41 @@ export const mokaApplicationFixture = snapshot({
   visibleText: ["申请职位", "个人信息"]
 });
 
+export const campusMokaListFixture = snapshot({
+  url: "https://app.mokahr.com/campus_apply/acme-campus/39595#/jobs",
+  title: "Acme Campus 招聘",
+  visibleText: ["职位列表", "Java 技术负责人", "深圳"],
+  jobCards: [{
+    sourceJobId: "java-lead",
+    canonicalUrl: "https://app.mokahr.com/campus_apply/acme-campus/39595#/jobs/java-lead",
+    title: "Java 技术负责人",
+    organization: "示例科技",
+    location: "深圳",
+    summary: "本科及以上，5 年 Java 经验"
+  }]
+});
+
+export const campusMokaDetailFixture = snapshot({
+  url: "https://app.mokahr.com/campus_apply/another-tenant/72913#/jobs/backend-architect",
+  title: "后端架构师",
+  entryHint: "job_detail",
+  visibleText: ["后端架构师", "示例科技", "工作地点：杭州", "本科及以上", "5 年 Java 经验"],
+  jobCards: [{
+    sourceJobId: "backend-architect",
+    canonicalUrl: "https://app.mokahr.com/campus_apply/another-tenant/72913#/jobs/backend-architect",
+    title: "后端架构师",
+    organization: "示例科技",
+    location: "杭州",
+    summary: "负责平台架构"
+  }]
+});
+
+export const campusMokaApplicationFixture = snapshot({
+  url: "https://app.mokahr.com/campus_apply/another-tenant/72913#/jobs/backend-architect/apply",
+  entryHint: "application_form",
+  visibleText: ["申请职位", "个人信息"]
+});
+
 export const mokaLoginFixture = snapshot({
   entryHint: "login",
   visibleText: ["登录后继续"]
