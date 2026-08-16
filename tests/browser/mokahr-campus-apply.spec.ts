@@ -56,6 +56,21 @@ test("keeps campus_apply safety boundaries", async ({ page }) => {
   detector.dispose();
 });
 
+test("advances a campus_apply list with an accessible next-page button", async ({ page }) => {
+  await installCampusApplyFixture(page);
+  const detector = new ChallengeDetector();
+  detector.start(page);
+  const observer = new JobObserver(page as never, detector);
+
+  await page.goto(`${CAMPUS_URL}#/jobs`);
+  expect((await observer.observe("campus-page-one")).pagination.hasNext).toBe(true);
+  const next = await observer.advance("campus-page-two");
+
+  expect(page.url()).toBe(`${CAMPUS_URL}#/jobs?page=2`);
+  expect(next.entryHint).toBe("job_list");
+  detector.dispose();
+});
+
 async function installCampusApplyFixture(page: Page): Promise<void> {
   await page.route(`${CAMPUS_URL}**`, async (route) => {
     await route.fulfill({
@@ -75,7 +90,7 @@ function campusApplyShell(): string {
           const app = document.querySelector("#app");
           const render = () => {
             const path = location.hash;
-            if (path === "#/jobs") {
+            if (path === "#/jobs" || path === "#/jobs?page=2") {
               app.innerHTML = '<h1>职位列表</h1>' +
               '<div class="position-item" data-position-id="java-lead">' +
                 '<a class="position-link" href="#/jobs/java-lead">' +
@@ -92,7 +107,8 @@ function campusApplyShell(): string {
                   '<span class="job-location">杭州</span>' +
                   '<span class="job-summary">负责平台架构</span>' +
                 '</a>' +
-              '</div>';
+              '</div>' +
+              '<button type="button" aria-label="下一页" onclick="location.hash = \\'#/jobs?page=2\\'"><span aria-hidden="true">&gt;</span></button>';
             } else if (path === "#/jobs/no-link") {
               app.innerHTML = '<h1>职位列表</h1><div class="position-item" data-position-id="hidden-job" onclick="return false">' +
               '<span class="position-title">不可导航岗位</span></div>';
