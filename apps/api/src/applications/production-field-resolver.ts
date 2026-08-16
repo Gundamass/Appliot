@@ -36,7 +36,7 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
         reason: phase === "deterministic" ? "尚未找到确定性字段映射" : "未找到可安全使用的字段映射"
       });
       if (phase === "deterministic" && semanticDecision.reason === "exact_match_not_found") {
-        return { status: "deferred" as const, assessment };
+        return { status: "deferred" as const, fieldPath, assessment };
       }
       return {
         status: "needs_question" as const,
@@ -67,6 +67,7 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
     const semantic = semanticDecision.semantic;
     const splitDateSelect = isSplitDateSelect(field, semantic);
     const truncatedNativeSelect = isTruncatedNativeSelect(field);
+    const customSearchSelect = isCustomSearchSelect(field);
     const existing = dependencies.profileRepository.resolveForTask(taskId, semantic);
     if (existing?.scope === "application") {
       return resolvedTaskAnswer(field, semantic, existing.value, existing.evidence);
@@ -74,13 +75,26 @@ export function createProductionFieldResolver(dependencies: ProductionFieldResol
     if (field.type === "file" && existing?.scope === "profile" && typeof existing.value === "string" && existing.value.trim() !== "") {
       return resolvedProfileFile(field, semantic, existing.value, existing.evidence, semanticDecision.confidence);
     }
+    if (isLaboratoryPresenceSemantic(semantic)) {
+      const source = existing ?? dependencies.profileRepository.resolveForTask(
+        taskId,
+        semantic.replace(/\.hasLaboratory$/u, ".laboratory")
+      );
+      const value = laboratoryPresenceValue(field, existing, source);
+      if (value !== undefined && source !== undefined) {
+        return resolvedDerivedProfileValue(field, semantic, value, source.evidence, semanticDecision.confidence);
+      }
+    }
+    if (existing?.scope !== "profile") {
+      return missingProfileFact(field, semantic);
+    }
     const decision = await dependencies.ragService.resolveField({
       taskId,
       fieldId: field.id,
       semantic,
       label: field.label,
-      type: splitDateSelect ? "date" : truncatedNativeSelect ? "text" : fieldTypeForRag(field.type),
-      ...(field.options.length === 0 || splitDateSelect || truncatedNativeSelect ? {} : { options: field.options }),
+      type: splitDateSelect ? "date" : truncatedNativeSelect || customSearchSelect ? "text" : fieldTypeForRag(field.type),
+      ...(field.options.length === 0 || splitDateSelect || truncatedNativeSelect || customSearchSelect ? {} : { options: field.options }),
       validators: field.required ? ["required"] : []
     });
     const resolvedValue = decision.value === undefined
@@ -149,6 +163,44 @@ function isTruncatedNativeSelect(field: FormField): boolean {
     && field.optionsTruncated === true;
 }
 
+function isCustomSearchSelect(field: FormField): boolean {
+  return field.type === "select"
+    && field.controlKind === "custom"
+    && field.interactionMode === "search";
+}
+
+function isLaboratoryPresenceSemantic(semantic: string): boolean {
+  return /^education\[\d+\]\.hasLaboratory$/u.test(semantic);
+}
+
+function laboratoryPresenceValue(
+  field: FormField,
+  explicit: ReturnType<ProfileRepositoryPort["resolveForTask"]>,
+  source: ReturnType<ProfileRepositoryPort["resolveForTask"]>
+): unknown | undefined {
+  const explicitValue = explicit?.value;
+  if (typeof explicitValue === "boolean") return booleanControlValue(field, explicitValue);
+  if (typeof explicitValue === "string" && explicitValue.trim() !== "") {
+    const normalized = explicitValue.normalize("NFKC").trim().toLocaleLowerCase();
+    if (["true", "yes", "y", "\u662f"].includes(normalized)) return booleanControlValue(field, true);
+    if (["false", "no", "n", "\u5426"].includes(normalized)) return booleanControlValue(field, false);
+  }
+  if (typeof source?.value !== "string" || source.value.trim() === "") return undefined;
+  const normalizedSource = source.value.normalize("NFKC").trim().toLocaleLowerCase();
+  const negative = ["false", "no", "n", "否", "无", "没有", "无实验室经历", "无相关经历"]
+    .includes(normalizedSource);
+  return booleanControlValue(field, !negative);
+}
+
+function booleanControlValue(field: FormField, value: boolean): boolean | string | undefined {
+  if (field.type === "checkbox") return value;
+  const aliases = value ? ["true", "yes", "y", "\u662f"] : ["false", "no", "n", "\u5426"];
+  const option = field.options.find((candidate) =>
+    aliases.includes(candidate.normalize("NFKC").trim().toLocaleLowerCase()));
+  if (option !== undefined) return option;
+  return field.controlKind === "custom" ? value ? "\u662f" : "\u5426" : undefined;
+}
+
 export function fieldPathForApplicationAnswer(
   field: Pick<FormField, "id" | "label" | "semanticHint">,
   questions: readonly Pick<ApplicationQuestion, "id" | "fieldPath">[]
@@ -209,6 +261,44 @@ function resolvedProfileFile(
   };
 }
 
+function resolvedDerivedProfileValue(
+  field: FormField,
+  fieldPath: string,
+  value: unknown,
+  evidence: ApplicationFieldAssessment["evidence"],
+  confidence: number
+) {
+  return {
+    status: "verified" as const,
+    value,
+    fieldPath,
+    assessment: fieldAssessment(field, {
+      semantic: fieldPath,
+      status: "ready",
+      source: "exact",
+      confidence,
+      reason: "该值由已确认的候选人档案事实推导",
+      evidence
+    })
+  };
+}
+
+function missingProfileFact(field: FormField, fieldPath: string) {
+  const reason = "候选人档案中没有该字段对应的已确认资料";
+  return {
+    status: "needs_question" as const,
+    fieldPath,
+    question: `请补充“${field.label}”，${reason}。`,
+    assessment: fieldAssessment(field, {
+      semantic: fieldPath,
+      status: "missing",
+      source: "none",
+      confidence: 0,
+      reason
+    })
+  };
+}
+
 function applicationAnswerPath(field: Pick<FormField, "label" | "type" | "options" | "semanticHint">): string {
   const signature = JSON.stringify({
     context: field.semanticHint ?? "",
@@ -257,18 +347,21 @@ function assessmentReason(status: ApplicationFieldAssessment["status"]): string 
 
 function semanticContextForField(field: FormField): FieldSemanticContext {
   const entryContext = field.semanticHint
-    ?.match(/^(education|work|projects|campus|awards|publications|certificates)\[\d+\]/u)?.[0];
+    ?.match(/^(education|work|projects|campus|awards|publications|languages|certificates)\[\d+\]/u)?.[0];
   const root = (entryContext ?? field.semanticHint)?.split(/[.[\]]/u, 1)[0];
-  const section = root === "identity"
+  const observedSection = field.sectionHint === "internship" || field.sectionHint === "work_combined"
+    ? "work"
+    : field.sectionHint;
+  const section = observedSection ?? (root === "identity"
     ? "basics"
     : root === "selfEvaluation"
       ? "self"
       : root && [
         "basics", "preferences", "education", "work", "projects", "campus",
-        "awards", "publications", "certificates"
+        "awards", "publications", "languages", "certificates"
       ].includes(root)
         ? root
-        : undefined;
+        : undefined);
   const context: FieldSemanticContext = {};
   if (section !== undefined) {
     context.section = section as NonNullable<FieldSemanticContext["section"]>;

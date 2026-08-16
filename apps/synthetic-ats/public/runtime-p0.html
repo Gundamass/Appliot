@@ -1,0 +1,122 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Runtime P0 application fixture</title>
+  <style>
+    body { color: #17211e; font: 14px/1.5 system-ui, sans-serif; margin: 0; }
+    main { margin: 0 auto; max-width: 720px; padding: 32px 20px; }
+    form { display: grid; gap: 16px; }
+    .field { display: grid; gap: 5px; }
+    input { box-sizing: border-box; min-height: 36px; padding: 6px 8px; width: 100%; }
+  </style>
+</head>
+<body data-fixture="runtime-p0">
+<main>
+  <h1>Runtime P0 application</h1>
+  <form method="post" action="/submit?taskId={{TASK_ID}}">
+    <section id="runtime-zone">
+      <div class="field" id="target-field">
+        <label for="runtime-target">Runtime target</label>
+        <input id="runtime-target" name="basics.target" data-runtime-key="target">
+      </div>
+      <div class="field" id="reorder-anchor">
+        <label for="anchor">Reorder anchor</label>
+        <input id="anchor" name="fixture.anchor" data-runtime-key="anchor" value="anchor">
+      </div>
+    </section>
+    <section id="audit-fields" aria-label="Periodic audit fields">
+      <div class="field"><label for="audit-0">Audit field 0</label><input id="audit-0" name="basics.audit0" data-runtime-key="audit0" required></div>
+      <div class="field"><label for="audit-1">Audit field 1</label><input id="audit-1" name="basics.audit1" data-runtime-key="audit1" required></div>
+      <div class="field"><label for="audit-2">Audit field 2</label><input id="audit-2" name="basics.audit2" data-runtime-key="audit2" required></div>
+      <div class="field"><label for="audit-3">Audit field 3</label><input id="audit-3" name="basics.audit3" data-runtime-key="audit3" required></div>
+      <div class="field"><label for="audit-4">Audit field 4</label><input id="audit-4" name="basics.audit4" data-runtime-key="audit4" required></div>
+      <div class="field"><label for="audit-5">Audit field 5</label><input id="audit-5" name="basics.audit5" data-runtime-key="audit5" required></div>
+      <div class="field"><label for="audit-6">Audit field 6</label><input id="audit-6" name="basics.audit6" data-runtime-key="audit6" required></div>
+      <div class="field"><label for="audit-7">Audit field 7</label><input id="audit-7" name="basics.audit7" data-runtime-key="audit7" required></div>
+    </section>
+    <button type="submit">Submit application</button>
+  </form>
+</main>
+<script>
+  const taskId = "{{TASK_ID}}";
+  const scenario = {{SCENARIO_JSON}};
+  const writeCounts = {};
+  let mutationCount = 0;
+  let auditCount = 0;
+
+  const values = () => Object.fromEntries(
+    [...document.querySelectorAll("[data-runtime-key]")]
+      .map((control) => [control.dataset.runtimeKey, control.value])
+  );
+  const sync = () => fetch(`/api/runtime-p0-state?taskId=${encodeURIComponent(taskId)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({ scenario, values: values(), writeCounts, mutationCount, auditCount })
+  });
+
+  function bind(control) {
+    if (control.dataset.runtimeBound === "1") return;
+    control.dataset.runtimeBound = "1";
+    control.addEventListener("input", () => {
+      const key = control.dataset.runtimeKey;
+      writeCounts[key] = (writeCounts[key] || 0) + 1;
+      void sync();
+      if (scenario === "rollback-500ms" && key === "target") {
+        setTimeout(() => {
+          control.value = "";
+          void sync();
+        }, 500);
+      }
+      if (scenario === "continuous-mutation" && key === "target") {
+        const deadline = Date.now() + 2500;
+        let tick = 0;
+        const interval = setInterval(() => {
+          tick += 1;
+          mutationCount += 1;
+          control.setAttribute("aria-description", `mutation-${tick}`);
+          if (Date.now() >= deadline) {
+            clearInterval(interval);
+            void sync();
+          }
+        }, 40);
+      }
+    });
+  }
+
+  document.querySelectorAll("[data-runtime-key]").forEach(bind);
+  window.runtimeP0 = {
+    async triggerMutation() {
+      const zone = document.querySelector("#runtime-zone");
+      const targetField = document.querySelector("#target-field");
+      if (scenario === "insert-before") {
+        const inserted = document.createElement("div");
+        inserted.className = "field";
+        inserted.innerHTML = '<label for="inserted">Inserted field</label><input id="inserted" name="fixture.inserted" data-runtime-key="inserted">';
+        zone.insertBefore(inserted, targetField);
+        bind(inserted.querySelector("input"));
+      } else if (scenario === "replace-same-index") {
+        const original = document.querySelector("#runtime-target");
+        const replacement = document.createElement("input");
+        replacement.id = "runtime-target";
+        replacement.name = "basics.target";
+        replacement.dataset.runtimeKey = "replacement";
+        original.replaceWith(replacement);
+        bind(replacement);
+      } else if (scenario === "reorder") {
+        zone.append(targetField);
+      }
+      mutationCount += 1;
+      await sync();
+    },
+    async prepareAudit() {
+      document.querySelector('[data-runtime-key="audit0"]').value = "";
+      auditCount += 1;
+      await sync();
+    }
+  };
+  void sync();
+</script>
+</body>
+</html>

@@ -1,5 +1,5 @@
 import type { ProfileCompleteness, ProfileFact } from "@resume/contracts";
-import { render, screen, waitFor } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { createRef } from "react";
 import { describe, expect, it, vi } from "vitest";
@@ -43,6 +43,23 @@ const incompleteProject: ProfileCompleteness = {
   ]
 };
 
+const incompleteCampusDates: ProfileCompleteness = {
+  completed: 6,
+  total: 10,
+  sections: [{
+    id: "campus",
+    label: "在校实践",
+    completed: 6,
+    total: 10,
+    missing: [
+      "campus[0].startDate",
+      "campus[0].endDate",
+      "campus[1].startDate",
+      "campus[1].endDate"
+    ]
+  }]
+};
+
 const emptyCompleteness: ProfileCompleteness = {
   completed: 0,
   total: 1,
@@ -64,6 +81,25 @@ function api(): ProfileApi {
 }
 
 describe("CandidateProfileCenter", () => {
+  it("explains when campus completion suggestions are all missing dates", async () => {
+    const user = userEvent.setup();
+    render(<CandidateProfileCenter
+      api={api()}
+      facts={[
+        fact("campus[0].name", "创E社团招新"),
+        fact("campus[0].description", "2022-10 至 2022-11 手写描述"),
+        fact("campus[1].name", "新枫读书节")
+      ]}
+      completeness={incompleteCampusDates}
+      onFactsChanged={vi.fn()}
+    />);
+
+    await user.click(screen.getByRole("button", { name: /在校实践/ }));
+    expect(screen.getByText("4 项时间信息待补全")).toBeVisible();
+    expect(within(screen.getByRole("article", { name: "创E社团招新" })).getByLabelText("实践描述"))
+      .toHaveValue("2022-10 至 2022-11 手写描述");
+  });
+
   it("uploads an avatar as an opaque draft and saves it only with the whole profile", async () => {
     const user = userEvent.setup();
     const profileApi = api();
@@ -254,6 +290,40 @@ describe("CandidateProfileCenter", () => {
     expect(screen.getByLabelText("职责和成果")).toHaveValue("负责接口开发与联调");
     expect(screen.queryByRole("button", { name: /生成项目要点/ })).not.toBeInTheDocument();
     expect(screen.queryByRole("button", { name: /生成实习描述/ })).not.toBeInTheDocument();
+  });
+
+  it("在候选人档案中编辑并保存语言能力", async () => {
+    const user = userEvent.setup();
+    const profileApi = api();
+    const ref = createRef<CandidateProfileCenterHandle>();
+    render(<CandidateProfileCenter
+      ref={ref}
+      api={profileApi}
+      facts={[
+        fact("languages[0].name", "英语"),
+        fact("languages[0].proficiency", "熟练")
+      ]}
+      completeness={{
+        completed: 2,
+        total: 4,
+        sections: [{
+          id: "languages",
+          label: "语言能力",
+          completed: 2,
+          total: 4,
+          missing: ["languages[0].speakingListening", "languages[0].readingWriting"]
+        }]
+      }}
+      onFactsChanged={vi.fn()}
+    />);
+
+    await user.click(screen.getByRole("button", { name: /语言能力/ }));
+    await user.type(screen.getByLabelText("听说能力"), "熟练");
+    await user.type(screen.getByLabelText("读写能力"), "熟练");
+    await ref.current?.save();
+
+    expect(profileApi.upsert).toHaveBeenCalledWith("languages[0].speakingListening", "熟练");
+    expect(profileApi.upsert).toHaveBeenCalledWith("languages[0].readingWriting", "熟练");
   });
 
   it("保存新增教育、部门和可选项目链接字段", async () => {

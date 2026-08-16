@@ -32,10 +32,14 @@ export interface ApplicationRouteDependencies {
 
 export function registerApplicationRoutes(app: FastifyInstance, dependencies: ApplicationRouteDependencies): void {
   const taskResponse = (task: StoredApplicationTask): ApplicationTask => {
-    const state = toApiState(dependencies.applicationService.state(task.id).value);
+    const serviceState = dependencies.applicationService.state(task.id);
+    const state = toApiState(serviceState.value);
     const contentReview = dependencies.applicationService.contentReview(task.id);
     const fieldCoverage = dependencies.applicationService.fieldCoverage(task.id);
-    const commands = dependencies.applicationService.requiresRecovery(task.id)
+    const executionProgress = dependencies.applicationService.progress(task.id).executionProgress;
+    const commands = state === "awaiting_challenge"
+      ? commandsForState(state)
+      : dependencies.applicationService.requiresRecovery(task.id)
       ? ["cancel", "resume"] as ApplicationTask["commands"]
       : commandsForState(state);
     if (state === "failed" && task.profileSyncStatus === "failed") commands.push("sync_profile");
@@ -43,7 +47,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       fact.scope === "application" && fact.taskId === task.id
     );
     const hasTaskAnswer = taskAnswers.length > 0;
-    if (hasTaskAnswer && !["review_locked", "cancelled", "failed"].includes(state)) {
+    if (hasTaskAnswer && !["awaiting_challenge", "review_locked", "cancelled", "failed"].includes(state)) {
       commands.push("promote_answer_to_profile");
     }
     if (contentReview?.status === "blocked" || (contentReview?.unsupportedClaims.length ?? 0) > 0) {
@@ -57,7 +61,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       state,
       commands,
       recoveryCommands: dependencies.applicationService.recoveryCommands(task.id),
-      questions: dependencies.applicationService.state(task.id).context.questions,
+      questions: serviceState.context.questions,
       taskAnswers: taskAnswers.map((answer) => ({
         id: answer.id,
         fieldPath: answer.fieldPath,
@@ -67,6 +71,8 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       profileSyncStatus: task.profileSyncStatus,
       ...(task.profileSyncError === undefined ? {} : { profileSyncError: task.profileSyncError }),
       ...(fieldCoverage === undefined ? {} : { fieldCoverage }),
+      ...(executionProgress === undefined ? {} : { executionProgress }),
+      ...(serviceState.context.challenge === undefined ? {} : { challenge: serviceState.context.challenge }),
       ...(contentReview === undefined ? {} : {
         contentReview: {
           id: contentReview.id,
@@ -297,6 +303,8 @@ function commandsForState(state: ApplicationTaskState): ApplicationTask["command
       return ["cancel", "open_browser", "answer_questions", "resume_with_profile"];
     case "awaiting_content_review":
       return ["cancel", "open_browser", "approve_content", "reject_content"];
+    case "awaiting_challenge":
+      return ["cancel", "resume_after_challenge"];
     case "filling":
     case "validating":
     case "navigating":
@@ -326,6 +334,9 @@ async function executeCommand(dependencies: ApplicationRouteDependencies, taskId
       if (service.state(taskId).value === "observing") {
         await service.runUntilPause(taskId);
       }
+      return;
+    case "resume_after_challenge":
+      await service.resumeAfterChallenge(taskId);
       return;
     case "resume_with_profile":
       await service.resumeWithProfile(taskId);
@@ -384,6 +395,7 @@ function toApiState(state: string): ApplicationTaskState {
     awaiting_login: "waiting_for_login",
     needs_questions: "needs_questions",
     awaiting_content_review: "awaiting_content_review",
+    awaiting_challenge: "awaiting_challenge",
     filling: "filling",
     validating: "validating",
     navigating: "navigating",

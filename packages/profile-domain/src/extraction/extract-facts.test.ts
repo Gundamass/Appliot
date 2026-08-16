@@ -53,6 +53,7 @@ describe("extractFacts", () => {
     expect(input.system).toContain("skills");
     expect(input.system).toContain("self-evaluation");
     expect(input.system).toContain("certificates");
+    expect(input.system).toContain("languages");
     expect(input.system).toContain("links");
     expect(input.system).toContain("job preferences");
     expect(input.system).toContain("Do not stop after extracting basic or education fields");
@@ -103,6 +104,14 @@ describe("extractFacts", () => {
     expect(system).toContain("awards[index].name");
     expect(system).toContain("awards[index].date");
     expect(system).toContain("campus[index].name");
+    expect(system).toContain("campus[index].startDate");
+    expect(system).toContain("campus[index].endDate");
+    expect(system).toContain("languages[index].name");
+    expect(system).toContain("languages[index].proficiency");
+    expect(system).toContain("languages[index].speakingListening");
+    expect(system).toContain("languages[index].readingWriting");
+    expect(system).toContain("language");
+    expect(system).toContain("Extract explicit campus practice date ranges into separate startDate and endDate facts");
     expect(system).toContain("publications[index].title");
   });
 

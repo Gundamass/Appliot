@@ -1,257 +1,122 @@
-# Task 3 Report: PDF Text Extraction with OCR Fallback
+# Task 3 Report: Worker IPC Activity Channel
 
 ## Status
 
-Implemented Task 3 in `E:\projects\简历投递助手\.worktrees\resume-assistant-foundation` with test-first development.
+Complete in the direct workspace. No worktree or Git commit was created, per user request.
 
-Implementation commit: `b45375e` (`feat: extract resume pdf with ocr fallback`).
+## Scope
 
-The new `@resume/profile-domain` package accepts PDF bytes and an injected `OcrEngine`, returns page-level extraction provenance, computes a stable SHA-256 fingerprint from the original bytes, and renders actual PNG page images only when PDF text extraction is empty.
+Implemented only Task 3 from `docs/superpowers/plans/2026-07-28-application-stability-observability-plan.md`:
 
-## RED
+- Added a validated `activity` branch to `WorkerResponseSchema`, based exclusively on the existing redacted `WorkerActivitySchema`.
+- Added an unsolicited IPC activity envelope with no `requestId`.
+- Added `BrowserWorkerClient.onActivity(listener)`, returning an unsubscribe function.
+- Added finite-code worker-disconnect notifications for the last active task.
+- Kept activity messages out of pending-request correlation and did not change command execution or submission safety.
 
-Command:
+## TDD Evidence
 
-```powershell
-corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
-```
+### RED
 
-Output:
+First added tests in the requested locations:
 
-```text
-Test Files  1 failed (1)
-Tests       no tests
-Error: Cannot find module './extract-pdf.js' imported from
-'.../packages/profile-domain/src/pdf/extract-pdf.test.ts'
-```
+- `apps/api/src/browser/worker-client.test.ts`: a Worker activity must reach subscribers while a snapshot request remains pending and later resolves normally.
+- `apps/browser-worker/src/ipc-server.test.ts`: the IPC server must forward a valid activity and reject a payload containing a typed value.
 
-Exit code: `1`.
-
-This was the expected missing-implementation failure. The test had already specified all required behavior:
-
-- pages retain their one-based PDF page numbers and input order;
-- non-empty PDF text is preserved as `pdf_text`, including a deliberately short text page;
-- only the empty page invokes injected OCR;
-- OCR receives a PNG with the standard eight-byte PNG signature, proving real page rendering rather than a placeholder;
-- duplicate byte sequences produce the same 64-character lowercase SHA-256 fingerprint.
-
-## GREEN
-
-Focused test command:
-
-```powershell
-corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
-```
-
-Final output:
+Observed expected failures:
 
 ```text
-Test Files  1 passed (1)
-Tests       2 passed (2)
-Exit code: 0
+client.onActivity is not a function
+(0 , createIpcServer) is not a function
 ```
 
-Package verification:
+### GREEN
 
-```powershell
-corepack pnpm --filter @resume/profile-domain typecheck
-corepack pnpm --filter @resume/profile-domain build
-```
+Implemented the smallest typed message split needed for those tests:
 
-Final output: both commands exited `0`.
+- `WorkerResponseSchema` now accepts `{ type: "activity", activity }` only when `activity` satisfies `WorkerActivitySchema`.
+- `createIpcServer()` provides an injectable IPC channel for direct server tests; `startIpcServer()` still binds production code to `process`.
+- Worker activities use `safeParse`; malformed data is not sent to the API process.
+- `BrowserWorkerClient.handleMessage()` parses activity envelopes before response envelopes and calls subscribers without reading or changing `pending`.
+- Child `disconnect` and `exit` emit one contract-defined `worker_disconnected` event when a task has been observed/opened/executed.
 
-Root verification:
+## Files Changed
 
-```powershell
-corepack pnpm test
-corepack pnpm typecheck
-corepack pnpm build
+- `packages/contracts/src/browser.ts`
+- `packages/contracts/src/browser.test.ts`
+- `apps/browser-worker/src/ipc-server.ts`
+- `apps/browser-worker/src/ipc-server.test.ts`
+- `apps/api/src/browser/worker-client.ts`
+- `apps/api/src/browser/worker-client.test.ts`
+- `apps/api/src/browser/fixtures/activity-worker.ts`
+
+## Verification
+
+```text
+corepack pnpm --filter @resume/api exec vitest run src/browser/worker-client.test.ts
+PASS: 1 file, 5 tests
+
+corepack pnpm --filter @resume/browser-worker exec vitest run src/ipc-server.test.ts
+PASS: 1 file, 1 test
+
+corepack pnpm --filter @resume/contracts exec vitest run src/browser.test.ts
+PASS: 1 file, 14 tests
+
+corepack pnpm --filter @resume/browser-worker test
+PASS: 5 files, 21 tests
+
+corepack pnpm --filter @resume/api typecheck
+PASS
+
+corepack pnpm --filter @resume/browser-worker typecheck
+PASS
+
+corepack pnpm --filter @resume/contracts typecheck
+PASS
+
 git diff --check
+PASS
 ```
 
-Final output:
+## Local Review Notes
 
-```text
-corepack pnpm test: 3 workspace test files passed, 19 tests passed total
-  @resume/contracts: 5 passed
-  @resume/profile-domain: 2 passed
-  @resume/api: 12 passed
-corepack pnpm typecheck: exit 0
-corepack pnpm build: exit 0
-git diff --check: exit 0
-```
-
-## Implementation
-
-- `packages/profile-domain/src/pdf/types.ts` defines `ExtractedPage`, `ExtractedDocument`, and the injected `OcrEngine` contract.
-- `extractPdf` loads PDFs through Node-targeted `pdfjs-dist/legacy`, reads page text in ascending page order, and routes only empty text pages to OCR.
-- `ocr.ts` uses `@napi-rs/canvas` at 2x scale to render those fallback pages to PNG before calling OCR. The rendering dependency is isolated in the profile-domain package; no browser-facing package imports Node PDF worker or canvas behavior.
-- PDF.js receives the native resolved `standard_fonts` path so the Unicode Windows worktree can render without font warnings. The path is normalized to PDF.js's required trailing forward slash.
-- The test fixture helper uses pinned `pdf-lib@1.17.1` to generate deterministic multi-page PDFs without checked-in binary fixtures.
-- Pinned runtime dependencies are `pdfjs-dist@5.3.31` and `@napi-rs/canvas@0.1.70`; the lockfile was regenerated with Corepack pnpm 10.13.1.
-
-## Files
-
-- `package.json`
-- `pnpm-lock.yaml`
-- `packages/profile-domain/package.json`
-- `packages/profile-domain/src/pdf/types.ts`
-- `packages/profile-domain/src/pdf/extract-pdf.ts`
-- `packages/profile-domain/src/pdf/ocr.ts`
-- `packages/profile-domain/src/pdf/extract-pdf.test.ts`
-- `tests/fixtures/create-pdf.ts`
-
-## Self-Review
-
-Reviewed `b45375e` against the task brief and final diff.
-
-- No unnecessary OCR: fallback condition is `text.length === 0`; short but valid PDF text never invokes OCR.
-- Determinism: page loading/rendering and result assembly are sequential from page 1 through `numPages`; fingerprint hashes the untouched original bytes.
-- Rendering: the OCR test verifies a real PNG byte signature generated from the empty PDF page.
-- Boundaries: model extraction, HTTP APIs, RAG, browser automation, and a concrete Tesseract worker implementation remain out of scope.
-- Scope: only the requested domain, test fixture, root test-only dependency, and lockfile changed.
+- Activity payloads are Zod-validated at both Worker emission and API receipt boundaries.
+- Rejected activity payloads cannot contain values, credentials, CAPTCHA data, raw labels, selectors, coordinates, or scripts because all activity variants are strict contract objects.
+- Valid activity events cannot resolve, reject, clear, or otherwise mutate a pending request correlation.
+- No API coordinator, recovery handling, UI behavior, action policy, command shape, or terminal-submit behavior was modified.
 
 ## Concerns
 
-- OCR language-model execution is intentionally not implemented here; callers supply an `OcrEngine` in a later composition layer.
-- `@napi-rs/canvas` is a native optional-platform dependency used only by the Node profile-domain renderer. It installed and rendered successfully on the current Windows environment.
-- `pnpm install` emitted the pre-existing non-fatal `prebuild-install@7.1.3` deprecation warning. It did not affect test, typecheck, or build results.
+- Independent task review is still pending. Task 4 remains responsible for consuming these subscriptions in the application progress coordinator.
 
 ## Review Fixes
 
-### Findings Verified
-
-All four Important findings were reproduced against commit `b45375e` before changing production code:
-
-- The parser received a defensive copy, but the fingerprint was calculated from caller-owned bytes after OCR awaited. Mutating those bytes in `recognize` produced a fingerprint different from the parsed document snapshot.
-- Any non-empty string was treated as usable PDF text; there was no visible-evidence predicate for controls, format characters, or separator-only text.
-- `PDFPageProxy.cleanup()` was never called when OCR rejected; an observed real proxy-prototype spy reported zero cleanup calls.
-- The original fallback fixture was a blank vector PDF page and asserted only the PNG signature.
-
-The stated Minor `hasEOL` finding was technically valid and fixed. `TextItem.hasEOL` boundaries are preserved as `\n`, with a regression test for two lines. The other Minor disposition is that no separately actionable second Minor finding was included in the review material supplied for this fix; no unrelated architecture or scope change was made.
-
 ### RED
 
-Command:
+Added focused API client regressions in `apps/api/src/browser/worker-client.test.ts` and a forged `requestId`-bound activity fixture:
 
-```powershell
-corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
-```
-
-Output summary:
+- A forged `{ requestId, response: { type: "activity" } }` must not resolve the pending `observe()` request.
+- A throwing activity listener must not prevent the next listener from receiving the valid activity or leak an unhandled process error.
 
 ```text
-Test Files  1 failed (1)
-Tests       4 failed | 3 passed (7)
-Exit code: 1
+corepack pnpm --filter @resume/api exec vitest run src/browser/worker-client.test.ts
+FAIL: 3 tests failed
+- observe() rejected with "浏览器 Worker 返回了意外响应：activity"
+- listener failure surfaced as an unhandled exception
 ```
-
-Expected failures were:
-
-- snapshot race: SHA-256 of caller bytes mutated during OCR differed from the original snapshot hash;
-- `hasUsablePdfText` was missing for invisible-only text;
-- line breaks were collapsed to spaces;
-- observed `PDFPageProxy.cleanup` calls were `0` after an OCR error.
-
-An earlier fixture-mechanics RED run additionally confirmed these same production failures after correcting the assembled page order and obtaining a real PDF.js page prototype for cleanup observation.
 
 ### GREEN
 
-Focused commands:
-
-```powershell
-corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
-corepack pnpm --filter @resume/profile-domain typecheck
-corepack pnpm --filter @resume/profile-domain build
-```
-
-Output:
+- The API client now explicitly discards any request-bound activity envelope before normal response correlation, so activity remains request-ID-free and cannot mutate `pending` state.
+- Each activity listener is isolated with a local error boundary, so a failing observer cannot interrupt IPC handling or other observers.
 
 ```text
-extract-pdf.test.ts: 1 test file passed, 7 tests passed, exit 0
-profile-domain typecheck: exit 0
-profile-domain build: exit 0
-```
+corepack pnpm --filter @resume/api exec vitest run src/browser/worker-client.test.ts
+PASS: 1 file, 6 tests
 
-Covering verification commands:
+corepack pnpm --filter @resume/api typecheck
+PASS
 
-```powershell
-corepack pnpm test
-corepack pnpm typecheck
-corepack pnpm build
 git diff --check
+PASS
 ```
-
-Output:
-
-```text
-root test: 3 test files passed, 24 tests passed total
-  @resume/contracts: 5 passed
-  @resume/profile-domain: 7 passed
-  @resume/api: 12 passed
-root typecheck: exit 0
-root build: exit 0
-git diff --check: exit 0
-```
-
-### Test Files
-
-- `packages/profile-domain/src/pdf/extract-pdf.test.ts`
-- `tests/fixtures/create-pdf.ts`
-
-### Changes
-
-- `extractPdf` now takes one `Uint8Array` snapshot and hashes it before asynchronous parsing or OCR; PDF.js receives that same snapshot.
-- `hasUsablePdfText` removes whitespace, Unicode controls, format characters, and separators before deciding whether OCR is required. It has no arbitrary minimum character count.
-- Every acquired PDF page is released with `page.cleanup()` in a per-page `finally`; `loadingTask.destroy()` remains the top-level cleanup.
-- The generated OCR fixture embeds a deterministic scanned-style raster page with visible dark and red marks. The test decodes the OCR PNG, asserts its rendered 612x792 dimensions, and asserts non-white content pixels.
-- `textFromPage` preserves PDF.js `hasEOL` line boundaries while retaining deterministic item order.
-- OCR error and malformed-PDF propagation are covered. The malformed-PDF case causes PDF.js's expected `Warning: Indexing all PDF objects` recovery diagnostic but rejects as asserted.
-
-## Re-Review Fixes
-
-### RED
-
-Command:
-
-```powershell
-corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
-```
-
-Output:
-
-```text
-Test Files  1 failed (1)
-Tests       1 failed | 6 passed (7)
-Exit code: 1
-```
-
-The failure was expected: `hasUsablePdfText("\\u0000\\u200B\\u200C\\u200D\\u2060\\uFE0F\\uFEFF")` returned `true` because standalone variation selector U+FE0F is Unicode category `Mn` and was not removed. The same test specified that `A\\u0301` must remain usable, proving no arbitrary text-length threshold.
-
-The OCR rendering test was also upgraded before the RED run. It decodes the OCR PNG and requires more than 1,000 fully opaque dark pixels plus more than 100 fully opaque red-mark pixels. Those assertions passed with the existing deterministic scanned fixture and reject transparent/blank output that the earlier alpha-blind RGB check could accept.
-
-### GREEN
-
-Commands:
-
-```powershell
-corepack pnpm --filter @resume/profile-domain test -- extract-pdf.test.ts
-corepack pnpm --filter @resume/profile-domain typecheck
-corepack pnpm --filter @resume/profile-domain build
-git diff --check
-```
-
-Output:
-
-```text
-extract-pdf.test.ts: 1 test file passed, 7 tests passed, exit 0
-profile-domain typecheck: exit 0
-profile-domain build: exit 0
-git diff --check: exit 0
-```
-
-### Changes and Minor Disposition
-
-- `hasUsablePdfText` now also removes Unicode marks (`\p{M}`) for visibility evaluation, so mark-only strings fall back to OCR while base characters with combining marks remain usable.
-- The deterministic scanned-fixture assertion is alpha-aware and tied to its actual dark/resume-line and red/footer mark colors.
-- Encrypted/password-PDF propagation remains deferred Minor: existing `pdf-lib@1.17.1` can detect/read encrypted input but does not create a password-encrypted PDF, and adding encryption tooling or a binary fixture would expand scope/dependencies. The extractor already propagates PDF.js loading errors; a deterministic encrypted fixture belongs in a later dedicated ingestion-fixture task.

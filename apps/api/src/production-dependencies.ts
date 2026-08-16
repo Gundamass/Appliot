@@ -2,10 +2,12 @@ import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ActionPolicy } from "@resume/action-policy";
+import { djiJobAdapter, jobExpectationSnapshot, mokaJobAdapter } from "@resume/job-matching";
 import {
   DeepSeekStructuredModelProvider,
   EMBEDDING_INSTRUCTION_VERSION,
-  RemoteEmbeddingProvider
+  RemoteEmbeddingProvider,
+  ScheduledEmbeddingProvider
 } from "@resume/model-provider";
 import { RemoteOcrEngine } from "@resume/profile-domain/src/pdf/remote-ocr-engine.js";
 import {
@@ -18,12 +20,14 @@ import { createCheckpointRepository } from "./applications/checkpoint-repository
 import {
   createFieldSemanticResolver
 } from "./applications/field-semantic-resolver.js";
+import { FieldOntologyIndex } from "./applications/field-ontology-index.js";
 import {
   createProductionFieldResolver,
   fieldPathForApplicationAnswer
 } from "./applications/production-field-resolver.js";
 import { createTaskEventBus } from "./applications/task-events.js";
 import { BrowserWorkerClient } from "./browser/worker-client.js";
+import { BrowserOwnershipLease } from "./browser/browser-ownership-lease.js";
 import { createFactEmbeddingSearch } from "./rag/fact-embedding-search.js";
 import { type AdapterHealthRegistry, type AppDependencies } from "./app.js";
 import type { ApiConfig } from "./config.js";
@@ -35,19 +39,35 @@ import { createDocumentRepository } from "./profile/document-repository.js";
 import { createProductionExtraction } from "./profile/production-extraction.js";
 import { createProfileRepository } from "./profile/profile-repository.js";
 import { createAdapterHealthRegistry, ObservedStructuredModelProvider } from "./health/adapter-health.js";
+import { BoundedEmbeddingTraceBuffer } from "./observability/embedding-trace.js";
+import { createExtractionCoordinator } from "./job-matching/extraction-coordinator.js";
+import { createJobMatchRepository, type JobMatchRepository } from "./job-matching/job-match-repository.js";
+import { createJobMatchService } from "./job-matching/job-match-service.js";
+import { createMatchCoordinator } from "./job-matching/match-coordinator.js";
+import { BoundedJobMatchTraceBuffer } from "./observability/job-match-trace.js";
+
+type ProductionBrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
+  & Partial<Pick<BrowserWorkerClient,
+    "invalidateExecution" | "releaseTask" | "onActivity" | "observeJob" | "applyJobFilters" | "advanceJobPage">>;
 
 export interface ProductionAdapterDependencies {
   fetch?: typeof globalThis.fetch;
-  browserClient?: Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
-    & Partial<Pick<BrowserWorkerClient, "invalidateExecution" | "releaseTask" | "onActivity">>;
-  browserClientFactory?: () => Promise<Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
-    & Partial<Pick<BrowserWorkerClient, "invalidateExecution" | "releaseTask" | "onActivity">>>;
+  browserClient?: ProductionBrowserClient;
+  browserClientFactory?: () => Promise<ProductionBrowserClient>;
+}
+
+export interface ProductionDependencies extends AppDependencies {
+  embeddingTrace: BoundedEmbeddingTraceBuffer;
+  jobMatchRepository: JobMatchRepository;
+  jobMatchService: ReturnType<typeof createJobMatchService>;
+  jobMatchTrace: BoundedJobMatchTraceBuffer;
+  browserOwnershipLease: BrowserOwnershipLease;
 }
 
 export function createProductionDependencies(
   config: ApiConfig,
   adapters: ProductionAdapterDependencies = {}
-): AppDependencies {
+): ProductionDependencies {
   const database = createSqliteDatabase(config.databaseFile);
   let closed = false;
   let shuttingDown = false;
@@ -64,8 +84,7 @@ export function createProductionDependencies(
     const originalsDirectory = resolve(dirname(resolve(config.databaseFile)), "originals");
     const approvalKey = randomBytes(32);
     const actionPolicy = new ActionPolicy(approvalKey);
-    type BrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
-      & Partial<Pick<BrowserWorkerClient, "invalidateExecution" | "releaseTask" | "onActivity">>;
+    type BrowserClient = ProductionBrowserClient;
     const bundledWorkerEntry = new URL(import.meta.url).pathname.endsWith("/dist/server.js")
       ? fileURLToPath(new URL("./browser-worker.js", import.meta.url))
       : undefined;
@@ -144,12 +163,42 @@ export function createProductionDependencies(
     const ocrEngine = config.ocr === undefined
       ? undefined
       : new RemoteOcrEngine(config.ocr, adapters);
-    const embeddingProvider = config.embedding === undefined
+    const embeddingTrace = new BoundedEmbeddingTraceBuffer();
+    const remoteEmbeddingProvider = config.embedding === undefined
       ? undefined
       : new RemoteEmbeddingProvider(config.embedding, adapters);
+    const embeddingProvider = remoteEmbeddingProvider === undefined
+      ? undefined
+      : new ScheduledEmbeddingProvider(remoteEmbeddingProvider, {
+          maxBatchSize: 32,
+          maxConcurrency: 1,
+          onEvent(event) {
+            embeddingTrace.record({
+              operation: event.kind,
+              batchSize: event.batchSize,
+              queueWaitMs: event.queueWaitMs,
+              ...(event.errorKind === undefined ? {} : { providerErrorKind: event.errorKind }),
+              deepSeekUsed: false,
+              result: event.result
+            });
+          }
+        });
+    const embeddingIdentity = config.embedding === undefined
+      ? undefined
+      : {
+          model: config.embedding.model,
+          modelRevision: config.embedding.modelRevision,
+          instructionVersion: EMBEDDING_INSTRUCTION_VERSION
+        };
+    const ontologyIndex = embeddingProvider === undefined
+      ? undefined
+      : new FieldOntologyIndex(embeddingProvider, embeddingTrace);
     const fieldSemanticResolver = createFieldSemanticResolver({
-      ...(embeddingProvider === undefined ? {} : { embeddingProvider }),
-      ...(structuredProvider === undefined ? {} : { structuredProvider })
+      ...(embeddingProvider === undefined || ontologyIndex === undefined || embeddingIdentity === undefined
+        ? {}
+        : { embeddingProvider, ontologyIndex, embeddingIdentity }),
+      ...(structuredProvider === undefined ? {} : { structuredProvider }),
+      traceSink: embeddingTrace
     });
     const embeddingSearch = embeddingProvider === undefined
       ? undefined
@@ -159,7 +208,7 @@ export function createProductionDependencies(
         dimensions: config.embedding!.dimensions,
         normalization: "l2",
         instructionVersion: EMBEDDING_INSTRUCTION_VERSION
-      });
+      }, embeddingTrace);
     const extraction = createProductionExtraction({
       ...(structuredProvider === undefined ? {} : { structuredProvider }),
       ...(ocrEngine === undefined ? {} : { ocrEngine })
@@ -175,22 +224,36 @@ export function createProductionDependencies(
     });
     const taskEvents = createTaskEventBus(database);
     const taskRepository = createApplicationTaskRepository(database);
+    const browserOwnershipLease = new BrowserOwnershipLease();
+    const openBrowser = async (taskId: string, url: string) => {
+      const client = await getBrowserClient();
+      const firstOpenAttempt = !tasksWithOpenAttempt.has(taskId);
+      tasksWithOpenAttempt.add(taskId);
+      try {
+        return await client.open(taskId, url);
+      } catch (error) {
+        if (!firstOpenAttempt) throw error;
+        return (await recycleBrowserClient(client)).open(taskId, url);
+      }
+    };
+    const releaseBrowserTask = async (taskId: string): Promise<void> => {
+      const client = await getBrowserClient();
+      try {
+        await client.releaseTask?.(taskId);
+      } catch {
+        await recycleBrowserClient(client);
+      }
+      tasksWithOpenAttempt.delete(taskId);
+    };
     const applicationService = createApplicationService({
       checkpoints: createCheckpointRepository(database),
       taskRepository,
       profileRevision: () => profileRepository.currentRevision(),
       taskEvents,
+      browserOwnershipLease,
       browser: {
         async open(taskId, url) {
-          const client = await getBrowserClient();
-          const firstOpenAttempt = !tasksWithOpenAttempt.has(taskId);
-          tasksWithOpenAttempt.add(taskId);
-          try {
-            return await client.open(taskId, url);
-          } catch (error) {
-            if (!firstOpenAttempt) throw error;
-            return (await recycleBrowserClient(client)).open(taskId, url);
-          }
+          return openBrowser(taskId, url);
         },
         async observe(taskId) {
           return (await (await getBrowserClient()).observe(taskId)).snapshot;
@@ -202,13 +265,7 @@ export function createProductionDependencies(
           await (await getBrowserClient()).invalidateExecution?.(taskId, executionEpoch);
         },
         async releaseTask(taskId) {
-          const client = await getBrowserClient();
-          try {
-            await client.releaseTask?.(taskId);
-          } catch {
-            await recycleBrowserClient(client);
-          }
-          tasksWithOpenAttempt.delete(taskId);
+          await releaseBrowserTask(taskId);
         },
         onActivity(listener) {
           activityListeners.set(listener, resolvedBrowserClient?.onActivity?.(listener) ?? noop);
@@ -254,9 +311,65 @@ export function createProductionDependencies(
           : undefined;
       }
     });
+    const jobMatchRepository = createJobMatchRepository(database);
+    const jobMatchTrace = new BoundedJobMatchTraceBuffer();
+    const jobAdapters = [mokaJobAdapter, djiJobAdapter] as const;
+    const jobBrowser = {
+      open: openBrowser,
+      async observeJob(ownerId: string) {
+        const client = await getBrowserClient();
+        if (client.observeJob === undefined) throw new Error("job_browser_observe_unavailable");
+        return client.observeJob(ownerId);
+      },
+      async applyJobFilters(ownerId: string, plan: Parameters<BrowserWorkerClient["applyJobFilters"]>[1], executionEpoch: number) {
+        const client = await getBrowserClient();
+        if (client.applyJobFilters === undefined) throw new Error("job_browser_filter_unavailable");
+        return client.applyJobFilters(ownerId, plan, executionEpoch);
+      },
+      async advanceJobPage(ownerId: string, cursor: string | undefined, executionEpoch: number) {
+        const client = await getBrowserClient();
+        if (client.advanceJobPage === undefined) throw new Error("job_browser_pagination_unavailable");
+        return client.advanceJobPage(ownerId, cursor, executionEpoch);
+      },
+      async invalidateExecution(ownerId: string, executionEpoch: number) {
+        await (await getBrowserClient()).invalidateExecution?.(ownerId, executionEpoch);
+      },
+      releaseTask: releaseBrowserTask
+    };
+    const extractionCoordinator = createExtractionCoordinator({
+      repository: jobMatchRepository,
+      browser: jobBrowser,
+      adapters: jobAdapters
+    });
+    const matchCoordinator = createMatchCoordinator({
+      repository: jobMatchRepository,
+      profileFacts: profileRepository,
+      ...(embeddingSearch === undefined ? {} : { embeddingSearch })
+    });
+    const jobMatchService = createJobMatchService({
+      repository: jobMatchRepository,
+      applicationTasks: taskRepository,
+      browser: jobBrowser,
+      browserOwnershipLease,
+      adapters: jobAdapters,
+      expectationSnapshot: () => jobExpectationSnapshot(
+        profileRepository.listActive(),
+        profileRepository.currentRevision(),
+        new Date().toISOString()
+      ),
+      profileRevision: () => profileRepository.currentRevision(),
+      extraction: extractionCoordinator,
+      matcher: matchCoordinator,
+      trace: jobMatchTrace,
+      prepareApplicationTask: (input) => applicationService.start(input)
+    });
 
     return {
       database,
+      embeddingTrace,
+      jobMatchRepository,
+      jobMatchService,
+      jobMatchTrace,
       profileRepository,
       originalDocumentStore: createLocalOriginalDocumentStore(originalsDirectory),
       avatarStore: createLocalAvatarStore(originalsDirectory),
@@ -264,6 +377,7 @@ export function createProductionDependencies(
       ...(structuredProvider === undefined ? {} : { selfEvaluationModelProvider: structuredProvider }),
       ...(embeddingSearch === undefined ? {} : { embeddingSearch }),
       applicationService,
+      browserOwnershipLease,
       taskEvents,
       onProfileUpdated: () => applicationService.refreshFromProfile(),
       adapterHealth,

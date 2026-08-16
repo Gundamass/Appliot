@@ -1,5 +1,5 @@
 import { assign, setup, type ActorRefFrom } from "xstate";
-import type { ApplicationQuestion } from "@resume/contracts";
+import type { ApplicationQuestion, ChallengeDiagnostic } from "@resume/contracts";
 
 export type ApplicationStateValue =
   | "created"
@@ -7,6 +7,7 @@ export type ApplicationStateValue =
   | "awaiting_login"
   | "needs_questions"
   | "awaiting_content_review"
+  | "awaiting_challenge"
   | "filling"
   | "validating"
   | "navigating"
@@ -19,6 +20,7 @@ export interface ApplicationContext {
   applicationUrl: string;
   questions: ApplicationQuestion[];
   errors: string[];
+  challenge?: ChallengeDiagnostic | undefined;
 }
 
 export type ApplicationEvent =
@@ -37,6 +39,8 @@ export type ApplicationEvent =
   | { type: "ANSWERS_PROVIDED" }
   | { type: "CONTENT_APPROVED" }
   | { type: "CONTENT_REJECTED" }
+  | { type: "CHALLENGE_DETECTED"; challenge: ChallengeDiagnostic }
+  | { type: "USER_RESUME_CHALLENGE" }
   | { type: "CANCEL" }
   | { type: "RECOVER" }
   | { type: "RETRY" }
@@ -54,7 +58,10 @@ export const applicationMachine = setup({
     clearQuestions: assign({ questions: [] }),
     storeErrors: assign({ errors: ({ event }) =>
       "errors" in event ? event.errors : [] }),
-    clearErrors: assign({ errors: [] })
+    clearErrors: assign({ errors: [] }),
+    storeChallenge: assign({ challenge: ({ event }) =>
+      event.type === "CHALLENGE_DETECTED" ? event.challenge : undefined }),
+    clearChallenge: assign({ challenge: undefined })
   }
 }).createMachine({
   id: "resume-application",
@@ -75,7 +82,8 @@ export const applicationMachine = setup({
         READY_TO_FILL: { target: "filling", actions: ["clearQuestions", "clearErrors"] },
         REVIEW_REACHED: "review_locked",
         FAIL: { target: "failed", actions: "storeErrors" },
-        RECOVER: { target: "observing", actions: "clearErrors" }
+        RECOVER: { target: "observing", actions: "clearErrors" },
+        CHALLENGE_DETECTED: { target: "awaiting_challenge", actions: "storeChallenge" }
       }
     },
     awaiting_login: { on: { RESUME: "observing" } },
@@ -98,7 +106,8 @@ export const applicationMachine = setup({
         CONTENT_REVIEW_REQUIRED: "awaiting_content_review",
         REVIEW_REACHED: "review_locked",
         FAIL: { target: "failed", actions: "storeErrors" },
-        RECOVER: { target: "observing", actions: "clearErrors" }
+        RECOVER: { target: "observing", actions: "clearErrors" },
+        CHALLENGE_DETECTED: { target: "awaiting_challenge", actions: "storeChallenge" }
       }
     },
     validating: {
@@ -107,7 +116,8 @@ export const applicationMachine = setup({
         PAGE_INVALID: { target: "needs_questions", actions: "storeErrors" },
         REVIEW_REACHED: "review_locked",
         FAIL: { target: "failed", actions: "storeErrors" },
-        RECOVER: { target: "observing", actions: "clearErrors" }
+        RECOVER: { target: "observing", actions: "clearErrors" },
+        CHALLENGE_DETECTED: { target: "awaiting_challenge", actions: "storeChallenge" }
       }
     },
     navigating: {
@@ -115,7 +125,16 @@ export const applicationMachine = setup({
         PAGE_NAVIGATED: "observing",
         REVIEW_REACHED: "review_locked",
         FAIL: { target: "failed", actions: "storeErrors" },
-        RECOVER: { target: "observing", actions: "clearErrors" }
+        RECOVER: { target: "observing", actions: "clearErrors" },
+        CHALLENGE_DETECTED: { target: "awaiting_challenge", actions: "storeChallenge" }
+      }
+    },
+    awaiting_challenge: {
+      on: {
+        USER_RESUME_CHALLENGE: {
+          target: "observing",
+          actions: ["clearChallenge", "clearErrors"]
+        }
       }
     },
     review_locked: { on: { CANCEL: undefined } },

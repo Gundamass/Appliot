@@ -16,6 +16,73 @@ const structure: PageStructure = {
 };
 
 describe("page structural fingerprint", () => {
+  it("returns a main-document rate-limit challenge without waiting for form controls", async () => {
+    const server = createServer((_request, response) => {
+      response.statusCode = 429;
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end("<!doctype html><title>Rate limited</title><main></main>");
+    });
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-observer-rate-limit-"));
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no port");
+      await session.start(Buffer.alloc(32, 1).toString("base64url"));
+      await session.open("task-rate-limit", `http://127.0.0.1:${address.port}/apply`);
+
+      const startedAt = Date.now();
+      const snapshot = await session.observe("task-rate-limit");
+
+      expect(Date.now() - startedAt).toBeLessThan(1_000);
+      expect(snapshot.fields).toEqual([]);
+      expect(snapshot.boundaries).toEqual([]);
+      expect(snapshot.challenge).toMatchObject({
+        kind: "rate_limited",
+        reasonCode: "main_document_http_429"
+      });
+    } finally {
+      await session.stop();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("keeps adjacent work and internship section context isolated", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Apply</title>
+        <section>
+          <h2>\u6b63\u5f0f\u5de5\u4f5c\u7ecf\u5386</h2>
+          <label for="employer">\u516c\u53f8\u540d\u79f0</label><input id="employer">
+        </section>
+        <section>
+          <h2>\u5b9e\u4e60\u7ecf\u5386</h2>
+          <label for="internship-company">\u5b9e\u4e60\u5355\u4f4d</label><input id="internship-company">
+        </section>`);
+    });
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-observer-sections-"));
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no port");
+      await session.start(Buffer.alloc(32, 1).toString("base64url"));
+      await session.open("task-sections", `http://127.0.0.1:${address.port}/apply`);
+
+      const snapshot = await session.observe("task-sections");
+
+      expect(snapshot.fields.map(({ label, sectionHint }) => ({ label, sectionHint }))).toEqual([
+        { label: "\u516c\u53f8\u540d\u79f0", sectionHint: "work" },
+        { label: "\u5b9e\u4e60\u5355\u4f4d", sectionHint: "internship" }
+      ]);
+    } finally {
+      await session.stop();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
   it("is stable for equivalent visible field and action metadata", () => {
     expect(fingerprintPageStructure(structure)).toBe(fingerprintPageStructure({ ...structure }));
   });
@@ -572,14 +639,7 @@ describe("page structural fingerprint", () => {
         <input id="readonly" readonly>
         <input id="aria-disabled" aria-disabled="true">
         <section inert><input id="inert"></section>
-        <section data-resume-internal><input id="internal"></section>
-        <script>
-          setTimeout(() => {
-            for (const id of ["visible", "hidden", "disabled", "readonly", "aria-disabled", "inert", "internal"]) {
-              document.getElementById(id).dispatchEvent(new Event("input", { bubbles: true }));
-            }
-          }, 750);
-        </script>`);
+        <section data-resume-internal><input id="internal"></section>`);
     });
     const profileDir = await mkdtemp(join(tmpdir(), "resume-activity-filter-"));
     const session = new BrowserSessionManager({ profileDir, headless: true });
@@ -592,8 +652,10 @@ describe("page structural fingerprint", () => {
       session.subscribeActivity((activity) => activities.push(activity));
       await session.open("task-1", `http://127.0.0.1:${address.port}/apply`);
       const snapshot = await session.observe("task-1");
-
-      await new Promise((resolve) => setTimeout(resolve, 1_000));
+      const page = (session as unknown as {
+        page: { locator(selector: string): { pressSequentially(value: string): Promise<void> } }
+      }).page;
+      await page.locator("#visible").pressSequentially("x");
 
       expect(snapshot.fields).toHaveLength(1);
       expect(activities.filter((activity) => activity.type === "user_activity")).toEqual([{
@@ -618,14 +680,7 @@ describe("page structural fingerprint", () => {
         <a id="link" href="#details">Job details</a>
         <button id="disabled" type="button" disabled>Disabled</button>
         <button id="hidden" type="button" style="display:none">Hidden</button>
-        <section data-resume-internal><button id="internal" type="button">Internal</button></section>
-        <script>
-          setTimeout(() => {
-            for (const id of ["visible", "link", "disabled", "hidden", "internal"]) {
-              document.getElementById(id).dispatchEvent(new MouseEvent("click", { bubbles: true }));
-            }
-          }, 250);
-        </script>`);
+        <section data-resume-internal><button id="internal" type="button">Internal</button></section>`);
     });
     const profileDir = await mkdtemp(join(tmpdir(), "resume-click-activity-"));
     const session = new BrowserSessionManager({ profileDir, headless: true });
@@ -637,7 +692,11 @@ describe("page structural fingerprint", () => {
       await session.start(Buffer.alloc(32, 1).toString("base64url"));
       session.subscribeActivity((activity) => activities.push(activity));
       await session.open("task-1", `http://127.0.0.1:${address.port}/apply`);
-      await new Promise((resolve) => setTimeout(resolve, 500));
+      const page = (session as unknown as {
+        page: { locator(selector: string): { click(): Promise<void> } }
+      }).page;
+      await page.locator("#visible").click();
+      await page.locator("#link").click();
 
       const clicks = activities.filter((activity): activity is Extract<WorkerActivity, { type: "user_activity" }> =>
         activity.type === "user_activity" && activity.activity === "click");
@@ -697,6 +756,51 @@ describe("page structural fingerprint", () => {
         })
       ]);
       expect(snapshot.actions.map((action) => action.text)).toEqual(["Continue"]);
+    } finally {
+      await session.stop();
+      await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));
+      await rm(profileDir, { recursive: true, force: true });
+    }
+  }, 30_000);
+
+  it("binds every observed field and action to one document epoch", async () => {
+    const server = createServer((_request, response) => {
+      response.setHeader("Content-Type", "text/html; charset=utf-8");
+      response.end(`<!doctype html><title>Apply</title>
+        <form>
+          <label for="name">Name</label>
+          <input id="name">
+          <button type="button">Continue</button>
+        </form>`);
+    });
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-observer-node-identity-"));
+    const session = new BrowserSessionManager({ profileDir, headless: true });
+    try {
+      await new Promise<void>((resolve) => server.listen(0, "127.0.0.1", resolve));
+      const address = server.address();
+      if (!address || typeof address === "string") throw new Error("test server has no port");
+      await session.start(Buffer.alloc(32, 1).toString("base64url"));
+      await session.open("task-node-identity", `http://127.0.0.1:${address.port}/apply`);
+
+      const snapshot = await session.observe("task-node-identity");
+
+      expect(snapshot.frameRef).toEqual({
+        documentId: expect.stringMatching(/^document-/u),
+        kind: "main"
+      });
+      expect(snapshot.mutationEpoch).toBeGreaterThanOrEqual(0);
+      expect([...snapshot.fields, ...snapshot.actions].map((target) => target.nodeRef)).toEqual([
+        expect.objectContaining({
+          documentId: snapshot.frameRef.documentId,
+          observedAt: snapshot.mutationEpoch,
+          nodeId: expect.stringMatching(/^node-/u)
+        }),
+        expect.objectContaining({
+          documentId: snapshot.frameRef.documentId,
+          observedAt: snapshot.mutationEpoch,
+          nodeId: expect.stringMatching(/^node-/u)
+        })
+      ]);
     } finally {
       await session.stop();
       await new Promise<void>((resolve, reject) => server.close((error) => error ? reject(error) : resolve()));

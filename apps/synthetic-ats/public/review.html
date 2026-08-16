@@ -12,7 +12,7 @@
       <button type="submit">立即申请</button>
       <button type="submit" aria-label="提交申请">确认</button>
     </form>
-    <iframe title="嵌套提交" srcdoc="&lt;form method='post' action='/submit?taskId={{TASK_ID}}'&gt;&lt;button type='submit'&gt;提交申请&lt;/button&gt;&lt;/form&gt;"></iframe>
+    <iframe hidden title="嵌套提交" srcdoc="&lt;form method='post' action='/submit?taskId={{TASK_ID}}'&gt;&lt;button type='submit'&gt;提交申请&lt;/button&gt;&lt;/form&gt;"></iframe>
     <dialog open><button type="submit" form="modal-submit">确认投递</button></dialog>
     <form id="modal-submit" method="post" action="/submit?taskId={{TASK_ID}}"></form>
   </main>

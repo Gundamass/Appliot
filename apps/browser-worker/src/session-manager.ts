@@ -1,10 +1,20 @@
 import { existsSync } from "node:fs";
 import { chromium, type BrowserContext, type Page } from "playwright-core";
-import type { WorkerActivity, WorkerResponse } from "@resume/contracts";
-import type { ExecutableCommand, FormSnapshot } from "@resume/contracts";
+import type {
+  ExecutableCommand,
+  FilterPlan,
+  FormSnapshot,
+  JobPageSnapshot,
+  WorkerActivity,
+  WorkerResponse
+} from "@resume/contracts";
 import { ActivityMonitor } from "./activity-monitor.js";
+import { ChallengeDetector } from "./challenge-detector.js";
+import { installDomRuntime } from "./dom-runtime.js";
 import { ControlledExecutor } from "./executor.js";
 import { BrowserObserver } from "./observer.js";
+import { JobObserver } from "./job-observer.js";
+import { BoundedRuntimeTraceBuffer } from "./runtime-trace.js";
 
 export interface BrowserSessionOptions {
   profileDir: string;
@@ -53,11 +63,14 @@ export class BrowserSessionManager {
   private approvalKey: string | undefined;
   private executor: ControlledExecutor | undefined;
   private activityMonitor: ActivityMonitor | undefined;
+  private challengeDetector: ChallengeDetector | undefined;
+  private jobObserver: JobObserver | undefined;
   private activeTaskId: string | undefined;
   private monitoredTaskId: string | undefined;
   private trustedOrigin: string | undefined;
   private readonly activityListeners = new Set<(activity: WorkerActivity) => void>();
   private executionEpochs = new Map<string, number>();
+  private readonly runtimeTrace = new BoundedRuntimeTraceBuffer();
   private readonly onPageOpened = (page: Page): void => {
     this.preferredPage = page;
   };
@@ -99,21 +112,56 @@ export class BrowserSessionManager {
     return this.executor.execute(command, () => this.executionEpochs.get(command.taskId) === executionEpoch);
   }
 
-  invalidateExecution(taskId: string, executionEpoch: number): void {
+  async invalidateExecution(taskId: string, executionEpoch: number): Promise<void> {
     const currentEpoch = this.executionEpochs.get(taskId) ?? 0;
     this.executionEpochs.set(taskId, Math.max(currentEpoch, executionEpoch));
+    await this.executor?.invalidate(taskId);
   }
 
-  releaseTask(taskId: string): void {
+  async observeJob(ownerId: string): Promise<JobPageSnapshot> {
+    await this.ensureActivePage();
+    if (!this.jobObserver) throw new Error("浏览器 Worker 尚未完成握手");
+    await this.monitorTask(ownerId);
+    return this.jobObserver.observe(ownerId);
+  }
+
+  async applyJobFilters(
+    ownerId: string,
+    plan: FilterPlan,
+    executionEpoch: number
+  ): Promise<JobPageSnapshot> {
+    await this.ensureActivePage();
+    if (!this.jobObserver) throw new Error("浏览器 Worker 尚未完成握手");
+    await this.authorizeJobMutation(ownerId, executionEpoch);
+    return this.jobObserver.applyFilters(ownerId, plan);
+  }
+
+  async advanceJobPage(
+    ownerId: string,
+    cursor: string | undefined,
+    executionEpoch: number
+  ): Promise<JobPageSnapshot> {
+    await this.ensureActivePage();
+    if (!this.jobObserver) throw new Error("浏览器 Worker 尚未完成握手");
+    await this.authorizeJobMutation(ownerId, executionEpoch);
+    return this.jobObserver.advance(ownerId, cursor);
+  }
+
+  async releaseTask(taskId: string): Promise<void> {
     this.executionEpochs.delete(taskId);
     if (this.activeTaskId !== taskId) return;
+    const executor = this.executor;
     this.activityMonitor?.stop();
     this.activityMonitor = undefined;
+    this.challengeDetector?.dispose();
+    this.challengeDetector = undefined;
+    this.jobObserver = undefined;
     this.executor = undefined;
     this.activeTaskId = undefined;
     this.monitoredTaskId = undefined;
     this.trustedOrigin = undefined;
     this.preferredPage = undefined;
+    await executor?.release();
   }
 
   async open(taskId: string, value: string): Promise<Extract<WorkerResponse, { type: "opened" }>> {
@@ -141,6 +189,7 @@ export class BrowserSessionManager {
 
   async stop(): Promise<void> {
     const context = this.context;
+    const executor = this.executor;
     context?.off("page", this.onPageOpened);
     this.context = undefined;
     this.page = undefined;
@@ -153,7 +202,11 @@ export class BrowserSessionManager {
     this.executionEpochs.clear();
     this.activityMonitor?.stop();
     this.activityMonitor = undefined;
+    this.challengeDetector?.dispose();
+    this.challengeDetector = undefined;
+    this.jobObserver = undefined;
     this.activityListeners.clear();
+    await executor?.release();
     await context?.close();
   }
 
@@ -186,11 +239,19 @@ export class BrowserSessionManager {
 
   private async bindPage(page: Page): Promise<void> {
     if (!this.approvalKey) throw new Error("浏览器 Worker 尚未完成握手");
+    const previousExecutor = this.executor;
     this.activityMonitor?.stop();
+    this.challengeDetector?.dispose();
     this.monitoredTaskId = undefined;
     this.page = page;
     this.trustedOrigin = pageOrigin(page.url()) ?? this.trustedOrigin;
-    const observer = new BrowserObserver(page);
+    await previousExecutor?.release();
+    await installDomRuntime(page);
+    const challengeDetector = new ChallengeDetector();
+    challengeDetector.start(page);
+    this.challengeDetector = challengeDetector;
+    const observer = new BrowserObserver(page, challengeDetector);
+    this.jobObserver = new JobObserver(page, challengeDetector);
     const activityMonitor = new ActivityMonitor(page, { readStructure: () => observer.observeStructure() });
     activityMonitor.subscribe((activity) => {
       for (const listener of this.activityListeners) {
@@ -206,7 +267,8 @@ export class BrowserSessionManager {
       observer,
       Buffer.from(this.approvalKey, "base64url"),
       this.options.fileResolver,
-      activityMonitor
+      activityMonitor,
+      this.runtimeTrace
     );
     if (this.activeTaskId) {
       await this.monitorTask(this.activeTaskId);
@@ -219,6 +281,13 @@ export class BrowserSessionManager {
     if (!this.activityMonitor) throw new Error("浏览器 Worker 尚未完成握手");
     await this.activityMonitor.start(taskId);
     this.monitoredTaskId = taskId;
+  }
+
+  private async authorizeJobMutation(ownerId: string, executionEpoch: number): Promise<void> {
+    await this.monitorTask(ownerId);
+    const currentEpoch = this.executionEpochs.get(ownerId) ?? 0;
+    if (executionEpoch < currentEpoch) throw new Error("execution_invalidated");
+    this.executionEpochs.set(ownerId, executionEpoch);
   }
 }
 

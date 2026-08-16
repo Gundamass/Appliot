@@ -3,14 +3,69 @@ import {
   ApplicationActivitySchema,
   ApplicationCommandSchema,
   ApplicationContentReviewSchema,
+  ApplicationExecutionProgressSchema,
   ApplicationTaskEventSchema,
   ApplicationTaskHistoryResetSchema,
-  ApplicationTaskSchema
+  ApplicationTaskSchema,
+  ApplicationTaskStateSchema
 } from "./application.js";
 
 const taskId = "91dc4bd6-425a-4cab-a38d-d13e33cda771";
 
 describe("application contracts", () => {
+  it("parses the persistent challenge pause and explicit resume command", () => {
+    expect(ApplicationTaskStateSchema.parse("awaiting_challenge")).toBe("awaiting_challenge");
+    expect(ApplicationCommandSchema.parse({ type: "resume_after_challenge" }))
+      .toEqual({ type: "resume_after_challenge" });
+  });
+
+  it("projects a sanitized challenge diagnostic on application tasks", () => {
+    const challenge = {
+      kind: "captcha",
+      detectedAt: "2026-08-15T00:00:00.000Z",
+      reasonCode: "moka_captcha_accessible_name"
+    } as const;
+
+    expect(ApplicationTaskSchema.parse({
+      id: taskId,
+      applicationUrl: "https://jobs.example.test/apply",
+      state: "awaiting_challenge",
+      commands: ["cancel", "resume_after_challenge"],
+      challenge
+    }).challenge).toEqual(challenge);
+  });
+
+  it("accepts strict persisted autofill execution progress on tasks and events", () => {
+    const progress = {
+      currentPhase: "semantic_fill",
+      phases: [
+        { phase: "waiting_for_form", status: "completed" },
+        { phase: "deterministic_fill", status: "completed" },
+        { phase: "semantic_fill", status: "running" },
+        { phase: "readback_validation", status: "pending" },
+        { phase: "final_review", status: "pending" }
+      ],
+      current: { action: "正在选择：本科专业", fieldId: "major", attempt: 1, maxAttempts: 2 },
+      counts: { exact: 5, semantic: 1, user: 2, missing: 1, failed: 0 }
+    } as const;
+
+    expect(ApplicationExecutionProgressSchema.parse(progress)).toEqual(progress);
+    expect(ApplicationTaskSchema.parse({
+      id: taskId,
+      applicationUrl: "https://jobs.example.test/apply",
+      state: "filling",
+      commands: ["cancel"],
+      executionProgress: progress
+    }).executionProgress).toEqual(progress);
+    expect(ApplicationTaskEventSchema.parse({
+      id: "73",
+      taskId,
+      type: "execution_progress_changed",
+      createdAt: "2026-08-14T08:00:00.000Z",
+      executionProgress: progress
+    })).toMatchObject({ type: "execution_progress_changed", executionProgress: progress });
+  });
+
   it("exposes persisted profile synchronization state on application tasks", () => {
     const task = ApplicationTaskSchema.parse({
       id: "734b72a5-bb6b-4946-b5cc-cfe8419bd0eb",
@@ -36,7 +91,7 @@ describe("application contracts", () => {
       state: "needs_questions",
       commands: ["cancel", "answer_questions"],
       fieldCoverage: {
-        total: 2, ready: 0, review: 1, missing: 1, unsupported: 0, filled: 0,
+        total: 2, ready: 0, review: 1, missing: 1, unsupported: 0, filled: 0, failed: 0,
         fields: [{
           fieldId: "field-school", label: "毕业院校", semantic: "education[0].institution",
           status: "missing", source: "none", confidence: 0, reason: "档案中没有可验证的资料", evidence: []

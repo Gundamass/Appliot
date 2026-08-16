@@ -36,6 +36,28 @@ describe("FactEmbeddingSearch", () => {
     expect(indexRows(harness.database)).toMatchObject([{ status: "active", model_revision: "revision-1" }]);
   });
 
+  it("singleflights twenty concurrent first builds for the same fact and config key", async () => {
+    const harness = createHarness([confirmedFact("a", 1), confirmedFact("b", 1)]);
+    let releaseDocuments!: (vectors: number[][]) => void;
+    const documents = new Promise<number[][]>((resolve) => {
+      releaseDocuments = resolve;
+    });
+    harness.provider.embedDocuments.mockImplementation(() => documents);
+
+    const searches = Array.from({ length: 20 }, (_, index) =>
+      harness.service.search(searchInput(`query-${index}`)));
+
+    expect(harness.provider.embedDocuments).toHaveBeenCalledTimes(1);
+    expect(buildingIndexCount(harness.database)).toBe(1);
+
+    releaseDocuments([[1, 0], [0, 1]]);
+    const results = await Promise.all(searches);
+
+    expect(results).toHaveLength(20);
+    expect(indexRows(harness.database).filter((row) => row.status === "active")).toHaveLength(1);
+    expect(buildingIndexCount(harness.database)).toBe(0);
+  });
+
   it("re-embeds only a corrected fact in the active index", async () => {
     const harness = createHarness([confirmedFact("a", 1), confirmedFact("b", 1)]);
     await harness.service.search(searchInput("first"));
@@ -63,6 +85,51 @@ describe("FactEmbeddingSearch", () => {
 
     expect(activeIndexId(harness.database)).toBe(activeId);
     expect(indexRows(harness.database).filter((row) => row.status === "building")).toEqual([]);
+  });
+
+  it("shares a failed replacement, preserves the old active index, and retries on the next search", async () => {
+    const facts = Array.from({ length: 33 }, (_, index) => confirmedFact(`fact-${String(index).padStart(2, "0")}`, 1));
+    const harness = createHarness(facts);
+    await harness.service.search(searchInput("initial"));
+    const previousActiveId = activeIndexId(harness.database);
+
+    for (const fact of facts) {
+      harness.repository.correct(fact.id, `corrected-${fact.id}`, [userEvidence(`corrected-${fact.id}`)]);
+    }
+    harness.provider.embedDocuments.mockClear();
+    let releaseFirstBatch!: (vectors: number[][]) => void;
+    const firstBatch = new Promise<number[][]>((resolve) => {
+      releaseFirstBatch = resolve;
+    });
+    harness.provider.embedDocuments.mockImplementation((texts: string[]) => {
+      if (texts.length === 32) return firstBatch;
+      return Promise.reject(new Error("second batch offline"));
+    });
+
+    const searches = Array.from({ length: 20 }, (_, index) =>
+      harness.service.search(searchInput(`replacement-${index}`)));
+
+    expect(harness.provider.embedDocuments).toHaveBeenCalledTimes(1);
+    expect(buildingIndexCount(harness.database)).toBe(1);
+
+    releaseFirstBatch(Array.from({ length: 32 }, () => [1, 0]));
+    const outcomes = await Promise.allSettled(searches);
+
+    expect(outcomes.every((outcome) => outcome.status === "rejected"
+      && outcome.reason instanceof Error
+      && outcome.reason.message === "embedding search unavailable")).toBe(true);
+    expect(activeIndexId(harness.database)).toBe(previousActiveId);
+    expect(buildingIndexCount(harness.database)).toBe(0);
+
+    harness.provider.embedDocuments.mockClear();
+    harness.provider.embedDocuments.mockImplementation(async (texts: string[]) =>
+      texts.map(() => [1, 0]));
+
+    await harness.service.search(searchInput("retry"));
+
+    expect(harness.provider.embedDocuments).toHaveBeenCalledTimes(2);
+    expect(activeIndexId(harness.database)).not.toBe(previousActiveId);
+    expect(buildingIndexCount(harness.database)).toBe(0);
   });
 
   it("removes superseded and deleted facts while never indexing extracted-only facts", async () => {
@@ -210,4 +277,8 @@ function activeVectors(database: Database.Database): Array<{ fact_id: string; fa
 
 function indexRows(database: Database.Database): Array<{ id: string; status: string; model_revision: string }> {
   return database.prepare("SELECT id, status, model_revision FROM embedding_indexes ORDER BY created_at, id").all() as Array<{ id: string; status: string; model_revision: string }>;
+}
+
+function buildingIndexCount(database: Database.Database): number {
+  return (database.prepare("SELECT COUNT(*) AS count FROM embedding_indexes WHERE status = 'building'").get() as { count: number }).count;
 }

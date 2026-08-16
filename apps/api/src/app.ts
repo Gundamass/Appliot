@@ -20,6 +20,8 @@ import { registerApplicationRoutes } from "./applications/routes.js";
 import type { ApplicationService } from "./applications/application-service.js";
 import type { TaskEventBus } from "./applications/task-events.js";
 import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
+import { registerJobMatchRoutes } from "./job-matching/routes.js";
+import type { createJobMatchService } from "./job-matching/job-match-service.js";
 
 export type { AdapterHealthRegistry } from "./health/adapter-health.js";
 
@@ -37,6 +39,7 @@ export interface AppDependencies {
   embeddingSearch?: EmbeddingSearchPort;
   adapterHealth: AdapterHealthRegistry;
   applicationService?: ApplicationService;
+  jobMatchService?: ReturnType<typeof createJobMatchService>;
   taskEvents?: TaskEventBus;
   applicationSseHeartbeatMs?: number;
   close?(): void | Promise<void>;
@@ -87,6 +90,9 @@ export async function createApp(dependencies: CreateAppDependencies) {
         ? {}
         : { sseHeartbeatMs: dependencies.applicationSseHeartbeatMs })
     });
+  }
+  if (dependencies.jobMatchService) {
+    registerJobMatchRoutes(app, { service: dependencies.jobMatchService });
   }
   return app;
 }

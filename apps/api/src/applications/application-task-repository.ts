@@ -16,6 +16,7 @@ export type ProfileSyncStatus = "current" | "pending" | "failed";
 
 export interface ApplicationTaskRepository {
   create(input: { id: string; name?: string; applicationUrl: string }): StoredApplicationTask;
+  createFromJob(input: { id: string; name?: string; applicationUrl: string }): StoredApplicationTask;
   get(taskId: string): StoredApplicationTask | undefined;
   list(): StoredApplicationTask[];
   delete(taskId: string): void;
@@ -53,15 +54,30 @@ export function createApplicationTaskRepository(database: SqliteDatabase): Appli
     WHERE id = ?
   `);
 
+  const createTask = (input: { id: string; name?: string; applicationUrl: string }): StoredApplicationTask => {
+    const timestamp = new Date().toISOString();
+    const name = input.name ?? suggestApplicationTaskName(input.applicationUrl);
+    insert.run(input.id, name, input.applicationUrl, timestamp, timestamp);
+    return {
+      ...input, name, createdAt: timestamp, updatedAt: timestamp,
+      profileRevisionApplied: 0, profileSyncStatus: "current"
+    };
+  };
+
   return {
     create(input) {
-      const timestamp = new Date().toISOString();
-      const name = input.name ?? suggestApplicationTaskName(input.applicationUrl);
-      insert.run(input.id, name, input.applicationUrl, timestamp, timestamp);
-      return {
-        ...input, name, createdAt: timestamp, updatedAt: timestamp,
-        profileRevisionApplied: 0, profileSyncStatus: "current"
-      };
+      return createTask(input);
+    },
+    createFromJob(input) {
+      const row = find.get(input.id) as TaskRow | undefined;
+      if (row !== undefined) {
+        const existing = fromRow(row);
+        if (existing.applicationUrl !== input.applicationUrl) {
+          throw new Error("application_task_idempotency_conflict");
+        }
+        return existing;
+      }
+      return createTask(input);
     },
     get(taskId) {
       const row = find.get(taskId) as TaskRow | undefined;

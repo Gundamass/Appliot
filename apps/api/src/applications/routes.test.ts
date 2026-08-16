@@ -13,6 +13,13 @@ import { createApplicationService } from "./application-service.js";
 import { createApplicationTaskRepository } from "./application-task-repository.js";
 import { createCheckpointRepository } from "./checkpoint-repository.js";
 import { createTaskEventBus } from "./task-events.js";
+const fixtureNodeRef = {
+  documentId: "document-fixture-00000001",
+  nodeId: "node-fixture-000000000001",
+  observedAt: 7
+};
+
+
 
 const resources: Array<{ app: Awaited<ReturnType<typeof createApp>>; database: InstanceType<typeof Database>; storageRoot: string }> = [];
 
@@ -26,7 +33,8 @@ afterEach(async () => {
 
 async function buildApp(options: {
   sseHeartbeatMs?: number;
-  observeStages?: Array<"login" | "application_form">;
+  observeStages?: Array<"login" | "application_form" | "review">;
+  challengeFirstObservation?: boolean;
   invalidateExecution?: (taskId: string, executionEpoch: number) => Promise<void>;
   releaseTask?: (taskId: string) => Promise<void>;
 } = {}) {
@@ -45,7 +53,7 @@ async function buildApp(options: {
       ...(options.releaseTask === undefined ? {} : { releaseTask: options.releaseTask }),
       async observe(taskId) {
         const stage = stages[Math.min(observed++, stages.length - 1)] ?? "login";
-        return {
+        return {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt,
           id: `snapshot-${taskId}-${observed}`,
           taskId,
           url: "https://jobs.example.test/apply",
@@ -53,7 +61,15 @@ async function buildApp(options: {
           stage,
           fields: [],
           actions: [],
-          errors: []
+          errors: [],
+          ...(options.challengeFirstObservation === true && observed === 1 ? {
+            boundaries: [],
+            challenge: {
+              kind: "captcha" as const,
+              detectedAt: "2026-08-15T00:00:00.000Z",
+              reasonCode: "moka_captcha_accessible_name"
+            }
+          } : {})
         };
       },
       async execute(command) {
@@ -102,13 +118,13 @@ async function buildQuestionApp() {
     browser: {
       async open() { return { type: "opened" as const }; },
       async observe(taskId) {
-        return {
+        return {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
           id: `snapshot-${taskId}`,
           taskId,
           url: "https://jobs.example.test/apply",
           title: "Application",
           stage: "application_form" as const,
-          fields: [{
+          fields: [{ nodeRef: fixtureNodeRef, 
             id: "city",
             label: "城市",
             type: "text" as const,
@@ -169,14 +185,14 @@ async function buildContentReviewApp(reviewStatus: "needs_review" | "blocked" | 
   migrateDatabase(database);
   const storageRoot = await mkdtemp(join(tmpdir(), "resume-application-review-routes-"));
   const profileRepository = createProfileRepository(database);
-  const page = {
+  const page = {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
     id: "snapshot-review-source",
     taskId: "placeholder",
     url: "https://jobs.example.test/apply",
     title: "填写申请",
     stage: "application_form" as const,
-    fields: [{ id: "self", label: "自我评价", type: "textarea" as const, required: true, options: [], currentValue: "" }],
-    actions: [{ id: "next", text: "下一步", class: "intermediate_navigation" as const }],
+    fields: [{ nodeRef: fixtureNodeRef, id: "self", label: "自我评价", type: "textarea" as const, required: true, options: [], currentValue: "" }],
+    actions: [{ nodeRef: fixtureNodeRef, id: "next", text: "下一步", class: "intermediate_navigation" as const }],
     errors: []
   };
   const executedValues: unknown[] = [];
@@ -258,7 +274,11 @@ describe("application task routes", () => {
     expect(task).toMatchObject({
       id: expect.any(String),
       name: "大疆后端岗位",
-      commands: expect.not.arrayContaining(["submit"])
+      commands: expect.not.arrayContaining(["submit"]),
+      executionProgress: {
+        currentPhase: "waiting_for_form",
+        current: { action: "等待进入简历填写页", maxAttempts: 2 }
+      }
     });
     expect(database.prepare("SELECT name FROM application_tasks WHERE id = ?").get(task.id)).toEqual({
       name: "大疆后端岗位"
@@ -538,7 +558,7 @@ describe("application task routes", () => {
       checkpoints: createCheckpointRepository(first.database),
       browser: {
         async observe(id) {
-          return {
+          return {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
             id: `snapshot-${id}`,
             taskId: id,
             url: "https://jobs.example.test/apply",
@@ -583,7 +603,7 @@ describe("application task routes", () => {
       id: "a6ff8a62-af7b-4cab-966c-f2ea206fbf42",
       applicationUrl: "https://jobs.example.test/recover"
     };
-    const staleSnapshot = {
+    const staleSnapshot = {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
       id: "snapshot-before-restart",
       taskId: task.id,
       url: task.applicationUrl,
@@ -677,6 +697,59 @@ describe("application task routes", () => {
     });
     expect(cancelled.statusCode).toBe(200);
     expect(cancelled.json()).toMatchObject({ state: "cancelled", commands: [] });
+  });
+
+  it("projects a challenge pause and exposes only cancel plus explicit challenge resume", async () => {
+    const { app, applicationService } = await buildApp({
+      observeStages: ["application_form", "review"],
+      challengeFirstObservation: true,
+      invalidateExecution: vi.fn(async () => undefined)
+    });
+    const resume = vi.spyOn(applicationService, "resume");
+    const resumeAfterChallenge = vi.spyOn(applicationService, "resumeAfterChallenge");
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/applications",
+      payload: { applicationUrl: "https://jobs.example.test/challenge" }
+    });
+    const taskId = created.json().id as string;
+
+    expect(created.statusCode).toBe(201);
+    expect(created.json()).toMatchObject({
+      state: "awaiting_challenge",
+      commands: ["cancel", "resume_after_challenge"],
+      challenge: { kind: "captcha" }
+    });
+
+    for (const type of ["resume", "sync_profile"] as const) {
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/api/applications/${taskId}/commands`,
+        payload: { type }
+      });
+      expect(rejected.statusCode).toBe(409);
+      expect(rejected.json()).toMatchObject({ code: "application_command_not_allowed" });
+    }
+    for (const type of ["retry_current", "manual_done"] as const) {
+      const rejected = await app.inject({
+        method: "POST",
+        url: `/api/applications/${taskId}/recovery`,
+        payload: { type }
+      });
+      expect(rejected.statusCode).toBe(409);
+      expect(rejected.json()).toMatchObject({ code: "recovery_command_not_allowed" });
+    }
+
+    const resumed = await app.inject({
+      method: "POST",
+      url: `/api/applications/${taskId}/commands`,
+      payload: { type: "resume_after_challenge" }
+    });
+
+    expect(resumed.statusCode).toBe(200);
+    expect(resumed.json()).toMatchObject({ state: "review_locked", commands: [] });
+    expect(resumeAfterChallenge).toHaveBeenCalledOnce();
+    expect(resume).not.toHaveBeenCalled();
   });
 
   it("exposes profile resumption only for a waiting question task", async () => {
@@ -905,6 +978,7 @@ describe("application task routes", () => {
       ready: 0,
       review: 0,
       missing: 1,
+      failed: 0,
       unsupported: 0,
       filled: 0,
       fields: [{

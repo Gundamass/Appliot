@@ -9,6 +9,12 @@ describe("application control values", () => {
     expect(projectDateComponent("开始时间", "work[0].startDate", "2026-04-12")).toBe("2026-04-12");
   });
 
+  it("projects a canonical year-month value without inventing a day", () => {
+    expect(projectDateComponent("开始时间 年", "projects[0].startDate", "2022-10")).toBe("2022");
+    expect(projectDateComponent("开始时间 月", "projects[0].startDate", "2022-10")).toBe("10");
+    expect(projectDateComponent("开始时间 日", "projects[0].startDate", "2022-10")).toBe("2022-10");
+  });
+
   it("matches padded and unpadded month options without accepting a full date", () => {
     expect(matchControlOption("04", ["1", "2", "4", "5"])).toBe("4");
     expect(matchControlOption("04", ["03", "04", "05"])).toBe("04");

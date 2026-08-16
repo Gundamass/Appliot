@@ -1,0 +1,242 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>国内招聘系统稳定性测试</title>
+  <style>
+    body { color: #17211e; font: 14px/1.5 system-ui, sans-serif; margin: 0; background: #f4f7f6; }
+    main { margin: 0 auto; max-width: 920px; padding: 32px 20px 80px; }
+    form { display: grid; gap: 18px; }
+    section { background: #fff; border: 1px solid #dce5e1; padding: 18px; }
+    h1 { font-size: 24px; margin: 0 0 20px; }
+    h2 { font-size: 17px; margin: 0 0 14px; }
+    .entry { border-top: 1px solid #e7ecea; display: grid; gap: 12px; grid-template-columns: repeat(2, minmax(0, 1fr)); padding: 14px 0; }
+    .field { display: grid; gap: 5px; min-width: 0; position: relative; }
+    .field.wide { grid-column: 1 / -1; }
+    label { color: #3e514b; font-size: 12px; font-weight: 700; }
+    input, select, textarea { border: 1px solid #aebdb8; border-radius: 4px; box-sizing: border-box; font: inherit; min-height: 38px; padding: 7px 9px; width: 100%; }
+    textarea { min-height: 82px; resize: vertical; }
+    button { border: 1px solid #178064; background: #fff; color: #12664f; cursor: pointer; min-height: 36px; padding: 7px 12px; }
+    button[type=submit] { background: #178064; color: #fff; justify-self: end; }
+    [role=listbox] { background: #fff; border: 1px solid #9dafaa; box-shadow: 0 6px 18px #0002; left: 0; max-height: 180px; overflow: auto; position: absolute; right: 0; top: 100%; z-index: 10; }
+    [role=option] { cursor: pointer; padding: 8px 10px; }
+    [role=option]:hover { background: #eaf5f1; }
+    @media (max-width: 600px) { .entry { grid-template-columns: 1fr; } .field.wide { grid-column: auto; } }
+  </style>
+</head>
+<body>
+<main>
+  <h1>候选人申请表</h1>
+  <form method="post" action="/submit?taskId={{TASK_ID}}">
+    <section>
+      <h2>基本信息</h2>
+      <div class="entry">
+        <div class="field"><label for="preserved">微信号</label><input id="preserved" name="basics.wechat" data-field="preservedValue" value="用户预填内容"></div>
+      </div>
+    </section>
+
+    <section id="education-section">
+      <h2>教育经历</h2>
+      <div class="entry">
+        <div class="field"><label for="school">学校</label><input id="school" required></div>
+        <div class="field">
+          <label for="major">专业</label>
+          <input id="major" role="combobox" aria-autocomplete="list" aria-controls="major-options" aria-expanded="false" required autocomplete="off">
+          <div id="major-options" role="listbox" hidden></div>
+        </div>
+      </div>
+    </section>
+
+    <section id="formal-work-section">
+      <h2>正式工作经历</h2>
+      <div id="formal-work-entries"></div>
+      <button id="add-formal-work" type="button">新增</button>
+    </section>
+
+    <section id="internship-section">
+      <h2>实习经历</h2>
+      <div id="internship-entries"></div>
+      <button id="add-internship" type="button">新增</button>
+    </section>
+
+    <section id="project-section">
+      <h2>项目经历</h2>
+      <div id="project-entries"></div>
+      <button id="add-project" type="button">新增</button>
+    </section>
+
+    <section id="award-section">
+      <h2>获奖与赛事</h2>
+      <div class="entry">
+        <div class="field"><label for="award-name">赛事名称</label><input id="award-name" data-field="awardName"></div>
+        <div class="field"><label for="award-date">赛事时间</label><input id="award-date" data-field="awardDate" placeholder="YYYY-MM"></div>
+      </div>
+    </section>
+
+    <section id="language-section">
+      <h2>语言能力</h2>
+      <div class="entry">
+        <div class="field"><label for="language-name">语言名称</label><input id="language-name" name="languages[0].name" data-field="languageName"></div>
+        <div class="field"><label for="language-proficiency">掌握程度</label><select id="language-proficiency" name="languages[0].proficiency" data-field="languageProficiency"><option value="">请选择</option><option>熟练</option><option>精通</option><option>良好</option></select></div>
+        <div class="field"><label for="language-speaking">听说能力</label><select id="language-speaking" name="languages[0].speakingListening" data-field="languageSpeakingListening"><option value="">请选择</option><option>熟练</option><option>精通</option><option>良好</option></select></div>
+        <div class="field"><label for="language-writing">读写能力</label><select id="language-writing" name="languages[0].readingWriting" data-field="languageReadingWriting"><option value="">请选择</option><option>熟练</option><option>精通</option><option>良好</option></select></div>
+      </div>
+    </section>
+
+    <button type="submit">提交申请</button>
+  </form>
+</main>
+<script>
+  const taskId = "{{TASK_ID}}";
+  const counters = { workAddCount: 0, internshipAddCount: 0, projectAddCount: 0 };
+  const searches = { major: [] };
+
+  const field = (id, label, attribute = "") => `<div class="field"><label for="${id}">${label}</label><input id="${id}" ${attribute}></div>`;
+  const sync = () => fetch(`/api/stability-state?taskId=${encodeURIComponent(taskId)}`, {
+    method: "POST",
+    headers: { "content-type": "application/json" },
+    body: JSON.stringify({
+      draft: collectDraft(),
+      searches,
+      ...counters
+    })
+  });
+
+  function collectDraft() {
+    const values = (selector) => [...document.querySelectorAll(selector)].map((item) => item.value);
+    return {
+      preservedValue: document.querySelector("#preserved").value,
+      major: document.querySelector("#major").dataset.committed || "",
+      formalWorkCompanies: values('[data-kind="formal-work"] [data-field="company"]'),
+      internshipCompanies: values('[data-kind="internship"] [data-field="company"]'),
+      internshipPositions: values('[data-kind="internship"] [data-field="position"]'),
+      projectNames: values('[data-kind="project"] [data-field="name"]'),
+      projectDescriptions: values('[data-kind="project"] [data-field="description"]'),
+      awardName: document.querySelector("#award-name").value,
+      awardDate: document.querySelector("#award-date").value,
+      startYear: document.querySelector('[data-kind="project"] [data-date="year"]')?.dataset.committed || "",
+      startMonth: document.querySelector('[data-kind="project"] [data-date="month"]')?.dataset.committed || "",
+      languageName: document.querySelector("#language-name").value,
+      languageProficiency: document.querySelector("#language-proficiency").value,
+      languageSpeakingListening: document.querySelector("#language-speaking").value,
+      languageReadingWriting: document.querySelector("#language-writing").value
+    };
+  }
+
+  function workEntry(kind, index) {
+    const prefix = `${kind}-${index}`;
+    return `<div class="entry" data-kind="${kind}">
+      ${field(`${prefix}-company`, "公司", 'data-field="company"')}
+      ${field(`${prefix}-position`, "职位", 'data-field="position"')}
+    </div>`;
+  }
+
+  function projectEntry(index) {
+    return `<div class="entry" data-kind="project">
+      ${field(`project-${index}-name`, "项目名称", 'data-field="name"')}
+      ${customDateField(`project-${index}-year`, "开始时间 年", "year")}
+      ${customDateField(`project-${index}-month`, "开始时间 月", "month")}
+      <div class="field wide"><label for="project-${index}-description">项目描述</label><textarea id="project-${index}-description" data-field="description"></textarea></div>
+    </div>`;
+  }
+
+  function customDateField(id, label, unit) {
+    return `<div class="field"><label for="${id}">${label}</label>
+      <input id="${id}" role="combobox" aria-autocomplete="list" aria-controls="${id}-options" aria-expanded="false" data-date="${unit}" autocomplete="off">
+      <div id="${id}-options" role="listbox" hidden></div>
+    </div>`;
+  }
+
+  function addEntry(kind, countAsAddition) {
+    if (kind === "formal-work") {
+      const container = document.querySelector("#formal-work-entries");
+      container.insertAdjacentHTML("beforeend", workEntry(kind, container.children.length));
+      if (countAsAddition) counters.workAddCount += 1;
+    } else if (kind === "internship") {
+      const container = document.querySelector("#internship-entries");
+      container.insertAdjacentHTML("beforeend", workEntry(kind, container.children.length));
+      if (countAsAddition) counters.internshipAddCount += 1;
+    } else {
+      const container = document.querySelector("#project-entries");
+      container.insertAdjacentHTML("beforeend", projectEntry(container.children.length));
+      if (countAsAddition) counters.projectAddCount += 1;
+    }
+    bindFields();
+    bindDateControls();
+  }
+
+  function bindFields() {
+    document.querySelectorAll("input:not([role=combobox]), textarea, select").forEach((control) => {
+      if (control.dataset.bound) return;
+      control.dataset.bound = "1";
+      control.addEventListener("input", sync);
+      control.addEventListener("change", sync);
+    });
+  }
+
+  function renderDateOptions(input) {
+    const list = document.getElementById(input.getAttribute("aria-controls"));
+    const values = input.dataset.date === "year"
+      ? ["2021", "2022", "2023", "2024", "2025", "2026"]
+      : ["01", "02", "03", "04", "05", "06", "07", "08", "09", "10", "11", "12"];
+    const query = input.value.trim();
+    list.innerHTML = values.filter((value) => !query || value.includes(query))
+      .map((value) => `<div role="option" data-value="${value}">${value}</div>`).join("");
+    list.hidden = false;
+    input.setAttribute("aria-expanded", "true");
+    list.querySelectorAll('[role="option"]').forEach((option) => option.addEventListener("click", () => {
+      input.value = option.dataset.value;
+      input.dataset.committed = option.dataset.value;
+      input.setAttribute("aria-expanded", "false");
+      list.hidden = true;
+      sync();
+    }));
+  }
+
+  function bindDateControls() {
+    document.querySelectorAll('[data-date][role="combobox"]').forEach((input) => {
+      if (input.dataset.bound) return;
+      input.dataset.bound = "1";
+      input.addEventListener("click", () => renderDateOptions(input));
+      input.addEventListener("input", () => {
+        input.dataset.committed = "";
+        renderDateOptions(input);
+      });
+    });
+  }
+
+  const major = document.querySelector("#major");
+  const majorOptions = document.querySelector("#major-options");
+  const renderMajorOptions = () => {
+    const query = major.value.trim();
+    if (query && searches.major.at(-1) !== query) searches.major.push(query);
+    majorOptions.innerHTML = query === "软件工程"
+      ? '<div role="option" data-value="软件工程">软件工程</div>'
+      : "";
+    majorOptions.hidden = false;
+    major.setAttribute("aria-expanded", "true");
+    majorOptions.querySelectorAll('[role="option"]').forEach((option) => option.addEventListener("click", () => {
+      major.value = option.dataset.value;
+      major.dataset.committed = option.dataset.value;
+      major.setAttribute("aria-expanded", "false");
+      majorOptions.hidden = true;
+      sync();
+    }));
+    sync();
+  };
+  major.addEventListener("click", renderMajorOptions);
+  major.addEventListener("input", () => {
+    major.dataset.committed = "";
+    renderMajorOptions();
+  });
+
+  document.querySelector("#add-formal-work").addEventListener("click", () => addEntry("formal-work", true));
+  document.querySelector("#add-internship").addEventListener("click", () => addEntry("internship", true));
+  document.querySelector("#add-project").addEventListener("click", () => addEntry("project", true));
+  addEntry("formal-work", false);
+  addEntry("internship", false);
+  addEntry("project", false);
+</script>
+</body>
+</html>

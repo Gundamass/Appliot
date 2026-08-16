@@ -67,4 +67,54 @@ describe("calculateProfileCompleteness", () => {
     expect(result.sections.find((section) => section.id === "projects")?.missing)
       .not.toContain("projects[0].url");
   });
+
+  it("在校实践只把独立时间计入建议补全，实践成果保持选填", () => {
+    const result = calculateProfileCompleteness([
+      fact("campus[0].name", "创E社团招新", "user_corrected"),
+      fact("campus[0].role", "组织者", "user_corrected"),
+      fact("campus[0].description", "手写描述", "user_corrected"),
+      fact("campus[1].name", "新枫读书节", "user_corrected"),
+      fact("campus[1].role", "策划和组织", "user_corrected"),
+      fact("campus[1].description", "手写描述", "user_corrected")
+    ]);
+
+    expect(result.sections.find((section) => section.id === "campus")).toMatchObject({
+      completed: 6,
+      total: 10,
+      missing: [
+        "campus[0].startDate",
+        "campus[0].endDate",
+        "campus[1].startDate",
+        "campus[1].endDate"
+      ]
+    });
+  });
+
+  it("独立统计语言能力字段且不把语言证书当作语言能力", () => {
+    const complete = calculateProfileCompleteness([
+      fact("languages[0].name", "英语", "user_confirmed"),
+      fact("languages[0].proficiency", "熟练", "user_confirmed"),
+      fact("languages[0].speakingListening", "熟练", "user_confirmed"),
+      fact("languages[0].readingWriting", "熟练", "user_confirmed"),
+      fact("certificates[0].name", "大学英语六级", "user_confirmed")
+    ]);
+
+    expect(complete.sections.find((section) => section.id === "languages")).toMatchObject({
+      label: "语言能力",
+      completed: 4,
+      total: 4,
+      missing: []
+    });
+
+    const certificateOnly = calculateProfileCompleteness([
+      fact("certificates[0].name", "大学英语六级", "user_confirmed")
+    ]);
+    expect(certificateOnly.sections.find((section) => section.id === "languages")).toEqual({
+      id: "languages",
+      label: "语言能力",
+      completed: 1,
+      total: 1,
+      missing: []
+    });
+  });
 });

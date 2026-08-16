@@ -112,6 +112,128 @@ export const applicationTasks = sqliteTable("application_tasks", {
   check("application_tasks_profile_sync_status_valid", sql`${table.profileSyncStatus} IN ('current', 'pending', 'failed')`)
 ]);
 
+export const jobMatchSessions = sqliteTable("job_match_sessions", {
+  id: text("id").primaryKey(),
+  version: integer("version").notNull().default(0),
+  state: text("state").notNull(),
+  entryKind: text("entry_kind", { enum: ["job_list", "job_detail", "application_form"] }),
+  source: text("source", { enum: ["moka", "dji"] }),
+  initialUrl: text("initial_url").notNull(),
+  adapterVersion: text("adapter_version"),
+  scoringVersion: text("scoring_version").notNull().default("job-match-v1"),
+  profileRevision: integer("profile_revision").notNull(),
+  expectationRevision: integer("expectation_revision").notNull(),
+  executionEpoch: integer("execution_epoch").notNull().default(0),
+  selectedResultId: text("selected_result_id"),
+  selectedPostingContentHash: text("selected_posting_content_hash"),
+  conflictSummaryHash: text("conflict_summary_hash"),
+  selectionIdempotencyKey: text("selection_idempotency_key"),
+  applicationTaskId: text("application_task_id").references(() => applicationTasks.id),
+  conversionIdempotencyKey: text("conversion_idempotency_key"),
+  stopReason: text("stop_reason"),
+  errorCode: text("error_code"),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  unique("job_match_sessions_selection_idempotency_unique").on(table.selectionIdempotencyKey),
+  unique("job_match_sessions_conversion_idempotency_unique").on(table.conversionIdempotencyKey),
+  check("job_match_sessions_version_nonnegative", sql`${table.version} >= 0`),
+  check("job_match_sessions_profile_revision_nonnegative", sql`${table.profileRevision} >= 0`),
+  check("job_match_sessions_expectation_revision_nonnegative", sql`${table.expectationRevision} >= 0`),
+  check("job_match_sessions_execution_epoch_nonnegative", sql`${table.executionEpoch} >= 0`),
+  check("job_match_sessions_scoring_version_valid", sql`${table.scoringVersion} = 'job-match-v1'`)
+]);
+
+export const jobMatchExpectationSnapshots = sqliteTable("job_match_expectation_snapshots", {
+  sessionId: text("session_id").notNull().references(() => jobMatchSessions.id, { onDelete: "cascade" }),
+  revision: integer("revision").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  confirmedAt: text("confirmed_at").notNull(),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  primaryKey({ columns: [table.sessionId, table.revision] }),
+  check("job_match_expectation_revision_nonnegative", sql`${table.revision} >= 0`),
+  check("job_match_expectation_payload_valid", sql`json_valid(${table.payloadJson})`)
+]);
+
+export const jobPostings = sqliteTable("job_postings", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => jobMatchSessions.id, { onDelete: "cascade" }),
+  source: text("source", { enum: ["moka", "dji"] }).notNull(),
+  sourceJobId: text("source_job_id"),
+  canonicalUrl: text("canonical_url").notNull(),
+  contentHash: text("content_hash").notNull(),
+  payloadJson: text("payload_json").notNull(),
+  extractedAt: text("extracted_at").notNull()
+}, (table) => [
+  unique("job_postings_session_url_hash_unique").on(table.sessionId, table.source, table.canonicalUrl, table.contentHash),
+  index("job_postings_session_id_idx").on(table.sessionId, table.id),
+  check("job_postings_source_valid", sql`${table.source} IN ('moka', 'dji')`),
+  check("job_postings_payload_valid", sql`json_valid(${table.payloadJson})`)
+]);
+
+export const jobMatchResults = sqliteTable("job_match_results", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => jobMatchSessions.id, { onDelete: "cascade" }),
+  postingId: text("posting_id").notNull().references(() => jobPostings.id, { onDelete: "cascade" }),
+  version: integer("version").notNull(),
+  scoringVersion: text("scoring_version").notNull(),
+  profileRevision: integer("profile_revision").notNull(),
+  expectationRevision: integer("expectation_revision").notNull(),
+  postingContentHash: text("posting_content_hash").notNull(),
+  stale: integer("stale", { mode: "boolean" }).notNull().default(false),
+  payloadJson: text("payload_json").notNull(),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  unique("job_match_results_identity_unique").on(
+    table.sessionId,
+    table.postingId,
+    table.scoringVersion,
+    table.profileRevision,
+    table.expectationRevision,
+    table.postingContentHash
+  ),
+  index("job_match_results_session_ranking_idx").on(table.sessionId, table.stale, table.id),
+  check("job_match_results_version_nonnegative", sql`${table.version} >= 0`),
+  check("job_match_results_scoring_version_valid", sql`${table.scoringVersion} = 'job-match-v1'`),
+  check("job_match_results_profile_revision_nonnegative", sql`${table.profileRevision} >= 0`),
+  check("job_match_results_expectation_revision_nonnegative", sql`${table.expectationRevision} >= 0`),
+  check("job_match_results_payload_valid", sql`json_valid(${table.payloadJson})`)
+]);
+
+export const jobExtractionCursors = sqliteTable("job_extraction_cursors", {
+  sessionId: text("session_id").primaryKey().references(() => jobMatchSessions.id, { onDelete: "cascade" }),
+  cursorJson: text("cursor_json").notNull(),
+  pagesRead: integer("pages_read").notNull().default(0),
+  elapsedMs: integer("elapsed_ms").notNull().default(0),
+  newJobs: integer("new_jobs").notNull().default(0),
+  consecutiveNoNewPages: integer("consecutive_no_new_pages").notNull().default(0),
+  continuationToken: text("continuation_token"),
+  stopReason: text("stop_reason"),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  check("job_extraction_cursor_json_valid", sql`json_valid(${table.cursorJson})`),
+  check("job_extraction_pages_nonnegative", sql`${table.pagesRead} >= 0`),
+  check("job_extraction_elapsed_nonnegative", sql`${table.elapsedMs} >= 0`),
+  check("job_extraction_new_jobs_nonnegative", sql`${table.newJobs} >= 0`),
+  check("job_extraction_no_new_nonnegative", sql`${table.consecutiveNoNewPages} >= 0`)
+]);
+
+export const jobMatchEvents = sqliteTable("job_match_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  sessionId: text("session_id").notNull().references(() => jobMatchSessions.id, { onDelete: "cascade" }),
+  sequence: integer("sequence").notNull(),
+  type: text("type").notNull(),
+  idempotencyKey: text("idempotency_key"),
+  payloadJson: text("payload_json").notNull(),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  unique("job_match_events_session_sequence_unique").on(table.sessionId, table.sequence),
+  unique("job_match_events_session_idempotency_unique").on(table.sessionId, table.idempotencyKey),
+  check("job_match_events_sequence_positive", sql`${table.sequence} > 0`),
+  check("job_match_events_payload_valid", sql`json_valid(${table.payloadJson})`)
+]);
+
 export const embeddings = sqliteTable("embeddings", {
   id: text("id").primaryKey(),
   documentChunkId: text("document_chunk_id").notNull().references(() => documentChunks.id),

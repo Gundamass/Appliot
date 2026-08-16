@@ -23,6 +23,36 @@ afterEach(async () => {
 });
 
 describe("BrowserWorkerClient", () => {
+  it("exposes structured job observation, filter readback, and pagination", async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-browser-job-"));
+    temporaryDirectories.push(profileDir);
+    const client = await BrowserWorkerClient.start({
+      profileDir,
+      headless: true,
+      workerEntry: fileURLToPath(new URL("./fixtures/activity-worker.ts", import.meta.url))
+    });
+    clients.push(client);
+    const plan = {
+      source: "moka" as const,
+      adapterVersion: "moka-job-v1",
+      mapped: [{ criterionIndex: 0, key: "location", values: ["深圳"] }],
+      localOnly: []
+    };
+
+    await expect(client.observeJob("jm-1")).resolves.toMatchObject({
+      ownerId: "jm-1",
+      entryHint: "job_list"
+    });
+    await expect(client.applyJobFilters("jm-1", plan, 4)).resolves.toMatchObject({
+      ownerId: "jm-1",
+      filterState: [{ key: "location", values: ["深圳"] }]
+    });
+    await expect(client.advanceJobPage("jm-1", "page-2", 4)).resolves.toMatchObject({
+      ownerId: "jm-1",
+      pagination: { current: 2 }
+    });
+  });
+
   it("rejects forged request-bound activity without resolving a pending request", async () => {
     const profileDir = await mkdtemp(join(tmpdir(), "resume-browser-activity-"));
     temporaryDirectories.push(profileDir);
@@ -193,11 +223,14 @@ describe("BrowserWorkerClient", () => {
     const observed = await client.observe("task-ipc");
     const field = observed.snapshot.fields.find((candidate) => candidate.label === "姓名");
     if (!field) throw new Error("没有观察到姓名字段");
+    const executionEpoch = 1;
     const approval = new ActionPolicy(approvalKey).approve({
       taskId: observed.snapshot.taskId,
       snapshotId: observed.snapshot.id,
       targetId: field.id,
-      operation: "fill"
+      operation: "fill",
+      nodeRef: field.nodeRef,
+      executionEpoch
     }, observed.snapshot);
 
     const result = await client.execute({
@@ -205,9 +238,11 @@ describe("BrowserWorkerClient", () => {
       taskId: observed.snapshot.taskId,
       snapshotId: observed.snapshot.id,
       fieldId: field.id,
+      nodeRef: field.nodeRef,
+      executionEpoch,
       value: "何清",
       approval: approval.token
-    });
+    }, executionEpoch);
     expect(result).toMatchObject({ status: "applied", actualValue: "何清" });
   }, 30_000);
 });

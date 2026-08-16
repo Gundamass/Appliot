@@ -7,12 +7,13 @@ import { expect, test } from "@playwright/test";
 import Fastify from "../../apps/api/node_modules/fastify/fastify.js";
 import { createServer } from "../../apps/web/node_modules/vite/dist/node/index.js";
 import { ActionPolicy } from "../../packages/action-policy/src/index.js";
-import type { FieldDefinition } from "../../packages/form-semantics/src/index.js";
+import { FIELD_DEFINITIONS, type FieldDefinition } from "../../packages/form-semantics/src/index.js";
 import { createRagService } from "../../packages/rag/src/index.js";
 import { createApplicationService } from "../../apps/api/src/applications/application-service.js";
 import { createApplicationTaskRepository } from "../../apps/api/src/applications/application-task-repository.js";
 import { createCheckpointRepository } from "../../apps/api/src/applications/checkpoint-repository.js";
 import { createFieldSemanticResolver } from "../../apps/api/src/applications/field-semantic-resolver.js";
+import { FieldOntologyIndex } from "../../apps/api/src/applications/field-ontology-index.js";
 import { registerApplicationRoutes } from "../../apps/api/src/applications/routes.js";
 import { createTaskEventBus } from "../../apps/api/src/applications/task-events.js";
 import { createSqliteDatabase } from "../../apps/api/src/db/client.js";
@@ -52,15 +53,15 @@ test("大疆风格字段完成精确填写、追问补全并停在提交前", as
     profileRepository.confirm(id);
   }
   const embeddingProvider = {
-    async embedDocuments() {
-      return [[1, 0]];
+    async embedDocuments(texts: string[]) {
+      return texts.map(() => [1, 0]);
     },
     async embedQuery(text: string) {
       if (text.includes("未命名字段")) throw new Error("no semantic match");
       return [0.89, Math.sqrt(1 - 0.89 ** 2)];
     }
   };
-  const semanticDefinitions: FieldDefinition[] = [{
+  const semanticDefinitions: FieldDefinition[] = [...FIELD_DEFINITIONS, {
     semantic: "application.majorDirection",
     label: "专业方向",
     aliases: [],
@@ -70,7 +71,16 @@ test("大疆风格字段完成精确填写、追问补全并停在提交前", as
     description: "候选人的学习或研究方向"
   }];
   const resolveField = createProductionFieldResolver({
-    semanticResolver: createFieldSemanticResolver({ embeddingProvider, definitions: semanticDefinitions }),
+    semanticResolver: createFieldSemanticResolver({
+      embeddingProvider,
+      ontologyIndex: new FieldOntologyIndex(embeddingProvider),
+      embeddingIdentity: {
+        model: "dji-e2e-test",
+        modelRevision: "dji-e2e-test-v1",
+        instructionVersion: "dji-e2e-test-v1"
+      },
+      definitions: semanticDefinitions
+    }),
     ragService: createRagService({ repository: profileRepository }),
     profileRepository
   });
@@ -87,6 +97,7 @@ test("大疆风格字段完成精确填写、追问补全并停在提交前", as
       }
     },
     resolveField,
+    listProfileFacts: () => profileRepository.listActive(),
     approve: (request, snapshot) => policy.approve(request, snapshot, { valid: snapshot.errors.length === 0 }).token,
     applyAnswers(taskId, answers, fields, questions = []) {
       for (const [fieldId, value] of Object.entries(answers)) {
@@ -112,8 +123,16 @@ test("大疆风格字段完成精确填写、追问补全并停在提交前", as
     const created = await app.inject({ method: "POST", url: "/api/applications", payload: { applicationUrl } });
     expect(created.statusCode).toBe(201);
     const initialTask = created.json();
+    const observedFields = (await browser.observe(initialTask.id)).fields.map((field) => ({
+      label: field.label,
+      type: field.type,
+      semanticHint: field.semanticHint
+    }));
     expect(initialTask.state).toBe("needs_questions");
-    expect(initialTask.fieldCoverage).toMatchObject({ missing: 1, review: 1, filled: 3 });
+    expect(
+      initialTask.fieldCoverage,
+      JSON.stringify({ coverage: initialTask.fieldCoverage.fields, observedFields }, null, 2)
+    ).toMatchObject({ missing: 1, review: 1, filled: 3 });
     expect(initialTask.fieldCoverage.fields).toContainEqual(expect.objectContaining({
       label: "毕业院校", status: "filled", source: "dji_catalog"
     }));
@@ -195,8 +214,8 @@ test("字段匹配面板在窄屏可展开且不暴露提交操作", async ({ pa
     await page.setViewportSize({ width: 320, height: 844 });
     await page.goto(`${baseUrl}/applications/${taskId}`);
 
-    await expect(page.getByRole("heading", { name: "字段匹配" })).toBeVisible();
-    await page.getByRole("button", { name: "查看待处理字段" }).click();
+    await page.getByText("查看填写明细", { exact: true }).click();
+    await expect(page.getByRole("heading", { name: "字段填写明细" })).toBeVisible();
     await expect(page.getByText("专业方向", { exact: true })).toBeVisible();
     await expect(page.getByText("未命名字段", { exact: true })).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);

@@ -5,6 +5,8 @@ import { useNavigate, useSearchParams } from "react-router-dom";
 import type { HealthApi } from "../api/health-client.js";
 import type { ProfileApi, RagApi, SelfEvaluationReviewApi } from "../api/client.js";
 import type { ApplicationApi } from "../applications/api.js";
+import type { JobMatchApi } from "../job-matching/api.js";
+import { JobMatchStartPanel } from "../job-matching/JobMatchStartPanel.js";
 import { ProfilePage } from "../profile/ProfilePage.js";
 import { ApplicationReviewInbox } from "../applications/ApplicationReviewInbox.js";
 import { ApplicationStartPanel } from "../applications/ApplicationStartPanel.js";
@@ -13,6 +15,7 @@ import { WorkspaceFrame, type WorkspaceView } from "./WorkspaceFrame.js";
 interface ProfileApplicationWorkspaceProps {
   profileApi: ProfileApi;
   applicationApi: ApplicationApi;
+  jobMatchApi: Pick<JobMatchApi, "create">;
   healthApi?: HealthApi;
   reviewApi?: SelfEvaluationReviewApi;
   ragApi?: RagApi;
@@ -21,6 +24,7 @@ interface ProfileApplicationWorkspaceProps {
 export function ProfileApplicationWorkspace({
   profileApi,
   applicationApi,
+  jobMatchApi,
   healthApi,
   reviewApi,
   ragApi
@@ -35,6 +39,9 @@ export function ProfileApplicationWorkspace({
   const [tasksError, setTasksError] = useState<string>();
   const [deletingTaskId, setDeletingTaskId] = useState<string>();
   const [taskActionError, setTaskActionError] = useState<string>();
+  const [applicationMode, setApplicationMode] = useState<"job_match" | "direct_application">("job_match");
+  const [prefilledApplicationUrl, setPrefilledApplicationUrl] = useState<string>();
+  const [jobMatchBusy, setJobMatchBusy] = useState(false);
 
   const loadTasks = async () => {
     setTasksLoading(true);
@@ -98,12 +105,39 @@ export function ProfileApplicationWorkspace({
         ) : view === "apply" ? (
           <section className="workspace-view" aria-labelledby="workspace-apply-title">
             <header className="workspace-view-header"><div><span>受控浏览器</span><h1 id="workspace-apply-title">新建投递</h1></div></header>
-            <div className="workspace-panel-content"><ApplicationStartPanel
-              profileCompleteness={profileCompleteness}
-              applicationApi={applicationApi}
-              onTaskCreated={(taskId) => navigate(`/applications/${taskId}`)}
-              onViewChange={() => selectView("profile")}
-            /></div>
+            <div className="workspace-panel-content">
+              <div className="application-mode-switch" aria-label="新建投递模式">
+                <button
+                  type="button"
+                  aria-pressed={applicationMode === "job_match"}
+                  disabled={jobMatchBusy}
+                  onClick={() => setApplicationMode("job_match")}
+                >岗位匹配</button>
+                <button
+                  type="button"
+                  aria-pressed={applicationMode === "direct_application"}
+                  disabled={jobMatchBusy}
+                  onClick={() => setApplicationMode("direct_application")}
+                >直接投递</button>
+              </div>
+              {applicationMode === "job_match" ? <JobMatchStartPanel
+                profileApi={profileApi}
+                jobMatchApi={jobMatchApi}
+                onSessionCreated={(sessionId) => navigate(`/job-match-sessions/${sessionId}`)}
+                onApplicationForm={(applicationUrl) => {
+                  setPrefilledApplicationUrl(applicationUrl);
+                  setApplicationMode("direct_application");
+                }}
+                onOpenProfile={() => selectView("profile")}
+                onBusyChange={setJobMatchBusy}
+              /> : <ApplicationStartPanel
+                profileCompleteness={profileCompleteness}
+                applicationApi={applicationApi}
+                {...(prefilledApplicationUrl === undefined ? {} : { initialApplicationUrl: prefilledApplicationUrl })}
+                onTaskCreated={(taskId) => navigate(`/applications/${taskId}`)}
+                onViewChange={() => selectView("profile")}
+              />}
+            </div>
           </section>
         ) : (
           <section className="workspace-view" aria-labelledby="workspace-reviews-title">

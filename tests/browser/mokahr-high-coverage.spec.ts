@@ -7,6 +7,7 @@ import { ActionPolicy } from "../../packages/action-policy/src/index.js";
 import { createRagService } from "../../packages/rag/src/index.js";
 import { createApplicationService } from "../../apps/api/src/applications/application-service.js";
 import { createCheckpointRepository } from "../../apps/api/src/applications/checkpoint-repository.js";
+import { planRepeatedSectionActions } from "../../apps/api/src/applications/repeated-section-planner.js";
 import { createSqliteDatabase } from "../../apps/api/src/db/client.js";
 import { migrateDatabase } from "../../apps/api/src/db/migrate.js";
 import { createProfileRepository } from "../../apps/api/src/profile/profile-repository.js";
@@ -24,6 +25,7 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
   const repository = createProfileRepository(database);
   const facts = [
     ["phone", "basics.phone", "13800138000"],
+    ["employment-type", "work[0].employmentType", "Java 后端实习"],
     ["company", "work[0].company", "测试科技"],
     ["title", "work[0].title", "Java 后端实习"],
     ["project-name", "projects[0].name", "ApplyPilot"],
@@ -38,8 +40,9 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
   const policy = new ActionPolicy(key);
   const browser = new BrowserSessionManager({ profileDir: join(directory, "profile"), headless: true, fileResolver: async () => resumePath });
   await browser.start(key.toString("base64url"));
+  const checkpoints = createCheckpointRepository(database);
   const service = createApplicationService({
-    checkpoints: createCheckpointRepository(database),
+    checkpoints,
     browser: { observe: (id) => browser.observe(id), execute: (command, epoch) => browser.execute(command, epoch) },
     async resolveField(id, field) {
       const semantic = field.semanticHint?.includes(".") ? field.semanticHint : `application.${field.semanticHint || "jobSpecific"}`;
@@ -62,7 +65,8 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
       };
     },
     approve: (request, snapshot) => policy.approve(request, snapshot, { valid: snapshot.errors.length === 0 }).token,
-    resolveFileId: () => "resume.pdf"
+    resolveFileId: () => "resume.pdf",
+    listProfileFacts: () => repository.listActive()
   });
   try {
     const url = `${server.baseUrl}/mokahr?taskId=${encodeURIComponent(taskId)}`;
@@ -71,7 +75,15 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
     await service.runUntilPause(taskId);
 
     const machineState = service.state(taskId);
-    expect(machineState.value, JSON.stringify({ context: machineState.context, remote: server.state(taskId) }, null, 2)).toBe("review_locked");
+    const checkpoint = checkpoints.latest(taskId);
+    expect(machineState.value, JSON.stringify({
+      context: machineState.context,
+      remote: server.state(taskId),
+      snapshot: checkpoint?.snapshot,
+      repeatedSectionPlans: checkpoint?.snapshot
+        ? planRepeatedSectionActions(checkpoint.snapshot, repository.listActive())
+        : []
+    }, null, 2)).toBe("review_locked");
     expect(service.fieldCoverage(taskId)).toMatchObject({ missing: 0, review: 0, filled: 7 });
     expect(server.state(taskId)).toMatchObject({
       uploadCount: 1,

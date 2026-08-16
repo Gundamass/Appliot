@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import { FormSnapshotSchema, type FormField, type FormSnapshot } from "@resume/contracts";
 import { classifyAction } from "./action-classifier.js";
+import { sectionHintForText } from "./mokahr-adapter.js";
 import type { RawFormField, RawFormObservation } from "./snapshot-script.js";
 
 export interface FormContext {
@@ -11,7 +12,7 @@ export interface FormContext {
 }
 
 export function normalizeForm(raw: RawFormObservation, context: FormContext): FormSnapshot {
-  const fields = raw.fields.map((field) => normalizeField(field));
+  const fields = raw.fields.map((field) => normalizeField(field, raw.documentId, raw.mutationEpoch));
   const actions = raw.actions.map((action) => ({
     id: opaqueId("action", action.path),
     text: action.text || action.ariaLabel || "未命名操作",
@@ -21,7 +22,12 @@ export function normalizeForm(raw: RawFormObservation, context: FormContext): Fo
       nearbyText: action.nearbyText,
       stage: context.stage
     }),
-    ...(action.nearbyText === "" ? {} : { context: action.nearbyText })
+    ...(action.nearbyText === "" ? {} : { context: action.nearbyText }),
+    nodeRef: {
+      documentId: raw.documentId,
+      nodeId: action.nodeId,
+      observedAt: raw.mutationEpoch
+    }
   }));
   const snapshotSeed = JSON.stringify({ context, fields, actions, errors: raw.errors });
   return FormSnapshotSchema.parse({
@@ -30,14 +36,17 @@ export function normalizeForm(raw: RawFormObservation, context: FormContext): Fo
     url: context.url,
     title: context.title,
     stage: context.stage,
+    frameRef: { documentId: raw.documentId, kind: "main" },
+    mutationEpoch: raw.mutationEpoch,
     fields,
     actions,
     errors: raw.errors
   });
 }
 
-function normalizeField(raw: RawFormField): FormField {
+function normalizeField(raw: RawFormField, documentId: string, mutationEpoch: number): FormField {
   const label = fieldLabel(raw);
+  const sectionHint = sectionHintForText(raw.sectionText);
   return {
     id: opaqueId("field", raw.path),
     label,
@@ -48,7 +57,9 @@ function normalizeField(raw: RawFormField): FormField {
     currentValue: raw.value,
     ...(raw.controlKind === undefined ? {} : { controlKind: raw.controlKind }),
     ...(raw.interactionMode === undefined ? {} : { interactionMode: raw.interactionMode }),
-    ...(raw.name === "" ? {} : { semanticHint: raw.name })
+    ...(sectionHint === undefined ? {} : { sectionHint }),
+    ...(raw.name === "" ? {} : { semanticHint: raw.name }),
+    nodeRef: { documentId, nodeId: raw.nodeId, observedAt: mutationEpoch }
   };
 }
 

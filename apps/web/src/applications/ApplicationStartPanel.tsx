@@ -1,20 +1,23 @@
 import { ApplicationTaskNameSchema, suggestApplicationTaskName, type ProfileCompleteness } from "@resume/contracts";
 import { FIELD_DEFINITIONS } from "@resume/form-semantics/field-registry";
 import { CheckCircle2, CircleAlert, ExternalLink, FileUser } from "lucide-react";
-import { useState, type FormEvent } from "react";
+import { useEffect, useRef, useState, type FormEvent } from "react";
 import { ApplicationApiError, type ApplicationApi } from "./api.js";
 
 interface ApplicationStartPanelProps {
   profileCompleteness?: ProfileCompleteness | undefined;
   applicationApi: Pick<ApplicationApi, "create">;
+  initialApplicationUrl?: string;
   onTaskCreated(taskId: string): void;
   onViewChange?(view: "profile"): void;
 }
 
-export function ApplicationStartPanel({ profileCompleteness, applicationApi, onTaskCreated, onViewChange }: ApplicationStartPanelProps) {
-  const [applicationUrl, setApplicationUrl] = useState("");
-  const [taskName, setTaskName] = useState("");
+export function ApplicationStartPanel({ profileCompleteness, applicationApi, initialApplicationUrl, onTaskCreated, onViewChange }: ApplicationStartPanelProps) {
+  const initialUrl = initialApplicationUrl?.trim() ?? "";
+  const [applicationUrl, setApplicationUrl] = useState(initialUrl);
+  const [taskName, setTaskName] = useState(() => isHttpUrl(initialUrl) ? suggestApplicationTaskName(initialUrl) : "");
   const [taskNameTouched, setTaskNameTouched] = useState(false);
+  const appliedInitialUrlRef = useRef(initialUrl);
   const [busy, setBusy] = useState(false);
   const [error, setError] = useState<string>();
   const [activeTaskId, setActiveTaskId] = useState<string>();
@@ -22,6 +25,14 @@ export function ApplicationStartPanel({ profileCompleteness, applicationApi, onT
   const percentage = profileCompleteness
     ? Math.round((profileCompleteness.completed / Math.max(1, profileCompleteness.total)) * 100)
     : undefined;
+
+  useEffect(() => {
+    const nextUrl = initialApplicationUrl?.trim() ?? "";
+    if (nextUrl === "" || nextUrl === appliedInitialUrlRef.current) return;
+    appliedInitialUrlRef.current = nextUrl;
+    setApplicationUrl(nextUrl);
+    if (!taskNameTouched && isHttpUrl(nextUrl)) setTaskName(suggestApplicationTaskName(nextUrl));
+  }, [initialApplicationUrl, taskNameTouched]);
 
   const createTask = async (event: FormEvent) => {
     event.preventDefault();
@@ -95,7 +106,7 @@ export function ApplicationStartPanel({ profileCompleteness, applicationApi, onT
         </form>
         {error && <p className="inline-error" role="alert">{error}</p>}
         {activeTaskId && <button className="button secondary" type="button" onClick={() => onTaskCreated(activeTaskId)}>进入当前任务</button>}
-        <p className="application-safety-note">系统只执行页面识别、资料填写和中间步骤，最终提交始终由你确认。</p>
+        <p className="application-safety-note">系统只执行页面识别、资料填写和中间步骤，提交动作始终由你确认。</p>
       </section>
     </div>
   );

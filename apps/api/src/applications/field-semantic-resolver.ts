@@ -3,12 +3,16 @@ import { z } from "zod";
 import type { StructuredModelProvider } from "@resume/model-provider";
 import {
   FIELD_DEFINITIONS,
-  fieldDefinitionText,
   resolveDeterministicSemantic,
   type FieldDefinition,
   type FieldSection
 } from "@resume/form-semantics";
 import type { EmbeddingProvider } from "@resume/model-provider";
+import type {
+  EmbeddingIdentity,
+  FieldOntologyIndex
+} from "./field-ontology-index.js";
+import type { EmbeddingTraceSink } from "../observability/embedding-trace.js";
 
 export type FieldResolutionPhase = "deterministic" | "semantic";
 
@@ -42,7 +46,7 @@ export type FieldSemanticDecision =
 
 export interface FieldSemanticResolver {
   resolve(
-    field: Pick<FormField, "label" | "type" | "options" | "semanticHint">,
+    field: Pick<FormField, "label" | "type" | "options" | "controlKind" | "interactionMode" | "semanticHint">,
     context: FieldSemanticContext,
     phase: FieldResolutionPhase
   ): Promise<FieldSemanticDecision>;
@@ -50,11 +54,33 @@ export interface FieldSemanticResolver {
 
 export interface FieldSemanticResolverOptions {
   embeddingProvider?: EmbeddingProvider;
+  ontologyIndex?: FieldOntologyIndex;
+  embeddingIdentity?: EmbeddingIdentity;
   structuredProvider?: StructuredModelProvider;
   definitions?: readonly FieldDefinition[];
   minimumSimilarity?: number;
   minimumMargin?: number;
+  traceSink?: EmbeddingTraceSink;
 }
+
+type ResolvableField = Pick<
+  FormField,
+  "label" | "type" | "options" | "controlKind" | "interactionMode" | "semanticHint"
+>;
+type ReviewReason = Extract<FieldSemanticDecision, { status: "review" }>["reason"];
+type EmbeddingRetrieval =
+  | { status: "infrastructure_failure" }
+  | { status: "healthy_no_candidate" }
+  | {
+      status: "healthy_ambiguous";
+      candidates: FieldSemanticCandidate[];
+      reason: Exclude<ReviewReason, "risk_requires_review">;
+    }
+  | {
+      status: "healthy_resolved";
+      candidate: FieldSemanticCandidate;
+      candidates: FieldSemanticCandidate[];
+    };
 
 const DEFAULT_MINIMUM_SIMILARITY = 0.9;
 const DEFAULT_MINIMUM_MARGIN = 0.08;
@@ -69,137 +95,265 @@ export function createFieldSemanticResolver(options: FieldSemanticResolverOption
   const minimumMargin = options.minimumMargin ?? DEFAULT_MINIMUM_MARGIN;
   validateThreshold(minimumSimilarity, "minimumSimilarity");
   validateThreshold(minimumMargin, "minimumMargin");
-  let documentVectors: Promise<number[][]> | undefined;
-
-  const loadDocumentVectors = async (): Promise<number[][]> => {
-    if (!options.embeddingProvider) throw new Error("embedding unavailable");
-    documentVectors ??= options.embeddingProvider.embedDocuments(definitions.map(fieldDefinitionText));
-    try {
-      const vectors = await documentVectors;
-      if (vectors.length !== definitions.length) throw new Error("embedding count mismatch");
-      return vectors.map(validatedVector);
-    } catch (error) {
-      documentVectors = undefined;
-      throw error;
-    }
-  };
+  if (options.embeddingProvider !== undefined && options.ontologyIndex === undefined) {
+    throw new Error("field_ontology_index_required");
+  }
+  if (options.embeddingProvider !== undefined && options.embeddingIdentity === undefined) {
+    throw new Error("embedding_identity_required");
+  }
 
   return {
     async resolve(field, context, phase) {
+      const derived = derivedSemantic(field, context);
+      if (derived !== undefined) {
+        return { status: "mapped", semantic: derived, source: "exact_alias", confidence: 1 };
+      }
       const deterministic = resolveDeterministicSemantic({
         label: field.label,
         type: field.type,
         ...(field.semanticHint === undefined ? {} : { semanticHint: field.semanticHint }),
         ...(context.entryContext === undefined ? {} : { entryContext: context.entryContext })
       });
-      if (deterministic) {
+      const deterministicDefinition = deterministic === undefined
+        ? exactDefinition(definitions, field.label)
+        : definitionForSemantic(definitions, deterministic.semantic, context.entryContext);
+      const exactSemantic = deterministic === undefined
+        ? materialize(deterministicDefinition?.semantic ?? "", context.entryContext)
+        : deterministic.semantic;
+      if (deterministicDefinition !== undefined
+        && exactSemantic !== undefined
+        && eligibleDefinition(deterministicDefinition, field, context)) {
         return {
           status: "mapped",
-          semantic: deterministic.semantic,
-          source: deterministic.source,
-          confidence: deterministic.confidence
+          semantic: exactSemantic,
+          source: "exact_alias",
+          confidence: 1
         };
       }
       if (phase === "deterministic") {
         return { status: "unresolved", reason: "exact_match_not_found" };
       }
-      if (!options.embeddingProvider) {
-        return deepSeekResolve(field, context, definitions, options.structuredProvider);
+      if (context.section === undefined) {
+        return { status: "unresolved", reason: "exact_match_not_found" };
       }
-
-      let vectors: number[][];
-      let query: number[];
-      try {
-        [vectors, query] = await Promise.all([
-          loadDocumentVectors(),
-          options.embeddingProvider.embedQuery(fieldQuery(field, context))
-        ]);
-        query = validatedVector(query);
-      } catch {
-        return deepSeekResolve(field, context, definitions, options.structuredProvider);
+      const retrieval = await classifyEmbeddingRetrieval({
+        field,
+        context,
+        definitions,
+        embeddingProvider: options.embeddingProvider,
+        ontologyIndex: options.ontologyIndex,
+        embeddingIdentity: options.embeddingIdentity,
+        minimumSimilarity,
+        minimumMargin
+      });
+      switch (retrieval.status) {
+        case "infrastructure_failure":
+          recordSemanticResolution(options.traceSink, false, "failed");
+          return { status: "unresolved", reason: "embedding_unavailable" };
+        case "healthy_no_candidate":
+          recordSemanticResolution(options.traceSink, false, "unresolved");
+          return { status: "unresolved", reason: "incompatible_field" };
+        case "healthy_ambiguous": {
+          const deepSeekUsed = options.structuredProvider !== undefined;
+          const match = await deepSeekResolve(
+            field,
+            context,
+            retrieval.candidates,
+            options.structuredProvider
+          );
+          if (match === undefined) {
+            recordSemanticResolution(options.traceSink, deepSeekUsed, "unresolved");
+            return { status: "review", candidates: retrieval.candidates, reason: retrieval.reason };
+          }
+          if (match.candidate.risk !== "normal") {
+            recordSemanticResolution(options.traceSink, deepSeekUsed, "unresolved");
+            return { status: "review", candidates: retrieval.candidates, reason: "risk_requires_review" };
+          }
+          recordSemanticResolution(options.traceSink, deepSeekUsed, "succeeded");
+          return {
+            status: "mapped",
+            semantic: match.candidate.semantic,
+            source: "deepseek",
+            confidence: match.confidence
+          };
+        }
+        case "healthy_resolved":
+          if (retrieval.candidate.risk !== "normal") {
+            recordSemanticResolution(options.traceSink, false, "unresolved");
+            return { status: "review", candidates: retrieval.candidates, reason: "risk_requires_review" };
+          }
+          recordSemanticResolution(options.traceSink, false, "succeeded");
+          return {
+            status: "mapped",
+            semantic: retrieval.candidate.semantic,
+            source: "embedding",
+            confidence: retrieval.candidate.similarity
+          };
       }
-
-      const candidates = definitions.flatMap((definition, index): FieldSemanticCandidate[] => {
-        if (!definition.types.includes(field.type)) return [];
-        if (context.section && !definition.sections.includes(context.section)) return [];
-        if ((field.type === "select" || field.type === "radio") && field.options.length === 0) return [];
-        const semantic = materialize(definition.semantic, context.entryContext);
-        const vector = vectors[index];
-        if (!semantic || !vector) return [];
-        return [{
-          semantic,
-          label: definition.label,
-          similarity: cosineSimilarity(query, vector),
-          risk: definition.risk
-        }];
-      }).sort((left, right) => right.similarity - left.similarity || left.semantic.localeCompare(right.semantic));
-
-      const top = candidates[0];
-      if (!top) return deepSeekResolve(field, context, definitions, options.structuredProvider);
-      const reviewCandidates = candidates.slice(0, 3);
-      if (top.similarity < minimumSimilarity) {
-        const deepseek = await deepSeekResolve(field, context, definitions, options.structuredProvider);
-        return deepseek.status === "mapped"
-          ? deepseek
-          : { status: "review", candidates: reviewCandidates, reason: "similarity_below_threshold" };
-      }
-      const runnerUp = candidates[1];
-      if (runnerUp && top.similarity - runnerUp.similarity < minimumMargin) {
-        const deepseek = await deepSeekResolve(field, context, definitions, options.structuredProvider);
-        return deepseek.status === "mapped"
-          ? deepseek
-          : { status: "review", candidates: reviewCandidates, reason: "ambiguous_candidates" };
-      }
-      if (top.risk !== "normal") {
-        return { status: "review", candidates: reviewCandidates, reason: "risk_requires_review" };
-      }
-      return {
-        status: "mapped",
-        semantic: top.semantic,
-        source: "embedding",
-        confidence: top.similarity
-      };
     }
   };
 }
 
+function recordSemanticResolution(
+  traceSink: EmbeddingTraceSink | undefined,
+  deepSeekUsed: boolean,
+  result: "succeeded" | "failed" | "unresolved"
+): void {
+  try {
+    traceSink?.record({ operation: "semantic_resolution", deepSeekUsed, result });
+  } catch {
+    // Diagnostics must not alter resolution behavior.
+  }
+}
+
+async function classifyEmbeddingRetrieval(input: {
+  field: ResolvableField;
+  context: FieldSemanticContext;
+  definitions: readonly FieldDefinition[];
+  embeddingProvider: EmbeddingProvider | undefined;
+  ontologyIndex: FieldOntologyIndex | undefined;
+  embeddingIdentity: EmbeddingIdentity | undefined;
+  minimumSimilarity: number;
+  minimumMargin: number;
+}): Promise<EmbeddingRetrieval> {
+  if (input.embeddingProvider === undefined
+    || input.ontologyIndex === undefined
+    || input.embeddingIdentity === undefined) {
+    return { status: "infrastructure_failure" };
+  }
+
+  let vectors: readonly (readonly number[])[];
+  let query: number[];
+  try {
+    vectors = await input.ontologyIndex.load(input.definitions, input.embeddingIdentity);
+    query = validatedVector(await input.embeddingProvider.embedQuery(fieldQuery(input.field, input.context)));
+    validateMatchingDimensions(vectors, query);
+  } catch {
+    return { status: "infrastructure_failure" };
+  }
+
+  const candidates = input.definitions.flatMap((definition, index): FieldSemanticCandidate[] => {
+    if (!eligibleDefinition(definition, input.field, input.context)) return [];
+    if ((input.field.type === "select" || input.field.type === "radio")
+      && input.field.options.length === 0
+      && !isCustomSearchSelect(input.field)) return [];
+    const semantic = materialize(definition.semantic, input.context.entryContext);
+    const vector = vectors[index];
+    if (semantic === undefined || vector === undefined) return [];
+    return [{
+      semantic,
+      label: definition.label,
+      similarity: cosineSimilarity(query, vector),
+      risk: definition.risk
+    }];
+  }).sort((left, right) => right.similarity - left.similarity || left.semantic.localeCompare(right.semantic));
+
+  const top = candidates[0];
+  if (top === undefined) return { status: "healthy_no_candidate" };
+  const reviewCandidates = candidates.slice(0, 3);
+  if (top.similarity < input.minimumSimilarity) {
+    return {
+      status: "healthy_ambiguous",
+      candidates: reviewCandidates,
+      reason: "similarity_below_threshold"
+    };
+  }
+  const runnerUp = candidates[1];
+  if (runnerUp !== undefined && top.similarity - runnerUp.similarity < input.minimumMargin) {
+    return {
+      status: "healthy_ambiguous",
+      candidates: reviewCandidates,
+      reason: "ambiguous_candidates"
+    };
+  }
+  return { status: "healthy_resolved", candidate: top, candidates: reviewCandidates };
+}
+
 async function deepSeekResolve(
-  field: Pick<FormField, "label" | "type" | "options" | "semanticHint">,
+  field: ResolvableField,
   context: FieldSemanticContext,
-  definitions: readonly FieldDefinition[],
+  candidates: FieldSemanticCandidate[],
   provider: StructuredModelProvider | undefined
-): Promise<FieldSemanticDecision> {
-  if (!provider) return { status: "unresolved", reason: "embedding_unavailable" };
-  const candidates = definitions
-    .filter((definition) => definition.types.includes(field.type))
-    .filter((definition) => context.section === undefined || definition.sections.includes(context.section))
-    .map((definition) => ({ semantic: definition.semantic, label: definition.label, aliases: definition.aliases }))
-    .slice(0, 200);
+): Promise<{ candidate: FieldSemanticCandidate; confidence: number } | undefined> {
+  if (provider === undefined || candidates.length === 0 || candidates.length > 3) return undefined;
   try {
     const result = await provider.generateStructured({
       system: "你是招聘表单字段语义映射器。只能从候选字段中选择一个语义路径。无法确定时返回 confidence 0，不得编造路径。只返回 JSON。",
       user: JSON.stringify({
-        field: { label: field.label, type: field.type, options: field.options, semanticHint: field.semanticHint },
+        field: { label: field.label, type: field.type },
         context,
         candidates
       }),
       schema: DEEPSEEK_SEMANTIC_SCHEMA,
-      jsonExample: { semantic: "education[].school", confidence: 0.95 }
+      jsonExample: { semantic: candidates[0]!.semantic, confidence: 0.95 }
     });
-    const semantic = materialize(result.semantic, context.entryContext);
-    const definition = definitions.find((candidate) => candidate.semantic === result.semantic
-      || materialize(candidate.semantic, context.entryContext) === semantic);
-    if (!definition || semantic === undefined || result.confidence < 0.9) {
-      return { status: "unresolved", reason: "incompatible_field" };
-    }
-    if (!definition.types.includes(field.type)
-      || context.section !== undefined && !definition.sections.includes(context.section)) {
-      return { status: "unresolved", reason: "incompatible_field" };
-    }
-    return { status: "mapped", semantic, source: "deepseek", confidence: result.confidence };
+    const candidate = candidates.find((entry) => entry.semantic === result.semantic);
+    if (candidate === undefined || result.confidence < 0.9) return undefined;
+    return { candidate, confidence: result.confidence };
   } catch {
-    return { status: "unresolved", reason: "embedding_unavailable" };
+    return undefined;
   }
+}
+
+function isCustomSearchSelect(
+  field: Pick<FormField, "type" | "controlKind" | "interactionMode">
+): boolean {
+  return field.type === "select"
+    && field.controlKind === "custom"
+    && field.interactionMode === "search";
+}
+
+function supportsFieldType(
+  definition: FieldDefinition,
+  field: Pick<FormField, "type" | "options" | "controlKind" | "interactionMode">
+): boolean {
+  return definition.types.includes(field.type)
+    || (field.options.length === 0
+      && isCustomSearchSelect(field)
+      && definition.types.includes("text"));
+}
+
+function eligibleDefinition(
+  definition: FieldDefinition,
+  field: Pick<FormField, "type" | "options" | "controlKind" | "interactionMode">,
+  context: FieldSemanticContext
+): boolean {
+  if (!supportsFieldType(definition, field)) return false;
+  if (context.section !== undefined && !definition.sections.includes(context.section)) return false;
+  if (definition.semantic.includes("[]")) {
+    return materialize(definition.semantic, context.entryContext) !== undefined;
+  }
+  return context.entryContext === undefined;
+}
+
+function definitionForSemantic(
+  definitions: readonly FieldDefinition[],
+  semantic: string,
+  entryContext: string | undefined
+): FieldDefinition | undefined {
+  return definitions.find((definition) => materialize(definition.semantic, entryContext) === semantic);
+}
+
+function exactDefinition(
+  definitions: readonly FieldDefinition[],
+  label: string
+): FieldDefinition | undefined {
+  const normalized = normalizeExactLabel(label);
+  return definitions.find((definition) =>
+    [definition.label, ...definition.aliases].some((candidate) => normalizeExactLabel(candidate) === normalized));
+}
+
+function normalizeExactLabel(value: string): string {
+  return value.normalize("NFKC").replace(/[^\p{L}\p{N}]+/gu, "").toLocaleLowerCase();
+}
+
+function derivedSemantic(
+  field: Pick<FormField, "label" | "type" | "semanticHint">,
+  context: FieldSemanticContext
+): string | undefined {
+  if (field.type !== "select" && field.type !== "radio" && field.type !== "checkbox") return undefined;
+  if (!/^(?:education\[\d+\]\.hasLaboratory)$/u.test(field.semanticHint ?? "")) return undefined;
+  return context.entryContext === undefined ? undefined : `${context.entryContext}.hasLaboratory`;
 }
 
 function fieldQuery(
@@ -221,7 +375,7 @@ function materialize(template: string, entryContext: string | undefined): string
   return template.replace(`${root}[]`, entryContext);
 }
 
-function cosineSimilarity(left: number[], right: number[]): number {
+function cosineSimilarity(left: readonly number[], right: readonly number[]): number {
   if (left.length !== right.length) return -1;
   let dot = 0;
   let leftNorm = 0;
@@ -242,6 +396,15 @@ function validatedVector(vector: number[]): number[] {
     throw new Error("invalid embedding vector");
   }
   return vector;
+}
+
+function validateMatchingDimensions(
+  vectors: readonly (readonly number[])[],
+  query: readonly number[]
+): void {
+  if (vectors.length === 0 || vectors.some((vector) => vector.length !== query.length)) {
+    throw new Error("embedding dimension mismatch");
+  }
 }
 
 function validateThreshold(value: number, name: string): void {

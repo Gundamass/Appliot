@@ -1,4 +1,14 @@
-export type MokahrSection = "education" | "work" | "projects" | "awards" | "laboratory";
+import type { PageSectionHint } from "@resume/contracts";
+
+export type MokahrSection =
+  | "education"
+  | "work"
+  | "internship"
+  | "work_combined"
+  | "projects"
+  | "awards"
+  | "laboratory"
+  | "languages";
 
 export interface MokahrObservedAction {
   id: string;
@@ -23,19 +33,49 @@ export interface MokahrPageSignal {
 
 const SECTION_SIGNALS: Array<{ section: MokahrSection; patterns: RegExp[] }> = [
   { section: "education", patterns: [/教育经历/i, /教育背景/i, /教育信息/i] },
-  { section: "work", patterns: [/工作经历/i, /实习经历/i, /工作\s*\/\s*实习经历/i, /工作或实习经历/i] },
+  { section: "work_combined", patterns: [
+    /工作\s*[/／或]\s*实习经历/i,
+    /实习\s*[/／或]\s*工作经历/i
+  ] },
+  { section: "internship", patterns: [/实习经历/i] },
+  { section: "work", patterns: [/正式工作经历/i, /工作经历/i] },
   { section: "projects", patterns: [/项目经历/i, /项目经验/i, /项目背景/i] },
   { section: "awards", patterns: [/获奖经历/i, /获奖信息/i, /赛事经历/i, /竞赛经历/i, /奖项经历/i] },
-  { section: "laboratory", patterns: [/实验室经历/i, /科研经历/i, /研究经历/i] }
+  { section: "laboratory", patterns: [/实验室经历/i, /科研经历/i, /研究经历/i] },
+  { section: "languages", patterns: [/语言能力/i, /外语能力/i] }
 ];
 
 const FIELD_ORDER: Record<MokahrSection, RegExp[]> = {
   education: [/学校|院校|毕业院校/i, /学历/i, /专业/i, /开始时间|入学时间/i, /结束时间|毕业时间/i, /成绩|GPA/i, /描述|说明/i],
   work: [/公司|单位/i, /职位|岗位|职务/i, /工作类型|用工类型|实习类型/i, /开始时间/i, /结束时间/i, /地点|所在地/i, /职责/i, /成果|业绩|成就/i],
+  internship: [/公司|单位/i, /职位|岗位|职务/i, /实习类型|用工类型/i, /开始时间/i, /结束时间/i, /地点|所在地/i, /职责/i, /成果|业绩|成就/i],
+  work_combined: [/公司|单位/i, /职位|岗位|职务/i, /工作类型|用工类型|实习类型/i, /开始时间/i, /结束时间/i, /地点|所在地/i, /职责/i, /成果|业绩|成就/i],
   projects: [/项目名称|项目名/i, /开始时间/i, /结束时间/i, /项目描述|项目简介|描述/i, /技术栈|技术|开发工具/i, /项目要点|项目成果|项目职责|职责|亮点/i],
   awards: [/获奖名称|奖项名称|赛事名称|比赛名称/i, /获奖时间|奖项时间|赛事时间/i, /奖项级别|获奖级别/i, /获奖描述|奖项描述|赛事描述/i],
-  laboratory: [/实验室名称|科研名称|研究方向/i, /开始时间/i, /结束时间/i, /描述|成果|职责/i]
+  laboratory: [/实验室名称|科研名称|研究方向/i, /开始时间/i, /结束时间/i, /描述|成果|职责/i],
+  languages: [/语种|语言/i, /等级|水平/i, /证书|考试/i, /分数|成绩/i]
 };
+
+const PAGE_SECTION_SIGNALS: Array<{ section: PageSectionHint; patterns: RegExp[] }> = [
+  { section: "work_combined", patterns: sectionPatterns("work_combined") },
+  { section: "internship", patterns: sectionPatterns("internship") },
+  { section: "work", patterns: sectionPatterns("work") },
+  { section: "education", patterns: sectionPatterns("education") },
+  { section: "projects", patterns: sectionPatterns("projects") },
+  { section: "awards", patterns: sectionPatterns("awards") },
+  { section: "languages", patterns: sectionPatterns("languages") },
+  { section: "basics", patterns: [/基本信息/i, /个人信息/i] },
+  { section: "preferences", patterns: [/求职意向/i, /应聘意向/i] },
+  { section: "campus", patterns: [/在校实践/i, /校园经历/i, /实验室经历/i, /科研经历/i] },
+  { section: "publications", patterns: [/论文/i, /发表成果/i] },
+  { section: "certificates", patterns: [/证书/i, /资格证/i] },
+  { section: "self", patterns: [/自我评价/i, /个人总结/i] }
+];
+
+export function sectionHintForText(value: string | undefined): PageSectionHint | undefined {
+  const text = normalized(value);
+  return PAGE_SECTION_SIGNALS.find(({ patterns }) => patterns.some((pattern) => pattern.test(text)))?.section;
+}
 
 export function isMokahrPage(signal: MokahrPageSignal): boolean {
   const url = signal.url.toLowerCase();
@@ -68,6 +108,10 @@ function isAddAction(value: string): boolean {
 
 function sectionFor(value: string): MokahrSection | undefined {
   return SECTION_SIGNALS.find(({ patterns }) => patterns.some((pattern) => pattern.test(value)))?.section;
+}
+
+function sectionPatterns(section: MokahrSection): RegExp[] {
+  return SECTION_SIGNALS.find((signal) => signal.section === section)?.patterns ?? [];
 }
 
 function fieldRank(patterns: RegExp[], label: string): number {

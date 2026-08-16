@@ -27,13 +27,16 @@ const SECTION_NAMES: Partial<Record<FieldSection, string>> = {
   campus: "在校实践",
   awards: "获奖经历",
   publications: "论文与专著",
+  languages: "语言能力",
   certificates: "证书"
 };
 
 const FIELD_ORDERS: Partial<Record<FieldSection, readonly string[]>> = {
   projects: ["name", "role", "startDate", "endDate", "technologies", "url", "description", "highlights[0]"],
   work: ["company", "position", "startDate", "endDate", "description", "employmentType"],
-  awards: ["name", "date", "level", "description"]
+  campus: ["name", "role", "startDate", "endDate", "description", "highlights[0]"],
+  awards: ["name", "date", "level", "description"],
+  languages: ["name", "proficiency", "speakingListening", "readingWriting"]
 };
 
 const PROJECT_WIDE_FIELDS = new Set(["technologies", "url", "description", "highlights[0]"]);
@@ -156,6 +159,7 @@ function entryTitle(section: FieldSection, index: number, values: Record<string,
     campus: [`campus[${index}].name`],
     awards: [`awards[${index}].name`],
     publications: [`publications[${index}].title`],
+    languages: [`languages[${index}].name`],
     certificates: [`certificates[${index}].name`]
   };
   return candidates[section]?.map((path) => values[path]?.trim()).find(Boolean) ?? `${SECTION_NAMES[section] ?? "经历"} ${index + 1}`;

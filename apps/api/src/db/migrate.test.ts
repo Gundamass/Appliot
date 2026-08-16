@@ -3,6 +3,93 @@ import { describe, expect, it } from "vitest";
 import { migrateDatabase } from "./migrate.js";
 
 describe("migrateDatabase", () => {
+  it("creates job matching persistence tables and indexes idempotently", () => {
+    const database = new Database(":memory:");
+
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    const tables = database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name LIKE 'job_%'
+      ORDER BY name
+    `).all();
+    const indexes = database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'index' AND name LIKE 'job_%'
+      ORDER BY name
+    `).all() as Array<{ name: string }>;
+    const resultForeignKeys = database.prepare("PRAGMA foreign_key_list(job_match_results)").all();
+    const postingForeignKeys = database.prepare("PRAGMA foreign_key_list(job_postings)").all();
+
+    expect(tables).toEqual([
+      { name: "job_extraction_cursors" },
+      { name: "job_match_events" },
+      { name: "job_match_expectation_snapshots" },
+      { name: "job_match_results" },
+      { name: "job_match_sessions" },
+      { name: "job_postings" }
+    ]);
+    expect(indexes.map(({ name }) => name)).toEqual(expect.arrayContaining([
+      "job_match_events_session_sequence_unique",
+      "job_match_results_identity_unique",
+      "job_postings_session_url_hash_unique"
+    ]));
+    expect(resultForeignKeys).toEqual(expect.arrayContaining([
+      expect.objectContaining({ from: "session_id", table: "job_match_sessions", on_delete: "CASCADE" }),
+      expect.objectContaining({ from: "posting_id", table: "job_postings", on_delete: "CASCADE" })
+    ]));
+    expect(postingForeignKeys).toContainEqual(
+      expect.objectContaining({ from: "session_id", table: "job_match_sessions", on_delete: "CASCADE" })
+    );
+    database.close();
+  });
+
+  it("upgrades checkpoint state constraints for persistent challenge pauses without losing rows", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    database.prepare(`
+      INSERT INTO application_checkpoints (
+        task_id, sequence, state, url, stage, snapshot_id, field_ids_json,
+        questions_json, snapshot_json, content_review_json, field_coverage_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "task-legacy", 1, "observing", "https://jobs.example.test/apply", "application_form",
+      "snapshot-legacy", "[]", "[]", null, null, null, "2026-08-15T00:00:00.000Z"
+    );
+    database.prepare(`
+      INSERT INTO application_task_events (task_id, type, state, created_at)
+      VALUES (?, 'state_changed', ?, ?)
+    `).run("task-legacy", "observing_page", "2026-08-15T00:00:00.000Z");
+
+    migrateDatabase(database);
+    database.prepare(`
+      INSERT INTO application_checkpoints (
+        task_id, sequence, state, url, stage, snapshot_id, field_ids_json,
+        questions_json, snapshot_json, content_review_json, field_coverage_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "task-challenge", 1, "awaiting_challenge", "https://jobs.example.test/apply", "application_form",
+      "snapshot-challenge", "[]", "[]", null, null, null, "2026-08-15T00:01:00.000Z"
+    );
+    database.prepare(`
+      INSERT INTO application_task_events (task_id, type, state, created_at)
+      VALUES (?, 'state_changed', ?, ?)
+    `).run("task-challenge", "awaiting_challenge", "2026-08-15T00:01:00.000Z");
+
+    expect(database.prepare("SELECT task_id, state FROM application_checkpoints ORDER BY task_id").all())
+      .toEqual([
+        { task_id: "task-challenge", state: "awaiting_challenge" },
+        { task_id: "task-legacy", state: "observing" }
+      ]);
+    expect(database.prepare("SELECT task_id, state FROM application_task_events ORDER BY task_id").all())
+      .toEqual([
+        { task_id: "task-challenge", state: "awaiting_challenge" },
+        { task_id: "task-legacy", state: "observing_page" }
+      ]);
+    database.close();
+  });
+
   it("creates profile revision metadata and task synchronization columns idempotently", () => {
     const database = new Database(":memory:");
 

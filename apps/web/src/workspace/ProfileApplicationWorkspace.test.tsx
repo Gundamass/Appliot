@@ -25,6 +25,7 @@ const applicationApi = {
   delete: vi.fn(),
   recover: vi.fn()
 };
+const jobMatchApi = { create: vi.fn() };
 
 function reviewTask(state: ApplicationTask["state"], suffix: string, commands: ApplicationTask["commands"]): ApplicationTask {
   return {
@@ -48,7 +49,7 @@ describe("ProfileApplicationWorkspace", () => {
   it("keeps the workspace shell focused on profile, application, and review", async () => {
     render(
       <BrowserRouter>
-        <ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={applicationApi} />
+        <ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={applicationApi} jobMatchApi={jobMatchApi as never} />
       </BrowserRouter>
     );
 
@@ -67,7 +68,7 @@ describe("ProfileApplicationWorkspace", () => {
     const user = userEvent.setup();
     render(
       <BrowserRouter>
-        <ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={applicationApi} />
+        <ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={applicationApi} jobMatchApi={jobMatchApi as never} />
       </BrowserRouter>
     );
 
@@ -84,7 +85,7 @@ describe("ProfileApplicationWorkspace", () => {
     const user = userEvent.setup();
     render(
       <BrowserRouter>
-        <ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={applicationApi} />
+        <ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={applicationApi} jobMatchApi={jobMatchApi as never} />
       </BrowserRouter>
     );
 
@@ -106,7 +107,7 @@ describe("ProfileApplicationWorkspace", () => {
     window.history.pushState({}, "", "/?view=reviews");
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} /></BrowserRouter>);
+    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} jobMatchApi={jobMatchApi as never} /></BrowserRouter>);
     await screen.findByText(activeTask.applicationUrl);
     await userEvent.setup().click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
@@ -125,7 +126,7 @@ describe("ProfileApplicationWorkspace", () => {
     window.history.pushState({}, "", "/?view=reviews");
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} /></BrowserRouter>);
+    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} jobMatchApi={jobMatchApi as never} /></BrowserRouter>);
     await screen.findByText(failedTask.applicationUrl);
     await userEvent.setup().click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
@@ -144,7 +145,7 @@ describe("ProfileApplicationWorkspace", () => {
     window.history.pushState({}, "", "/?view=reviews");
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} /></BrowserRouter>);
+    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} jobMatchApi={jobMatchApi as never} /></BrowserRouter>);
     await screen.findByText(activeTask.applicationUrl);
     await userEvent.setup().click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
@@ -163,11 +164,85 @@ describe("ProfileApplicationWorkspace", () => {
     window.history.pushState({}, "", "/?view=reviews");
     vi.spyOn(window, "confirm").mockReturnValue(true);
 
-    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} /></BrowserRouter>);
+    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={api} jobMatchApi={jobMatchApi as never} /></BrowserRouter>);
     await screen.findByText(failedTask.applicationUrl);
     await userEvent.setup().click(screen.getByRole("button", { name: "删除任务：career.example.com" }));
 
     expect(await screen.findByRole("alert")).toHaveTextContent("删除失败");
     expect(screen.getByText(failedTask.applicationUrl)).toBeVisible();
+  });
+
+  it("defaults to job matching and can switch to direct application", async () => {
+    window.history.pushState({}, "", "/?view=apply");
+    render(<BrowserRouter><ProfileApplicationWorkspace
+      profileApi={profileApi()}
+      applicationApi={applicationApi}
+      jobMatchApi={jobMatchApi as never}
+    /></BrowserRouter>);
+
+    const matchMode = await screen.findByRole("button", { name: "岗位匹配" });
+    expect(matchMode).toHaveAttribute("aria-pressed", "true");
+    await userEvent.click(screen.getByRole("button", { name: "直接投递" }));
+
+    expect(screen.getByLabelText("任务名称")).toBeVisible();
+    expect(screen.getByRole("button", { name: "直接投递" })).toHaveAttribute("aria-pressed", "true");
+  });
+
+  it("navigates to a created job match session", async () => {
+    window.history.pushState({}, "", "/?view=apply");
+    const api = profileApi();
+    api.listFacts = vi.fn().mockResolvedValue([{
+      id: "role",
+      fieldPath: "preferences.targetRole",
+      value: "Java",
+      status: "user_confirmed",
+      confidence: 1,
+      scope: "profile",
+      evidence: [{ documentId: "fixture", page: 1, text: "Java", extraction: "user" }],
+      revision: 1
+    }]);
+    const matching = { create: vi.fn().mockResolvedValue({ id: "session-1" }) };
+    render(<BrowserRouter><ProfileApplicationWorkspace
+      profileApi={api}
+      applicationApi={applicationApi}
+      jobMatchApi={matching as never}
+    /></BrowserRouter>);
+
+    await screen.findByDisplayValue("Java");
+    await userEvent.type(screen.getByLabelText("招聘链接"), "https://acme.mokahr.com/jobs");
+    await userEvent.click(screen.getByRole("button", { name: "确认岗位期望并开始匹配" }));
+
+    expect(window.location.pathname).toBe("/job-match-sessions/session-1");
+  });
+
+  it("switches to direct application and prefills an application redirect", async () => {
+    window.history.pushState({}, "", "/?view=apply");
+    const api = profileApi();
+    api.listFacts = vi.fn().mockResolvedValue([{
+      id: "role",
+      fieldPath: "preferences.targetRole",
+      value: "Java",
+      status: "user_confirmed",
+      confidence: 1,
+      scope: "profile",
+      evidence: [{ documentId: "fixture", page: 1, text: "Java", extraction: "user" }],
+      revision: 1
+    }]);
+    const matching = { create: vi.fn().mockResolvedValue({
+      redirect: "application",
+      applicationUrl: "https://acme.mokahr.com/apply"
+    }) };
+    render(<BrowserRouter><ProfileApplicationWorkspace
+      profileApi={api}
+      applicationApi={applicationApi}
+      jobMatchApi={matching as never}
+    /></BrowserRouter>);
+
+    await screen.findByDisplayValue("Java");
+    await userEvent.type(screen.getByLabelText("招聘链接"), "https://acme.mokahr.com/apply");
+    await userEvent.click(screen.getByRole("button", { name: "确认岗位期望并开始匹配" }));
+
+    expect(await screen.findByLabelText("投递官网链接")).toHaveValue("https://acme.mokahr.com/apply");
+    expect(applicationApi.create).not.toHaveBeenCalled();
   });
 });

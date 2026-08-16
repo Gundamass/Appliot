@@ -11,6 +11,7 @@ export type FieldSection =
   | "campus"
   | "awards"
   | "publications"
+  | "languages"
   | "certificates"
   | "self";
 
@@ -57,6 +58,7 @@ export const PROFILE_SECTION_DEFINITIONS: readonly ProfileSectionDefinition[] = 
   { id: "campus", label: "在校实践", repeatable: true },
   { id: "awards", label: "获奖经历", repeatable: true },
   { id: "publications", label: "论文与专著", repeatable: true },
+  { id: "languages", label: "语言能力", repeatable: true },
   { id: "certificates", label: "证书", repeatable: true },
   { id: "self", label: "自我评价", repeatable: false }
 ] as const;
@@ -85,8 +87,11 @@ const RAW_FIELD_DEFINITIONS = [
   definition("identity.idNumber", "证件号码", ["身份证号", "身份证号码"], TEXT_TYPES, ["basics"], "身份凭证号码", "sensitive"),
 
   definition("preferences.targetRole", "期望职位", ["意向岗位", "求职岗位", "目标岗位"], TEXT_SELECT_TYPES, ["preferences"], "候选人的目标职位"),
-  definition("preferences.targetCity", "期望工作地点", ["意向城市", "目标城市", "工作城市"], TEXT_SELECT_TYPES, ["preferences"], "候选人的目标工作城市"),
+  definition("preferences.targetCity", "期望工作地点", ["意向城市", "目标城市", "工作城市"], TEXT_SELECT_TYPES, ["preferences"], "候选人的目标工作城市", "normal", ["preferences.location"]),
   definition("preferences.employmentType", "期望工作性质", ["工作性质", "求职类型"], TEXT_SELECT_TYPES, ["preferences"], "全职、实习等期望工作性质"),
+  definition("preferences.industry", "期望行业", ["目标行业", "意向行业"], TEXT_SELECT_TYPES, ["preferences"], "候选人的目标行业"),
+  definition("preferences.workMode", "期望办公方式", ["办公方式", "工作方式"], TEXT_SELECT_TYPES, ["preferences"], "现场、混合或远程办公偏好"),
+  definition("preferences.salary", "期望薪资", ["薪资期望", "期望月薪"], TEXT_TYPES, ["preferences"], "候选人的薪资范围"),
   definition("preferences.availability", "到岗时间", ["最快到岗时间", "可入职时间"], DATE_TYPES, ["preferences"], "候选人可以开始工作的时间", "commitment"),
   definition("preferences.willingToRelocate", "是否接受异地工作", ["是否接受调动", "是否接受调剂"], ["select", "radio", "checkbox"], ["preferences"], "是否接受异地、调动或岗位调剂", "commitment"),
   definition("preferences.willingToTravel", "是否接受出差", ["能否出差", "出差意愿"], ["select", "radio", "checkbox"], ["preferences"], "是否接受工作出差", "commitment"),
@@ -148,6 +153,11 @@ const RAW_FIELD_DEFINITIONS = [
   repeated("publications[].url", "成果链接", ["论文链接", "出版物链接"], TEXT_TYPES, "publications", "论文或专著的链接"),
   repeated("publications[].description", "成果描述", ["论文描述", "专著描述"], ["textarea", "text"], "publications", "论文或专著的原文说明"),
 
+  repeated("languages[].name", "语言名称", ["语种", "外语名称", "language"], TEXT_SELECT_TYPES, "languages", "候选人掌握的语言名称"),
+  repeated("languages[].proficiency", "掌握程度", ["语言水平", "熟练程度", "proficiency"], TEXT_SELECT_TYPES, "languages", "候选人对该语言的综合掌握程度"),
+  repeated("languages[].speakingListening", "听说能力", ["口语能力", "听力能力", "听说水平"], TEXT_SELECT_TYPES, "languages", "候选人对该语言的听说能力"),
+  repeated("languages[].readingWriting", "读写能力", ["阅读能力", "写作能力", "读写水平"], TEXT_SELECT_TYPES, "languages", "候选人对该语言的读写能力"),
+
   repeated("certificates[].name", "证书名称", ["资格证书", "认证名称"], TEXT_TYPES, "certificates", "证书或资格认证名称"),
   repeated("certificates[].issuer", "颁发机构", ["发证机构"], TEXT_TYPES, "certificates", "证书颁发机构"),
   repeated("certificates[].date", "获得时间", ["证书时间", "取得时间"], DATE_TYPES, "certificates", "获得证书的日期"),
@@ -187,6 +197,9 @@ const PROFILE_FIELD_METADATA: Readonly<Record<string, {
   "preferences.targetRole": { control: "suggestion" },
   "preferences.targetCity": { control: "suggestion" },
   "preferences.employmentType": { control: "enum", options: EMPLOYMENT_TYPE_OPTIONS },
+  "preferences.industry": { control: "suggestion" },
+  "preferences.workMode": { control: "suggestion" },
+  "preferences.salary": { control: "text" },
   "preferences.willingToRelocate": { control: "boolean", options: ["是", "否"] },
   "preferences.willingToTravel": { control: "boolean", options: ["是", "否"] },
   "education[].degree": { control: "enum", options: DEGREE_OPTIONS },
@@ -199,7 +212,12 @@ const PROFILE_FIELD_METADATA: Readonly<Record<string, {
   "education[].schoolLocation": { control: "suggestion" },
   "work[].employmentType": { control: "enum", options: EMPLOYMENT_TYPE_OPTIONS },
   "awards[].level": { control: "enum", options: AWARD_LEVEL_OPTIONS },
-  "projects[].url": { control: "text", required: false }
+  "languages[].name": { control: "suggestion" },
+  "languages[].proficiency": { control: "suggestion" },
+  "languages[].speakingListening": { control: "suggestion" },
+  "languages[].readingWriting": { control: "suggestion" },
+  "projects[].url": { control: "text", required: false },
+  "campus[].highlights[0]": { control: "textarea", required: false }
 };
 
 export const FIELD_DEFINITIONS: readonly FieldDefinition[] = RAW_FIELD_DEFINITIONS.map((field) => ({
@@ -276,9 +294,19 @@ function definition(
   types: readonly SemanticFieldType[],
   sections: readonly FieldSection[],
   description: string,
-  risk: FieldDefinition["risk"] = "normal"
+  risk: FieldDefinition["risk"] = "normal",
+  legacySemantics: readonly string[] = []
 ): Omit<FieldDefinition, "profileControl" | "profileOptions"> {
-  return { semantic, label, aliases, types, sections, risk, description };
+  return {
+    semantic,
+    label,
+    aliases,
+    types,
+    sections,
+    risk,
+    description,
+    ...(legacySemantics.length === 0 ? {} : { legacySemantics })
+  };
 }
 
 function repeated(
@@ -310,7 +338,7 @@ function semanticPattern(value: string): RegExp {
 }
 
 function contextFromHint(hint: string | undefined): string | undefined {
-  return hint?.match(/^(education|work|projects|campus|awards|publications|certificates)\[\d+\]/u)?.[0];
+  return hint?.match(/^(education|work|projects|campus|awards|publications|languages|certificates)\[\d+\]/u)?.[0];
 }
 
 function materializeSemantic(template: string, entryContext: string | undefined): string | undefined {

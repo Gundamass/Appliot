@@ -88,7 +88,7 @@ describe("application task repository", () => {
       fieldIds: ["field-school"],
       questions: [],
       fieldCoverage: {
-        total: 1, ready: 1, review: 0, missing: 0, unsupported: 0, filled: 0,
+        total: 1, ready: 1, review: 0, missing: 0, unsupported: 0, filled: 0, failed: 0,
         fields: [{
           fieldId: "field-school", label: "毕业院校", semantic: "education[0].institution",
           status: "ready", source: "exact", confidence: 1, reason: "精确路径匹配", evidence: []
@@ -189,6 +189,26 @@ describe("application task repository", () => {
     const repository = createApplicationTaskRepository(database);
     expect(repository.get("legacy-task")?.name).toBe("大疆校招投递");
     expect(repository.list()[0]?.name).toBe("大疆校招投递");
+    database.close();
+  });
+
+  it("idempotently creates the same review task for a job-match conversion", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createApplicationTaskRepository(database);
+    const input = {
+      id: "application-from-job",
+      name: "Java Engineer",
+      applicationUrl: "https://jobs.example/posting-1"
+    };
+
+    const first = repository.createFromJob(input);
+    expect(repository.createFromJob(input)).toEqual(first);
+    expect(repository.list()).toEqual([first]);
+    expect(() => repository.createFromJob({
+      ...input,
+      applicationUrl: "https://jobs.example/different"
+    })).toThrow("application_task_idempotency_conflict");
     database.close();
   });
 });

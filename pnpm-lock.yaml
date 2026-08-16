@@ -62,6 +62,9 @@ importers:
       '@resume/form-semantics':
         specifier: workspace:*
         version: link:../../packages/form-semantics
+      '@resume/job-matching':
+        specifier: workspace:*
+        version: link:../../packages/job-matching
       '@resume/model-provider':
         specifier: workspace:*
         version: link:../../packages/model-provider
@@ -128,6 +131,9 @@ importers:
       '@resume/form-semantics':
         specifier: workspace:*
         version: link:../../packages/form-semantics
+      '@resume/job-matching':
+        specifier: workspace:*
+        version: link:../../packages/job-matching
       lucide-react:
         specifier: 1.25.0
         version: 1.25.0(react@19.2.8)
@@ -193,6 +199,15 @@ importers:
       jsdom:
         specifier: 29.1.1
         version: 29.1.1
+
+  packages/job-matching:
+    dependencies:
+      '@resume/contracts':
+        specifier: workspace:*
+        version: link:../contracts
+      xstate:
+        specifier: 5.19.4
+        version: 5.19.4
 
   packages/model-provider:
     dependencies:

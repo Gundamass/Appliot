@@ -52,14 +52,15 @@ function send(channel: IpcChannel, requestId: string, response: WorkerResponse):
   });
 }
 
-function sendActivity(channel: IpcChannel, activity: unknown): Promise<void> | undefined {
+function sendActivity(channel: IpcChannel, activity: unknown, requestId?: string): Promise<void> | undefined {
   const parsedActivity = WorkerActivitySchema.safeParse(activity);
   if (!parsedActivity.success) {
     return undefined;
   }
-  const envelope = ActivityEnvelopeSchema.parse({
-    response: { type: "activity", activity: parsedActivity.data }
-  });
+  const response = { type: "activity" as const, activity: parsedActivity.data };
+  const envelope = requestId
+    ? ResponseEnvelopeSchema.parse({ requestId, response })
+    : ActivityEnvelopeSchema.parse({ response });
   return new Promise((resolve, reject) => {
     if (!channel.send) {
       reject(new Error("浏览器 Worker 缺少 IPC 通道"));
@@ -73,6 +74,7 @@ export function createIpcServer(session: BrowserSessionManager, channel: IpcChan
   let handshaken = false;
   let queue = Promise.resolve();
   let unsubscribeActivity: (() => void) | undefined;
+  let activeExecuteRequestId: string | undefined;
 
   const handle = async (request: WorkerRequest): Promise<WorkerResponse> => {
     if (request.type === "handshake") {
@@ -82,7 +84,7 @@ export function createIpcServer(session: BrowserSessionManager, channel: IpcChan
       await session.start(request.approvalKey);
       handshaken = true;
       unsubscribeActivity = session.subscribeActivity((activity) => {
-        void sendActivity(channel, activity)?.catch((error) => {
+        void sendActivity(channel, activity, activeExecuteRequestId)?.catch((error) => {
           channel.stderr.write(`${error instanceof Error ? error.message : String(error)}\n`);
         });
       });
@@ -96,6 +98,33 @@ export function createIpcServer(session: BrowserSessionManager, channel: IpcChan
     }
     if (request.type === "capture_snapshot") {
       return { type: "snapshot", snapshot: await session.observe(request.taskId) };
+    }
+    if (request.type === "capture_job_snapshot") {
+      return { type: "job_snapshot", snapshot: await session.observeJob(request.ownerId) };
+    }
+    if (request.type === "apply_job_filters") {
+      const snapshot = await session.applyJobFilters(
+        request.ownerId,
+        request.plan,
+        request.executionEpoch
+      );
+      return {
+        type: "job_filter_result",
+        ownerId: request.ownerId,
+        filterState: snapshot.filterState,
+        snapshot
+      };
+    }
+    if (request.type === "advance_job_page") {
+      return {
+        type: "job_page_advanced",
+        ownerId: request.ownerId,
+        snapshot: await session.advanceJobPage(
+          request.ownerId,
+          request.cursor,
+          request.executionEpoch
+        )
+      };
     }
     if (request.type === "execute") {
       return session.execute(request.command, request.executionEpoch);
@@ -139,6 +168,8 @@ export function createIpcServer(session: BrowserSessionManager, channel: IpcChan
         return;
       }
 
+      const isExecute = parsed.data.request.type === "execute";
+      if (isExecute) activeExecuteRequestId = parsed.data.requestId;
       let response: WorkerResponse;
       try {
         response = await handle(parsed.data.request);
@@ -146,6 +177,7 @@ export function createIpcServer(session: BrowserSessionManager, channel: IpcChan
         response = workerError("WORKER_FAILURE", error);
       }
       await send(channel, parsed.data.requestId, response);
+      if (isExecute) activeExecuteRequestId = undefined;
       if (parsed.data.request.type === "shutdown") {
         channel.disconnect();
       }

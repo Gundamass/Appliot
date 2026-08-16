@@ -1,5 +1,6 @@
 export interface RawFormField {
   path: string;
+  nodeId: string;
   tag: "input" | "textarea" | "select";
   inputType: string;
   name: string;
@@ -9,6 +10,7 @@ export interface RawFormField {
   optionsTruncated?: boolean;
   controlKind?: "native" | "custom";
   interactionMode?: "native" | "search" | "choice_group" | "date_group" | "file";
+  sectionText?: string;
   explicitLabel: string;
   wrappingLabel: string;
   ariaLabel: string;
@@ -20,25 +22,30 @@ const MAX_FIELD_OPTIONS = 100;
 
 export interface RawPageAction {
   path: string;
+  nodeId: string;
   text: string;
   ariaLabel: string;
   nearbyText: string;
 }
 
 export interface RawFormObservation {
+  documentId: string;
+  mutationEpoch: number;
   fields: RawFormField[];
   actions: RawPageAction[];
   errors: string[];
 }
 
 export function collectRawFormObservation(document: Document): RawFormObservation {
+  const identity = documentIdentity(document);
   const fields = [...document.querySelectorAll<HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement>(
-    "input:not([type=hidden]), textarea, select"
-  )].filter((element) => !element.disabled).map((element) => fieldObservation(document, element));
+    "input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=reset]):not([type=image]), textarea, select"
+  )].filter((element) => !element.disabled).map((element) => fieldObservation(document, element, identity));
   const actions = [...document.querySelectorAll<HTMLElement>(
     'button, input[type="button"], input[type="submit"], a[role="button"]'
   )].filter((element) => !isDisabled(element)).map((element) => ({
     path: elementPath(element),
+    nodeId: identity.nodeId(element),
     text: elementText(element),
     ariaLabel: normalized(element.getAttribute("aria-label")),
     nearbyText: normalized(element.closest("[data-action-context]")?.textContent)
@@ -46,12 +53,13 @@ export function collectRawFormObservation(document: Document): RawFormObservatio
   const errors = [...document.querySelectorAll<HTMLElement>('[role="alert"], .error, .field-error')]
     .map((element) => normalized(element.textContent))
     .filter(Boolean);
-  return { fields, actions, errors };
+  return { documentId: identity.documentId, mutationEpoch: 0, fields, actions, errors };
 }
 
 function fieldObservation(
   document: Document,
-  element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement
+  element: HTMLInputElement | HTMLTextAreaElement | HTMLSelectElement,
+  identity: DocumentIdentity
 ): RawFormField {
   const tag = element.tagName.toLocaleLowerCase() as RawFormField["tag"];
   const explicitLabel = element.id
@@ -71,6 +79,7 @@ function fieldObservation(
     : [];
   return {
     path: elementPath(element),
+    nodeId: identity.nodeId(element),
     tag,
     inputType: element instanceof document.defaultView!.HTMLInputElement ? element.type : tag,
     name: element.getAttribute("name") ?? "",
@@ -87,12 +96,51 @@ function fieldObservation(
     interactionMode: element instanceof document.defaultView!.HTMLInputElement && element.type === "file"
       ? "file"
       : "native",
+    sectionText: nearestSectionText(element),
     explicitLabel,
     wrappingLabel,
     ariaLabel: normalized(element.getAttribute("aria-label")),
     ariaLabelledBy: labelledBy,
     nearbyText: nearbyFieldText(element)
   };
+}
+
+interface DocumentIdentity {
+  documentId: string;
+  nodeId(element: Element): string;
+}
+
+const documentIdentities = new WeakMap<Document, DocumentIdentity>();
+
+function documentIdentity(document: Document): DocumentIdentity {
+  const existing = documentIdentities.get(document);
+  if (existing !== undefined) return existing;
+  const ids = new WeakMap<Element, string>();
+  const identity: DocumentIdentity = {
+    documentId: `document-${globalThis.crypto.randomUUID()}`,
+    nodeId(element) {
+      const current = ids.get(element);
+      if (current !== undefined) return current;
+      const allocated = `node-${globalThis.crypto.randomUUID()}`;
+      ids.set(element, allocated);
+      return allocated;
+    }
+  };
+  documentIdentities.set(document, identity);
+  return identity;
+}
+
+function nearestSectionText(element: Element): string {
+  let ancestor = element.parentElement;
+  while (ancestor && ancestor !== element.ownerDocument.body) {
+    const heading = ancestor.querySelector<HTMLElement>(
+      ":scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > legend, :scope > [role=heading], :scope > [class*='blockTitle']"
+    );
+    const text = normalized(heading?.textContent);
+    if (text) return text;
+    ancestor = ancestor.parentElement;
+  }
+  return "";
 }
 
 function elementPath(element: Element): string {

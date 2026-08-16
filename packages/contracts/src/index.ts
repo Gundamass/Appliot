@@ -6,3 +6,4 @@ export * from "./reviews.js";
 export * from "./browser.js";
 export * from "./application-name.js";
 export * from "./application.js";
+export * from "./job-matching.js";

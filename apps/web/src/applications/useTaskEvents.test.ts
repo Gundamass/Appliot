@@ -61,9 +61,26 @@ describe("connectTaskEvents", () => {
     }) }));
     source.dispatchEvent(new MessageEvent("operation_started", { data: JSON.stringify({ ...progress, value: "secret" }) }));
 
-    expect(handlers.onEvent).toHaveBeenCalledTimes(2);
+    source.dispatchEvent(new MessageEvent("execution_progress_changed", { data: JSON.stringify({
+      id: "5", taskId: progress.taskId, type: "execution_progress_changed", createdAt: progress.createdAt,
+      executionProgress: {
+        currentPhase: "semantic_fill",
+        phases: [
+          { phase: "waiting_for_form", status: "completed" },
+          { phase: "deterministic_fill", status: "completed" },
+          { phase: "semantic_fill", status: "running" },
+          { phase: "readback_validation", status: "pending" },
+          { phase: "final_review", status: "pending" }
+        ],
+        current: { action: "正在选择：本科专业", fieldId: "major", attempt: 1, maxAttempts: 2 },
+        counts: { exact: 12, semantic: 3, user: 4, missing: 2, failed: 1 }
+      }
+    }) }));
+
+    expect(handlers.onEvent).toHaveBeenCalledTimes(3);
     expect(handlers.onEvent).toHaveBeenNthCalledWith(1, expect.objectContaining({ type: "operation_started" }));
     expect(handlers.onEvent).toHaveBeenNthCalledWith(2, expect.objectContaining({ type: "browser_activity" }));
+    expect(handlers.onEvent).toHaveBeenNthCalledWith(3, expect.objectContaining({ type: "execution_progress_changed" }));
   });
 
   it("returns to connecting while a new task subscription opens", () => {

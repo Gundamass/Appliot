@@ -484,6 +484,33 @@ describe("deterministic verification", () => {
     expect(decision.status).toBe("blocked");
   });
 
+  it("accepts valid month precision for profile timeline dates", async () => {
+    const decision = await resolveCandidate(
+      { ...emailRequest, semantic: "projects[0].startDate", type: "date" },
+      fact({ fieldPath: "projects[0].startDate", value: "2022-10", evidence: [evidence("2022-10")] })
+    );
+
+    expect(decision).toMatchObject({ status: "verified_auto", value: "2022-10" });
+  });
+
+  it.each(["2025-00", "2025-13"])("blocks invalid profile timeline month %s", async (value) => {
+    const decision = await resolveCandidate(
+      { ...emailRequest, semantic: "projects[0].startDate", type: "date" },
+      fact({ fieldPath: "projects[0].startDate", value, evidence: [evidence(value)] })
+    );
+
+    expect(decision.status).toBe("blocked");
+  });
+
+  it("keeps birth dates at day precision", async () => {
+    const decision = await resolveCandidate(
+      { ...emailRequest, semantic: "basics.birthDate", type: "date" },
+      fact({ fieldPath: "basics.birthDate", value: "2025-02", evidence: [evidence("2025-02")] })
+    );
+
+    expect(decision.status).toBe("blocked");
+  });
+
   it.each(["2025-02-29", "2025-2-03", "not-a-date"])("blocks invalid strict date %s", async (value) => {
     const decision = await resolveCandidate(
       { ...emailRequest, semantic: "basics.birthDate", type: "date" },

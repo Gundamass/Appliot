@@ -1,6 +1,7 @@
 import { z } from "zod";
 import { EvidenceSchema, JsonValueSchema } from "./profile.js";
 import { ApplicationTaskNameSchema } from "./application-name.js";
+import { ChallengeDiagnosticSchema } from "./browser.js";
 
 export const ApplicationTaskStateSchema = z.enum([
   "created",
@@ -8,6 +9,7 @@ export const ApplicationTaskStateSchema = z.enum([
   "waiting_for_login",
   "needs_questions",
   "awaiting_content_review",
+  "awaiting_challenge",
   "filling",
   "validating",
   "navigating",
@@ -22,6 +24,45 @@ export const ApplicationDisplayPhaseSchema = z.enum([
   "dynamic_validation",
   "review_handoff"
 ]);
+
+export const ApplicationAutofillPhaseSchema = z.enum([
+  "waiting_for_form",
+  "deterministic_fill",
+  "semantic_fill",
+  "readback_validation",
+  "final_review"
+]);
+
+export const ApplicationPhaseStatusSchema = z.enum([
+  "pending",
+  "running",
+  "completed",
+  "skipped",
+  "failed"
+]);
+
+export const ApplicationExecutionCountsSchema = z.object({
+  exact: z.number().int().nonnegative(),
+  semantic: z.number().int().nonnegative(),
+  user: z.number().int().nonnegative(),
+  missing: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative()
+}).strict();
+
+export const ApplicationExecutionProgressSchema = z.object({
+  currentPhase: ApplicationAutofillPhaseSchema,
+  phases: z.array(z.object({
+    phase: ApplicationAutofillPhaseSchema,
+    status: ApplicationPhaseStatusSchema
+  }).strict()).min(1).max(5),
+  current: z.object({
+    action: z.string().min(1).max(500),
+    fieldId: z.string().min(1).max(128).optional(),
+    attempt: z.union([z.literal(1), z.literal(2)]).optional(),
+    maxAttempts: z.literal(2)
+  }).strict(),
+  counts: ApplicationExecutionCountsSchema
+}).strict();
 
 export const ApplicationTaskInputSchema = z.object({
   applicationUrl: z.string().url().refine((value) => {
@@ -57,6 +98,7 @@ export const ApplicationCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("cancel") }).strict(),
   z.object({ type: z.literal("open_browser") }).strict(),
   z.object({ type: z.literal("resume") }).strict(),
+  z.object({ type: z.literal("resume_after_challenge") }).strict(),
   z.object({ type: z.literal("resume_with_profile") }).strict(),
   z.object({ type: z.literal("sync_profile") }).strict(),
   z.object({ type: z.literal("answer_questions"), answers: z.array(ApplicationAnswerSchema).min(1).max(100) }).strict(),
@@ -69,6 +111,7 @@ export const ApplicationCommandTypeSchema = z.enum([
   "cancel",
   "open_browser",
   "resume",
+  "resume_after_challenge",
   "resume_with_profile",
   "sync_profile",
   "answer_questions",
@@ -113,7 +156,7 @@ export const ApplicationFieldAssessmentSchema = z.object({
   fieldId: z.string().min(1).max(128),
   label: z.string().min(1).max(500),
   semantic: z.string().min(1).max(512).optional(),
-  status: z.enum(["ready", "review", "missing", "unsupported", "filled"]),
+  status: z.enum(["ready", "review", "missing", "unsupported", "filled", "failed"]),
   source: z.enum(["dji_catalog", "exact", "semantic", "user", "none"]),
   confidence: z.number().min(0).max(1),
   reason: z.string().min(1).max(2_000),
@@ -127,6 +170,7 @@ export const ApplicationFieldCoverageSchema = z.object({
   missing: z.number().int().nonnegative(),
   unsupported: z.number().int().nonnegative(),
   filled: z.number().int().nonnegative(),
+  failed: z.number().int().nonnegative().default(0),
   fields: z.array(ApplicationFieldAssessmentSchema).max(500)
 }).strict();
 
@@ -143,7 +187,9 @@ export const ApplicationTaskSchema = z.object({
   profileSyncStatus: z.enum(["current", "pending", "failed"]).optional(),
   profileSyncError: z.string().min(1).max(200).optional(),
   fieldCoverage: ApplicationFieldCoverageSchema.optional(),
-  contentReview: ApplicationContentReviewSchema.optional()
+  executionProgress: ApplicationExecutionProgressSchema.optional(),
+  contentReview: ApplicationContentReviewSchema.optional(),
+  challenge: ChallengeDiagnosticSchema.optional()
 }).strict();
 
 export const ApplicationActivityKindSchema = z.enum([
@@ -240,6 +286,11 @@ export const ApplicationTaskEventSchema = z.discriminatedUnion("type", [
   ApplicationTaskStateChangedEventSchema,
   z.object({
     ...ApplicationTaskEventBaseShape,
+    type: z.literal("execution_progress_changed"),
+    executionProgress: ApplicationExecutionProgressSchema
+  }).strict(),
+  z.object({
+    ...ApplicationTaskEventBaseShape,
     type: z.literal("browser_activity"),
     activity: ApplicationActivitySchema
   }).strict(),
@@ -283,6 +334,10 @@ export const ApplicationTaskHistoryResetSchema = z.object({
 
 export type ApplicationTaskState = z.infer<typeof ApplicationTaskStateSchema>;
 export type ApplicationDisplayPhase = z.infer<typeof ApplicationDisplayPhaseSchema>;
+export type ApplicationAutofillPhase = z.infer<typeof ApplicationAutofillPhaseSchema>;
+export type ApplicationPhaseStatus = z.infer<typeof ApplicationPhaseStatusSchema>;
+export type ApplicationExecutionCounts = z.infer<typeof ApplicationExecutionCountsSchema>;
+export type ApplicationExecutionProgress = z.infer<typeof ApplicationExecutionProgressSchema>;
 export type ApplicationTaskInput = z.infer<typeof ApplicationTaskInputSchema>;
 export type ApplicationAnswer = z.infer<typeof ApplicationAnswerSchema>;
 export type ApplicationQuestion = z.infer<typeof ApplicationQuestionSchema>;

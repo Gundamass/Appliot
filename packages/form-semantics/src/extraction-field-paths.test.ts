@@ -10,6 +10,10 @@ describe("简历抽取字段路径契约", () => {
       "awards[].date",
       "campus[].name",
       "publications[].title",
+      "languages[].name",
+      "languages[].proficiency",
+      "languages[].speakingListening",
+      "languages[].readingWriting",
       "projects[].url"
     ]));
   });
@@ -18,6 +22,8 @@ describe("简历抽取字段路径契约", () => {
     expect(isAllowedExtractedFieldPath("awards[0].name")).toBe(true);
     expect(isAllowedExtractedFieldPath("campus[12].description")).toBe(true);
     expect(isAllowedExtractedFieldPath("publications[1].title")).toBe(true);
+    expect(isAllowedExtractedFieldPath("languages[0].name")).toBe(true);
+    expect(isAllowedExtractedFieldPath("languages[0].readingWriting")).toBe(true);
 
     expect(isAllowedExtractedFieldPath("awards[0].unknown")).toBe(false);
     expect(isAllowedExtractedFieldPath("awards[-1].name")).toBe(false);

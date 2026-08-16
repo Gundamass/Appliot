@@ -9,11 +9,13 @@ export const EXTRACTION_RULES = [
   "Extract only facts explicitly supported by the supplied pages.",
   "Each fact must quote exact evidence from one referenced page.",
   "Do not infer or add unsupported claims.",
-  "Scan the entire resume and cover every explicitly present section: basics, education, internship and work experience, projects, skills, certificates, links, self-evaluation, job preferences, campus practice, awards, and publications.",
+  "Scan the entire resume and cover every explicitly present section: basics, education, internship and work experience, projects, skills, language ability, certificates, links, self-evaluation, job preferences, campus practice, awards, and publications.",
   "Do not stop after extracting basic or education fields.",
   `Use only these canonical field paths when the value is present: ${listExtractableFieldPathTemplates().map(formatExtractionTemplate).join(", ")}`,
   "Treat internships as work entries. Put the exact role shown by the resume in work[index].title, including the internship wording when present, for example Java backend internship. Use work[index].employmentType only for the generic category such as internship or full-time, never as a substitute for the role.",
-  "Emit separate leaf facts for distinct values and use stable zero-based indexes for repeated education, work, project, skill, certificate, campus, award, and publication entries."
+  "Keep language ability under languages[index]. Keep language certificate names and scores under certificates[index]; do not migrate values between these sections.",
+  "Extract explicit campus practice date ranges into separate startDate and endDate facts. Keep campus descriptions as their own facts and do not merge a date range into the description value.",
+  "Emit separate leaf facts for distinct values and use stable zero-based indexes for repeated education, work, project, skill, language, certificate, campus, award, and publication entries."
 ].join(" ");
 
 const EXTRACTION_JSON_EXAMPLE = {

@@ -91,13 +91,118 @@ export function migrateDatabase(database: SqliteDatabase): void {
     );
     INSERT OR IGNORE INTO profile_metadata (id, revision) VALUES (1, 0);
 
+    CREATE TABLE IF NOT EXISTS job_match_sessions (
+      id TEXT PRIMARY KEY,
+      version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+      state TEXT NOT NULL CHECK (state IN (
+        'created', 'awaiting_filter_confirmation', 'opening_job_page', 'awaiting_login',
+        'applying_filters', 'extracting_jobs', 'matching_jobs', 'awaiting_job_selection',
+        'selected', 'converted_to_application', 'awaiting_challenge', 'paused', 'failed',
+        'cancelled', 'expired'
+      )),
+      entry_kind TEXT CHECK (entry_kind IS NULL OR entry_kind IN ('job_list', 'job_detail', 'application_form')),
+      source TEXT CHECK (source IS NULL OR source IN ('moka', 'dji')),
+      initial_url TEXT NOT NULL,
+      adapter_version TEXT,
+      scoring_version TEXT NOT NULL DEFAULT 'job-match-v1' CHECK (scoring_version = 'job-match-v1'),
+      profile_revision INTEGER NOT NULL CHECK (profile_revision >= 0),
+      expectation_revision INTEGER NOT NULL CHECK (expectation_revision >= 0),
+      execution_epoch INTEGER NOT NULL DEFAULT 0 CHECK (execution_epoch >= 0),
+      selected_result_id TEXT,
+      selected_posting_content_hash TEXT,
+      conflict_summary_hash TEXT,
+      selection_idempotency_key TEXT,
+      application_task_id TEXT REFERENCES application_tasks(id),
+      conversion_idempotency_key TEXT,
+      stop_reason TEXT,
+      error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS job_match_sessions_selection_idempotency_unique
+      ON job_match_sessions(selection_idempotency_key) WHERE selection_idempotency_key IS NOT NULL;
+    CREATE UNIQUE INDEX IF NOT EXISTS job_match_sessions_conversion_idempotency_unique
+      ON job_match_sessions(conversion_idempotency_key) WHERE conversion_idempotency_key IS NOT NULL;
+
+    CREATE TABLE IF NOT EXISTS job_match_expectation_snapshots (
+      session_id TEXT NOT NULL REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+      revision INTEGER NOT NULL CHECK (revision >= 0),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      confirmed_at TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (session_id, revision)
+    );
+
+    CREATE TABLE IF NOT EXISTS job_postings (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+      source TEXT NOT NULL CHECK (source IN ('moka', 'dji')),
+      source_job_id TEXT,
+      canonical_url TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      extracted_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS job_postings_session_url_hash_unique
+      ON job_postings(session_id, source, canonical_url, content_hash);
+    CREATE UNIQUE INDEX IF NOT EXISTS job_postings_session_source_id_hash_unique
+      ON job_postings(session_id, source, source_job_id, content_hash) WHERE source_job_id IS NOT NULL;
+    CREATE INDEX IF NOT EXISTS job_postings_session_id_idx ON job_postings(session_id, id);
+
+    CREATE TABLE IF NOT EXISTS job_match_results (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+      posting_id TEXT NOT NULL REFERENCES job_postings(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL CHECK (version >= 0),
+      scoring_version TEXT NOT NULL CHECK (scoring_version = 'job-match-v1'),
+      profile_revision INTEGER NOT NULL CHECK (profile_revision >= 0),
+      expectation_revision INTEGER NOT NULL CHECK (expectation_revision >= 0),
+      posting_content_hash TEXT NOT NULL,
+      stale INTEGER NOT NULL DEFAULT 0 CHECK (stale IN (0, 1)),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS job_match_results_identity_unique
+      ON job_match_results(
+        session_id, posting_id, scoring_version, profile_revision,
+        expectation_revision, posting_content_hash
+      );
+    CREATE INDEX IF NOT EXISTS job_match_results_session_ranking_idx
+      ON job_match_results(session_id, stale, id);
+
+    CREATE TABLE IF NOT EXISTS job_extraction_cursors (
+      session_id TEXT PRIMARY KEY REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+      cursor_json TEXT NOT NULL CHECK (json_valid(cursor_json)),
+      pages_read INTEGER NOT NULL DEFAULT 0 CHECK (pages_read >= 0),
+      elapsed_ms INTEGER NOT NULL DEFAULT 0 CHECK (elapsed_ms >= 0),
+      new_jobs INTEGER NOT NULL DEFAULT 0 CHECK (new_jobs >= 0),
+      consecutive_no_new_pages INTEGER NOT NULL DEFAULT 0 CHECK (consecutive_no_new_pages >= 0),
+      continuation_token TEXT,
+      stop_reason TEXT,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS job_match_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      session_id TEXT NOT NULL REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      type TEXT NOT NULL,
+      idempotency_key TEXT,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS job_match_events_session_sequence_unique
+      ON job_match_events(session_id, sequence);
+    CREATE UNIQUE INDEX IF NOT EXISTS job_match_events_session_idempotency_unique
+      ON job_match_events(session_id, idempotency_key) WHERE idempotency_key IS NOT NULL;
+
     CREATE TABLE IF NOT EXISTS application_task_events (
       id INTEGER PRIMARY KEY AUTOINCREMENT,
       task_id TEXT NOT NULL,
       type TEXT NOT NULL CHECK (type = 'state_changed'),
       state TEXT NOT NULL CHECK (state IN (
         'created', 'observing_page', 'waiting_for_login', 'needs_questions',
-        'awaiting_content_review', 'filling', 'validating', 'navigating',
+        'awaiting_content_review', 'awaiting_challenge', 'filling', 'validating', 'navigating',
         'review_locked', 'cancelled', 'failed'
       )),
       created_at TEXT NOT NULL
@@ -123,7 +228,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
       sequence INTEGER NOT NULL CHECK (sequence > 0),
       state TEXT NOT NULL CHECK (state IN (
         'created', 'observing', 'awaiting_login', 'needs_questions',
-        'awaiting_content_review', 'filling', 'validating', 'navigating',
+        'awaiting_content_review', 'awaiting_challenge', 'filling', 'validating', 'navigating',
         'review_locked', 'cancelled', 'failed'
       )),
       url TEXT NOT NULL,
@@ -209,6 +314,8 @@ export function migrateDatabase(database: SqliteDatabase): void {
     database.exec("ALTER TABLE application_checkpoints ADD COLUMN field_coverage_json TEXT");
   }
 
+  upgradeChallengeStateConstraints(database);
+
   upgradeFactForeignKeys(database);
 
   const documentColumns = database.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;
@@ -238,6 +345,95 @@ export function migrateDatabase(database: SqliteDatabase): void {
     WHEN NOT ((NEW.scope = 'profile' AND NEW.task_id IS NULL) OR (NEW.scope = 'application' AND NEW.task_id IS NOT NULL))
     BEGIN SELECT RAISE(ABORT, 'fact revision scope and task mismatch'); END;
   `);
+}
+
+function upgradeChallengeStateConstraints(database: SqliteDatabase): void {
+  const eventTableNeedsUpgrade = !tableSql(database, "application_task_events").includes("'awaiting_challenge'");
+  const checkpointTableNeedsUpgrade = !tableSql(database, "application_checkpoints").includes("'awaiting_challenge'");
+  if (!eventTableNeedsUpgrade && !checkpointTableNeedsUpgrade) return;
+
+  const upgrade = database.transaction(() => {
+    database.exec("DROP TRIGGER IF EXISTS application_tasks_cleanup");
+
+    if (eventTableNeedsUpgrade) {
+      database.exec(`
+        DROP INDEX IF EXISTS application_task_events_task_id_id_idx;
+        ALTER TABLE application_task_events RENAME TO application_task_events_challenge_legacy;
+        CREATE TABLE application_task_events (
+          id INTEGER PRIMARY KEY AUTOINCREMENT,
+          task_id TEXT NOT NULL,
+          type TEXT NOT NULL CHECK (type = 'state_changed'),
+          state TEXT NOT NULL CHECK (state IN (
+            'created', 'observing_page', 'waiting_for_login', 'needs_questions',
+            'awaiting_content_review', 'awaiting_challenge', 'filling', 'validating', 'navigating',
+            'review_locked', 'cancelled', 'failed'
+          )),
+          created_at TEXT NOT NULL
+        );
+        INSERT INTO application_task_events (id, task_id, type, state, created_at)
+        SELECT id, task_id, type, state, created_at
+        FROM application_task_events_challenge_legacy;
+        DROP TABLE application_task_events_challenge_legacy;
+      `);
+    }
+
+    if (checkpointTableNeedsUpgrade) {
+      database.exec(`
+        ALTER TABLE application_checkpoints RENAME TO application_checkpoints_challenge_legacy;
+        CREATE TABLE application_checkpoints (
+          task_id TEXT NOT NULL,
+          sequence INTEGER NOT NULL CHECK (sequence > 0),
+          state TEXT NOT NULL CHECK (state IN (
+            'created', 'observing', 'awaiting_login', 'needs_questions',
+            'awaiting_content_review', 'awaiting_challenge', 'filling', 'validating', 'navigating',
+            'review_locked', 'cancelled', 'failed'
+          )),
+          url TEXT NOT NULL,
+          stage TEXT NOT NULL CHECK (stage IN ('login', 'application_form', 'review', 'success', 'unknown')),
+          snapshot_id TEXT NOT NULL,
+          field_ids_json TEXT NOT NULL CHECK (json_valid(field_ids_json) AND json_type(field_ids_json) = 'array'),
+          questions_json TEXT NOT NULL CHECK (json_valid(questions_json) AND json_type(questions_json) = 'array'),
+          snapshot_json TEXT CHECK (snapshot_json IS NULL OR json_valid(snapshot_json)),
+          content_review_json TEXT CHECK (content_review_json IS NULL OR json_valid(content_review_json)),
+          field_coverage_json TEXT CHECK (field_coverage_json IS NULL OR json_valid(field_coverage_json)),
+          created_at TEXT NOT NULL,
+          PRIMARY KEY (task_id, sequence)
+        );
+        INSERT INTO application_checkpoints (
+          task_id, sequence, state, url, stage, snapshot_id, field_ids_json,
+          questions_json, snapshot_json, content_review_json, field_coverage_json, created_at
+        )
+        SELECT
+          task_id, sequence, state, url, stage, snapshot_id, field_ids_json,
+          questions_json, snapshot_json, content_review_json, field_coverage_json, created_at
+        FROM application_checkpoints_challenge_legacy;
+        DROP TABLE application_checkpoints_challenge_legacy;
+      `);
+    }
+
+    database.exec(`
+      CREATE INDEX IF NOT EXISTS application_task_events_task_id_id_idx
+        ON application_task_events(task_id, id);
+      CREATE TRIGGER application_tasks_cleanup
+      AFTER DELETE ON application_tasks
+      BEGIN
+        DELETE FROM application_task_events WHERE task_id = OLD.id;
+        DELETE FROM application_task_event_cursors WHERE task_id = OLD.id;
+        DELETE FROM application_checkpoints WHERE task_id = OLD.id;
+        DELETE FROM application_answers WHERE task_id = OLD.id;
+        DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
+        DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
+      END;
+    `);
+  });
+
+  upgrade();
+}
+
+function tableSql(database: SqliteDatabase, table: string): string {
+  const row = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
+    .get(table) as { sql?: string } | undefined;
+  return row?.sql ?? "";
 }
 
 function upgradeFactForeignKeys(database: SqliteDatabase): void {

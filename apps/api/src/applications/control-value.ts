@@ -1,4 +1,4 @@
-const CANONICAL_DATE = /^\d{4}-\d{2}-\d{2}$/u;
+const CANONICAL_DATE = /^\d{4}-\d{2}(?:-\d{2})?$/u;
 
 export function isCanonicalDateSemantic(semantic: string): boolean {
   return /(?:^|\.)(?:startDate|endDate|birthDate|date)(?:\.(?:year|month|day))?$/u.test(semantic);
@@ -11,7 +11,9 @@ export function projectDateComponent(label: string, semantic: string, value: unk
   const normalizedLabel = label.normalize("NFKC").replace(/\s+/gu, " ").trim();
   if (/(?:year|[年])/iu.test(semantic) || /(?:^|\s)[年]/u.test(normalizedLabel)) return value.slice(0, 4);
   if (/(?:month|[月])/iu.test(semantic) || /(?:^|\s)[月]/u.test(normalizedLabel)) return value.slice(5, 7);
-  if (/(?:day|[日号])/iu.test(semantic) || /(?:^|\s)[日号]/u.test(normalizedLabel)) return value.slice(8, 10);
+  if (/(?:day|[日号])/iu.test(semantic) || /(?:^|\s)[日号]/u.test(normalizedLabel)) {
+    return value.length === 10 ? value.slice(8, 10) : value;
+  }
   return value;
 }
 

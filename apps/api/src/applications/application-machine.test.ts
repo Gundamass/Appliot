@@ -1,15 +1,32 @@
 import Database from "better-sqlite3";
-import { ApplicationTaskEventSchema, type ExecutableCommand, type FormField, type FormSnapshot, type WorkerActivity, type WorkerResponse } from "@resume/contracts";
+import { ApplicationTaskEventSchema, type ApplicationFieldAssessment, type ChallengeDiagnostic, type ExecutableCommand, type FormField, type FormSnapshot, type WorkerActivity, type WorkerResponse } from "@resume/contracts";
 import { createActor } from "xstate";
 import { describe, expect, it, vi } from "vitest";
 import { migrateDatabase } from "../db/migrate.js";
-import { applicationMachine, sendApplicationEvent } from "./application-machine.js";
+import { applicationMachine, sendApplicationEvent, type ApplicationEvent } from "./application-machine.js";
 import { createApplicationService } from "./application-service.js";
 import { createCheckpointRepository } from "./checkpoint-repository.js";
 import { createTaskEventBus, type TaskEventBus } from "./task-events.js";
 import { createApplicationTaskRepository } from "./application-task-repository.js";
+import { BrowserOwnershipLease } from "../browser/browser-ownership-lease.js";
+const fixtureNodeRef = {
+  documentId: "document-fixture-00000001",
+  nodeId: "node-fixture-000000000001",
+  observedAt: 7
+};
+
+
 
 type ProgressEventPayload = Parameters<TaskEventBus["emitProgress"]>[1];
+
+const testDocumentId = "document-00000001";
+const testMutationEpoch = 7;
+const auditTaskId = "task-1";
+const testNodeRef = (nodeId: string) => ({
+  documentId: testDocumentId,
+  nodeId,
+  observedAt: testMutationEpoch
+});
 
 function captureProgressEvents(progressEvents: ProgressEventPayload[]): Pick<TaskEventBus, "emit" | "emitProgress"> {
   return {
@@ -39,21 +56,333 @@ function snapshot(stage: FormSnapshot["stage"], options: { action?: boolean } = 
     url: `https://jobs.example.test/${stage}`,
     title: stage === "review" ? "确认申请" : "填写申请",
     stage,
+    frameRef: { documentId: testDocumentId, kind: "main" as const },
+    mutationEpoch: testMutationEpoch,
     fields: [],
     actions: options.action ? [{
       id: "action-next",
       text: "下一步",
-      class: "intermediate_navigation"
+      class: "intermediate_navigation",
+      nodeRef: testNodeRef("node-action-next")
     }] : stage === "review" ? [{
       id: "action-submit",
       text: "提交申请",
-      class: "terminal_submit"
+      class: "terminal_submit",
+      nodeRef: testNodeRef("node-action-submit")
     }] : [],
     errors: []
   };
 }
 
+function auditedField(index: number): FormField {
+  return {
+    id: `field-${index}`,
+    label: `Field ${index}`,
+    type: "text",
+    required: true,
+    options: [],
+    currentValue: "",
+    sectionHint: "basics",
+    semanticHint: `basics.field${index}`,
+    nodeRef: testNodeRef(`node-field-${String(index).padStart(8, "0")}`)
+  };
+}
+
+function readyAssessment(field: FormField): ApplicationFieldAssessment {
+  return {
+    fieldId: field.id,
+    label: field.label,
+    semantic: field.semanticHint,
+    status: "ready",
+    source: "exact",
+    confidence: 1,
+    reason: "test-ready",
+    evidence: []
+  };
+}
+
 describe("application machine", () => {
+  it.each([
+    ["observing", []],
+    ["filling", [{ type: "READY_TO_FILL" }]],
+    ["validating", [{ type: "READY_TO_FILL" }, { type: "PAGE_FILLED" }]],
+    ["navigating", [{ type: "READY_TO_FILL" }, { type: "PAGE_FILLED" }, { type: "PAGE_VALID" }]]
+  ] satisfies Array<[string, ApplicationEvent[]]>)
+  ("enters a persistent challenge pause from %s", (_state, setupEvents) => {
+    const actor = createActor(applicationMachine, {
+      input: { taskId: "task-challenge", applicationUrl: "https://jobs.example.test/apply" }
+    }).start();
+    const challenge: ChallengeDiagnostic = {
+      kind: "captcha",
+      detectedAt: "2026-08-15T00:00:00.000Z",
+      reasonCode: "moka_captcha_accessible_name"
+    };
+    sendApplicationEvent(actor, { type: "START" });
+    setupEvents.forEach((event) => sendApplicationEvent(actor, event));
+
+    sendApplicationEvent(actor, { type: "CHALLENGE_DETECTED", challenge });
+
+    expect(actor.getSnapshot().value).toBe("awaiting_challenge");
+    expect(actor.getSnapshot().context.challenge).toEqual(challenge);
+    for (const ignored of [
+      { type: "READY_TO_FILL" },
+      { type: "RECOVER" },
+      { type: "PAGE_VALID" },
+      { type: "CHALLENGE_DETECTED", challenge: { ...challenge, kind: "risk_control" as const } }
+    ] satisfies ApplicationEvent[]) {
+      actor.send(ignored);
+      expect(actor.getSnapshot().value).toBe("awaiting_challenge");
+      expect(actor.getSnapshot().context.challenge).toEqual(challenge);
+    }
+
+    sendApplicationEvent(actor, { type: "USER_RESUME_CHALLENGE" });
+    expect(actor.getSnapshot().value).toBe("observing");
+    expect(actor.getSnapshot().context.challenge).toBeUndefined();
+    actor.stop();
+  });
+
+  it("uses one observed node and one signed execution epoch for approval and execution", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const nodeRef = testNodeRef("node-field-email");
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "field-email",
+        label: "邮箱",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "",
+        nodeRef
+      }],
+      actions: [{
+        id: "action-submit",
+        text: "提交申请",
+        class: "terminal_submit",
+        nodeRef: testNodeRef("node-action-submit")
+      }]
+    };
+    const review = snapshot("review");
+    const approve = vi.fn((_request: { nodeRef: FormField["nodeRef"]; executionEpoch: number }) => "approved-token");
+    const execute = vi.fn(async (command: ExecutableCommand, executionEpoch?: number) => ({
+      type: "execution_result" as const,
+      taskId: "task-1",
+      snapshotId: review.id,
+      commandType: command.type,
+      status: "applied" as const,
+      actualValue: command.type === "fill" ? command.value : "",
+      snapshot: review,
+      errors: []
+    }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute },
+      resolveField: async () => ({ status: "verified", value: "me@example.com" }),
+      approve
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    const approvalRequest = approve.mock.calls[0]?.[0];
+    const command = execute.mock.calls[0]?.[0];
+    const workerEpoch = execute.mock.calls[0]?.[1];
+    expect(approvalRequest).toMatchObject({ nodeRef, executionEpoch: expect.any(Number) });
+    expect(command).toMatchObject({ nodeRef, executionEpoch: approvalRequest?.executionEpoch });
+    expect(workerEpoch).toBe(approvalRequest?.executionEpoch);
+    database.close();
+  });
+
+  it("audits after the eighth applied field and never silently refills a reverted value", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const fields = Array.from({ length: 8 }, (_, index) => auditedField(index));
+    let page: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields,
+      actions: [{
+        id: "action-submit",
+        text: "Submit",
+        class: "terminal_submit",
+        nodeRef: testNodeRef("node-action-submit")
+      }]
+    };
+    const execute = vi.fn(async (command: ExecutableCommand) => {
+      const value = command.type === "fill" || command.type === "select" ? command.value : undefined;
+      page = {
+        ...page,
+        id: `snapshot-after-${execute.mock.calls.length}`,
+        fields: page.fields.map((candidate) =>
+          candidate.id === ("fieldId" in command ? command.fieldId : "")
+            ? { ...candidate, currentValue: value }
+            : candidate
+        )
+      };
+      return {
+        type: "execution_result" as const,
+        taskId: auditTaskId,
+        snapshotId: page.id,
+        commandType: command.type,
+        status: "applied" as const,
+        actualValue: value,
+        snapshot: page,
+        errors: []
+      };
+    });
+    const observe = vi.fn(async () => ({
+      ...page,
+      id: "snapshot-audit-reverted",
+      fields: page.fields.map((candidate, index) =>
+        index === 0 ? { ...candidate, currentValue: "reverted" } : candidate
+      )
+    }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute },
+      resolveField: async (_taskId, target) => ({
+        status: "verified",
+        value: `value-${target.id.slice("field-".length)}`,
+        fieldPath: target.semanticHint!,
+        assessment: readyAssessment(target)
+      }),
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: auditTaskId, applicationUrl: page.url });
+
+    await service.runUntilPause(auditTaskId, page);
+
+    expect(execute).toHaveBeenCalledTimes(8);
+    expect(observe).toHaveBeenCalledOnce();
+    expect(service.fieldCoverage(auditTaskId)).toMatchObject({
+      failed: 1,
+      fields: expect.arrayContaining([expect.objectContaining({
+        fieldId: "field-0",
+        status: "failed",
+        reason: "controlled_value_reverted"
+      })])
+    });
+    expect(service.progress(auditTaskId)).toMatchObject({
+      status: "paused",
+      lastResult: { operation: { status: "failed", errorCode: "READBACK_MISMATCH" } }
+    });
+    database.close();
+  });
+
+  it("forces observe-only audits at deterministic, semantic, and final-review boundaries", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const deterministicTarget = auditedField(0);
+    const semanticTarget = auditedField(1);
+    let page: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [deterministicTarget, semanticTarget],
+      actions: [{
+        id: "action-submit",
+        text: "Submit",
+        class: "terminal_submit",
+        nodeRef: testNodeRef("node-action-submit")
+      }]
+    };
+    const execute = vi.fn(async (command: ExecutableCommand) => {
+      const value = command.type === "fill" || command.type === "select" ? command.value : undefined;
+      page = {
+        ...page,
+        id: "snapshot-after-fill",
+        fields: page.fields.map((field) =>
+          field.id === ("fieldId" in command ? command.fieldId : "")
+            ? { ...field, currentValue: value }
+            : field
+        )
+      };
+      return {
+        type: "execution_result" as const,
+        taskId: auditTaskId,
+        snapshotId: page.id,
+        commandType: command.type,
+        status: "applied" as const,
+        actualValue: value,
+        snapshot: page,
+        errors: []
+      };
+    });
+    const observeAfterExecuteCounts: number[] = [];
+    const observe = vi.fn(async () => {
+      observeAfterExecuteCounts.push(execute.mock.calls.length);
+      return { ...page, id: `snapshot-audit-${observeAfterExecuteCounts.length}` };
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute },
+      resolveField: async (_taskId, field, phase) => field.id === semanticTarget.id
+        && phase === "deterministic"
+        ? {
+            status: "deferred",
+            fieldPath: field.semanticHint!,
+            assessment: readyAssessment(field)
+          }
+        : {
+            status: "verified",
+            value: field.id === deterministicTarget.id ? "value-0" : "value-1",
+            fieldPath: field.semanticHint!,
+            assessment: readyAssessment(field)
+          },
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: auditTaskId, applicationUrl: page.url });
+
+    await service.runUntilPause(auditTaskId, page);
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(observeAfterExecuteCounts).toEqual([1, 2, 2]);
+    expect(service.state(auditTaskId).value).toBe("review_locked");
+    database.close();
+  });
+
+  it("passes routed internship profile indexes into field semantic derivation", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{ nodeRef: fixtureNodeRef, 
+        id: "internship-company",
+        label: "\u5b9e\u4e60\u5355\u4f4d",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "",
+        sectionHint: "internship"
+      }]
+    };
+    const resolveField = vi.fn(async () => ({ status: "verified" as const, value: undefined }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute: vi.fn() },
+      resolveField,
+      listProfileFacts: () => [{
+        id: "employment-type-2",
+        fieldPath: "work[2].employmentType",
+        value: "Java \u540e\u7aef\u5b9e\u4e60",
+        status: "user_confirmed" as const,
+        confidence: 1,
+        scope: "profile" as const,
+        revision: 1,
+        evidence: []
+      }],
+      approve: () => "approved"
+    });
+
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+
+    expect(resolveField).toHaveBeenCalledWith(
+      "task-1",
+      expect.objectContaining({ id: "internship-company", semanticHint: "work[2].company" }),
+      "deterministic"
+    );
+    database.close();
+  });
+
   it("deduplicates concurrent run requests for one task", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
@@ -92,7 +421,7 @@ describe("application machine", () => {
       currentValue = command.type === "fill" ? String(command.value) : currentValue;
       const next = {
         ...snapshot("application_form"),
-        fields: [{
+        fields: [{ nodeRef: fixtureNodeRef, 
           id: "city",
           label: "期望城市",
           type: "text" as const,
@@ -118,7 +447,7 @@ describe("application machine", () => {
       browser: {
         observe: async () => ({
           ...snapshot("application_form"),
-          fields: [{
+          fields: [{ nodeRef: fixtureNodeRef, 
             id: "city",
             label: "期望城市",
             type: "text" as const,
@@ -196,7 +525,7 @@ describe("application machine", () => {
     tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
     const form = {
       ...snapshot("application_form"),
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "name",
         label: "姓名",
         type: "text" as const,
@@ -250,7 +579,7 @@ describe("application machine", () => {
     tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
     const form = {
       ...snapshot("application_form"),
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "name",
         label: "姓名",
         type: "text" as const,
@@ -292,7 +621,7 @@ describe("application machine", () => {
     tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
     const form = {
       ...snapshot("application_form"),
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "name",
         label: "姓名",
         type: "text" as const,
@@ -331,7 +660,7 @@ describe("application machine", () => {
     tasks.create({ id: taskId, applicationUrl: "https://jobs.example.test/apply" });
     const applicationForm = {
       ...snapshot("application_form"),
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "name",
         label: "姓名",
         type: "text" as const,
@@ -455,8 +784,8 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       fields: [
-        { id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" },
-        { id: "field-training", label: "培养方式", type: "select", required: true, options: ["统招", "定向"], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "field-training", label: "培养方式", type: "select", required: true, options: ["统招", "定向"], currentValue: "" }
       ]
     };
     const filled: FormSnapshot = {
@@ -533,8 +862,8 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       fields: [
-        { id: "lab-first", label: "是否有实验室经历", type: "select", required: true, options: ["是", "否"], currentValue: "" },
-        { id: "lab-second", label: "是否有实验室经历", type: "select", required: true, options: ["是", "否"], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "lab-first", label: "是否有实验室经历", type: "select", required: true, options: ["是", "否"], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "lab-second", label: "是否有实验室经历", type: "select", required: true, options: ["是", "否"], currentValue: "" }
       ]
     };
     const service = createApplicationService({
@@ -570,8 +899,8 @@ describe("application machine", () => {
     const checkpoints = createCheckpointRepository(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
-      actions: [{ id: "preview", text: "预览并提交", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
     };
     const filled: FormSnapshot = {
       ...form,
@@ -621,8 +950,8 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
-      actions: [{ id: "preview", text: "预览并提交", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
     };
     const changedSnapshot: FormSnapshot = { ...form, id: "snapshot-after-page-change" };
     const observe = vi.fn()
@@ -654,8 +983,8 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
-      actions: [{ id: "preview", text: "预览并提交", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
     };
     const readback: FormSnapshot = {
       ...form,
@@ -690,15 +1019,18 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-award", label: "赛事名称", type: "text", required: true, options: [], currentValue: "" }],
-      actions: [{ id: "preview", text: "预览并提交", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-award", label: "赛事名称", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
     };
     const filled: FormSnapshot = {
       ...form,
       id: "snapshot-award-filled",
       fields: [{ ...form.fields[0]!, currentValue: "全国大学生软件创新大赛一等奖" }]
     };
-    const observe = vi.fn(async () => form);
+    const observe = vi.fn()
+      .mockResolvedValueOnce(form)
+      .mockResolvedValueOnce(form)
+      .mockResolvedValue(filled);
     const execute = vi.fn()
       .mockResolvedValueOnce({
         type: "execution_result" as const,
@@ -749,13 +1081,70 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("re-resolves a field when a dynamic section reuses its id for a different control", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [
+        { nodeRef: fixtureNodeRef, id: "field-first", label: "项目名称", type: "text", required: false, options: [], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "field-reused", label: "项目描述", type: "text", required: false, options: [], currentValue: "" }
+      ],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
+    };
+    const shifted: FormSnapshot = {
+      ...form,
+      id: "snapshot-shifted",
+      fields: [
+        { ...form.fields[0]!, currentValue: "ApplyPilot" },
+        { nodeRef: fixtureNodeRef, id: "field-reused", label: "开始时间 年", type: "select", required: false, options: ["2025"], currentValue: "" }
+      ]
+    };
+    const review = snapshot("review");
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        type: "execution_result", taskId: "task-1", snapshotId: shifted.id,
+        commandType: "fill", status: "applied", actualValue: "ApplyPilot",
+        snapshot: shifted, errors: []
+      })
+      .mockResolvedValueOnce({
+        type: "execution_result", taskId: "task-1", snapshotId: review.id,
+        commandType: "select", status: "applied", actualValue: "2025",
+        snapshot: review, errors: []
+      });
+    const approve = vi.fn((request: { targetId: string; operation: string }, current: FormSnapshot) => {
+      const target = current.fields.find((candidate) => candidate.id === request.targetId);
+      if (!target) throw new Error("field_not_found");
+      if (request.operation === "fill" && target.type === "select") throw new Error("field_operation_mismatch");
+      return "approved-token";
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute },
+      resolveField: async (_taskId, field) => ({
+        status: "verified",
+        value: field.type === "select" ? "2025" : field.label === "项目名称" ? "ApplyPilot" : "项目描述"
+      }),
+      approve
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(execute).toHaveBeenCalledTimes(2);
+    expect(execute.mock.calls[0]?.[0]).toMatchObject({ type: "fill", fieldId: "field-first" });
+    expect(execute.mock.calls[1]?.[0]).toMatchObject({ type: "select", fieldId: "field-reused", value: "2025" });
+    expect(service.state("task-1").value).toBe("review_locked");
+    database.close();
+  });
+
   it.each(["blocked", "failed"] as const)("automatically re-observes and retries a %s browser fill once", async (status) => {
     const database = new Database(":memory:");
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
-      actions: [{ id: "preview", text: "预览并提交", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
     };
     const filled: FormSnapshot = {
       ...form,
@@ -806,8 +1195,8 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
-      actions: [{ id: "preview", text: "预览并提交", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
     };
     let releaseReadback!: (value: FormSnapshot) => void;
     const readback = new Promise<FormSnapshot>((resolve) => {
@@ -841,6 +1230,85 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("does not pause between deterministic and semantic fills for a delayed page fluctuation", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const progressEvents: ProgressEventPayload[] = [];
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [
+        { nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "field-award", label: "赛事名称", type: "text", required: true, options: [], currentValue: "" }
+      ],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
+    };
+    const phoneFilled: FormSnapshot = {
+      ...form,
+      id: "snapshot-phone-filled",
+      fields: [{ ...form.fields[0]!, currentValue: "13800000000" }, form.fields[1]!]
+    };
+    const fullyFilled: FormSnapshot = {
+      ...phoneFilled,
+      id: "snapshot-fully-filled",
+      fields: [phoneFilled.fields[0]!, { ...phoneFilled.fields[1]!, currentValue: "全国大学生竞赛" }]
+    };
+    let releaseSemantic!: () => void;
+    const semanticStarted = new Promise<void>((resolveStarted) => {
+      releaseSemantic = resolveStarted;
+    });
+    let semanticRequested!: () => void;
+    const semanticRequestedPromise = new Promise<void>((resolve) => {
+      semanticRequested = resolve;
+    });
+    const execute = vi.fn(async (command: ExecutableCommand): Promise<Extract<WorkerResponse, { type: "execution_result" }>> => {
+      const next = (command.type === "fill" || command.type === "select") && command.fieldId === "field-award"
+        ? fullyFilled
+        : phoneFilled;
+      return {
+        type: "execution_result",
+        taskId: "task-1",
+        snapshotId: next.id,
+        commandType: command.type === "select" ? "select" : "fill",
+        status: "applied",
+        actualValue: command.type === "fill" ? command.value : "",
+        snapshot: next,
+        errors: []
+      };
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      taskEvents: captureProgressEvents(progressEvents),
+      browser: {
+        observe: vi.fn()
+          .mockResolvedValueOnce(form)
+          .mockResolvedValue(fullyFilled),
+        execute
+      },
+      resolveField: async (_taskId, field, phase) => {
+        if (field.id === "field-phone") return { status: "verified" as const, value: "13800000000" };
+        if (phase === "deterministic") return { status: "deferred" as const };
+        semanticRequested();
+        await semanticStarted;
+        return { status: "verified" as const, value: "全国大学生竞赛" };
+      },
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    const running = service.runUntilPause("task-1");
+    await semanticRequestedPromise;
+
+    expect(service.state("task-1").value).toBe("filling");
+    expect(service.progress("task-1")).toMatchObject({ status: "idle", busy: false, recovery: [] });
+    await service.handleActivity({ type: "page_unstable", taskId: "task-1", fingerprint: "delayed-first-pass-dom" });
+
+    expect(service.progress("task-1")).toMatchObject({ status: "idle", busy: false, recovery: [] });
+    releaseSemantic();
+    await running;
+    expect(service.state("task-1").value).toBe("review_locked");
+    expect(progressEvents.some((event) => event.type === "task_paused")).toBe(false);
+    database.close();
+  });
+
   it("publishes deterministic and semantic field fills with distinct workbench phases", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
@@ -848,10 +1316,10 @@ describe("application machine", () => {
     const progressEvents: ProgressEventPayload[] = [];
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      actions: [{ id: "submit", text: "提交申请", class: "terminal_submit" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "submit", text: "提交申请", class: "terminal_submit" }],
       fields: [
-        { id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" },
-        { id: "field-training", label: "培养方式", type: "select", required: true, options: ["统招", "定向"], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "field-training", label: "培养方式", type: "select", required: true, options: ["统招", "定向"], currentValue: "" }
       ]
     };
     const phoneFilled: FormSnapshot = {
@@ -884,10 +1352,24 @@ describe("application machine", () => {
       taskEvents: captureProgressEvents(progressEvents),
       browser: { observe: async () => form, execute },
       resolveField: async (_taskId, field, phase) => field.id === "field-phone"
-        ? { status: "verified", value: "13800000000" }
+        ? {
+            status: "verified",
+            value: "13800000000",
+            assessment: {
+              fieldId: field.id, label: field.label, status: "ready", source: "exact",
+              confidence: 1, reason: "精确映射", evidence: []
+            }
+          }
         : phase === "deterministic"
           ? { status: "deferred" }
-          : { status: "verified", value: "统招" },
+          : {
+              status: "verified",
+              value: "统招",
+              assessment: {
+                fieldId: field.id, label: field.label, status: "ready", source: "semantic",
+                confidence: 0.92, reason: "受限语义映射", evidence: []
+              }
+            },
       approve: () => "approved-token"
     });
 
@@ -897,6 +1379,23 @@ describe("application machine", () => {
     const started = progressEvents.filter((event) => event.type === "operation_started");
     expect(started.find((event) => event.progress.fieldId === "field-phone")?.progress.displayPhase).toBe("deterministic_fill");
     expect(started.find((event) => event.progress.fieldId === "field-training")?.progress.displayPhase).toBe("semantic_fill");
+    const executionEvents = progressEvents.filter((event) => event.type === "execution_progress_changed");
+    expect(executionEvents.map((event) => event.executionProgress.phases.find((phase) =>
+      phase.phase === event.executionProgress.currentPhase)?.status)).toEqual(expect.arrayContaining([
+      "running", "completed"
+    ]));
+    expect(executionEvents.map((event) => event.executionProgress.currentPhase)).toEqual(expect.arrayContaining([
+      "deterministic_fill", "semantic_fill", "readback_validation", "final_review"
+    ]));
+    expect(executionEvents.some((event) => event.executionProgress.currentPhase === "semantic_fill"
+      && event.executionProgress.current.action === "正在选择：培养方式"
+      && event.executionProgress.current.fieldId === "field-training"
+      && event.executionProgress.current.attempt === 1
+      && event.executionProgress.current.maxAttempts === 2)).toBe(true);
+    expect(service.progress("task-1").executionProgress).toMatchObject({
+      currentPhase: "final_review",
+      counts: { exact: 1, semantic: 1, user: 0, missing: 0, failed: 0 }
+    });
     expect(service.state("task-1").value).toBe("review_locked");
     database.close();
   });
@@ -1013,8 +1512,8 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       fields: [
-        { id: "field-resume", label: "上传简历", type: "file", required: false, options: [], currentValue: "" },
-        { id: "field-name", label: "姓名", type: "text", required: true, options: [], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "field-resume", label: "上传简历", type: "file", required: false, options: [], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "field-name", label: "姓名", type: "text", required: true, options: [], currentValue: "" }
       ]
     };
     const parsed: FormSnapshot = {
@@ -1058,6 +1557,94 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("plans a repeated internship section revealed by resume upload", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [
+        { nodeRef: fixtureNodeRef, id: "field-resume", label: "上传简历", type: "file", required: false, options: [], currentValue: "" }
+      ]
+    };
+    const parsed: FormSnapshot = {
+      ...form,
+      id: "snapshot-parsed-with-internship-add",
+      fields: [{ ...form.fields[0]!, currentValue: "resume.pdf" }],
+      actions: [{ nodeRef: fixtureNodeRef, 
+        id: "add-internship",
+        text: "添加",
+        class: "intermediate_navigation",
+        context: "实习经历添加"
+      }]
+    };
+    const expanded: FormSnapshot = {
+      ...parsed,
+      id: "snapshot-expanded-internship",
+      fields: [
+        parsed.fields[0]!,
+        {nodeRef: fixtureNodeRef, 
+          id: "internship-company",
+          label: "实习单位",
+          type: "text",
+          required: true,
+          options: [],
+          currentValue: "",
+          sectionHint: "internship"
+        }
+      ],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
+    };
+    const filled: FormSnapshot = {
+      ...expanded,
+      id: "snapshot-filled-internship",
+      fields: expanded.fields.map((field) => field.id === "internship-company"
+        ? { ...field, currentValue: "测试科技" }
+        : field)
+    };
+    const execute = vi.fn(async (command: ExecutableCommand): Promise<Extract<WorkerResponse, { type: "execution_result" }>> => ({
+      type: "execution_result",
+      taskId: "task-1",
+      snapshotId: command.type === "upload" ? parsed.id : command.type === "click_intermediate" ? expanded.id : filled.id,
+      commandType: command.type,
+      status: "applied",
+      actualValue: command.type === "upload" ? "resume.pdf" : command.type === "click_intermediate" ? expanded.url : "测试科技",
+      snapshot: command.type === "upload" ? parsed : command.type === "click_intermediate" ? expanded : filled,
+      errors: []
+    }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: {
+        observe: vi.fn()
+          .mockResolvedValueOnce(expanded)
+          .mockResolvedValue(filled),
+        execute
+      },
+      resolveField: async () => ({ status: "verified", value: "测试科技" }),
+      resolveFileId: () => "resume-file-1",
+      listProfileFacts: () => [{
+        id: "employment-type-0",
+        fieldPath: "work[0].employmentType",
+        value: "Java 后端实习",
+        status: "user_confirmed",
+        confidence: 1,
+        scope: "profile",
+        revision: 1,
+        evidence: []
+      }],
+      approve: () => "approved-token"
+    });
+
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1", form);
+
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      type: "click_intermediate",
+      actionId: "add-internship"
+    }), expect.any(Number));
+    expect(service.state("task-1").value).toBe("review_locked");
+    database.close();
+  });
+
   it("waits on a job list until the user opens a resume form, then fills it automatically", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
@@ -1066,15 +1653,15 @@ describe("application machine", () => {
       id: "snapshot-4399-jobs",
       url: "https://hr.4399om.com/weixin/?r=job/agent",
       title: "四三九九2027校园招聘",
-      fields: [{ id: "field-keyword", label: "请输入关键词", type: "text", required: false, options: [], currentValue: "" }],
-      actions: [{ id: "action-job", text: "Java开发工程师", class: "unknown_side_effect" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-keyword", label: "请输入关键词", type: "text", required: false, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "action-job", text: "Java开发工程师", class: "unknown_side_effect" }]
     };
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       id: "snapshot-4399-form",
       url: "https://hr.4399om.com/weixin/?r=job/apply&id=1",
-      fields: [{ id: "field-name", label: "姓名", type: "text", required: true, options: [], currentValue: "" }],
-      actions: [{ id: "action-submit", text: "提交", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-name", label: "姓名", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "action-submit", text: "提交", class: "terminal_submit" }]
     };
     const filled: FormSnapshot = {
       ...form,
@@ -1105,6 +1692,10 @@ describe("application machine", () => {
 
     expect(service.state("task-1").value).toBe("observing");
     expect(service.progress("task-1").status).toBe("idle");
+    expect(service.progress("task-1").executionProgress).toMatchObject({
+      currentPhase: "waiting_for_form",
+      current: { action: "等待进入简历填写页", maxAttempts: 2 }
+    });
     expect(resolveField).not.toHaveBeenCalled();
     expect(execute).not.toHaveBeenCalled();
 
@@ -1118,6 +1709,7 @@ describe("application machine", () => {
     expect(resolveField).toHaveBeenCalledWith("task-1", expect.objectContaining({ id: "field-name" }), "deterministic");
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({ type: "fill", fieldId: "field-name" }), expect.any(Number));
     expect(service.state("task-1").value).toBe("review_locked");
+    expect(service.progress("task-1").executionProgress?.currentPhase).toBe("final_review");
     database.close();
   });
 
@@ -1127,7 +1719,7 @@ describe("application machine", () => {
     const checkpoints = createCheckpointRepository(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      actions: [{ id: "action-preview-submit", text: "预览并提交", class: "terminal_submit" }]
+      actions: [{ nodeRef: fixtureNodeRef, id: "action-preview-submit", text: "预览并提交", class: "terminal_submit" }]
     };
     const execute = vi.fn();
     const service = createApplicationService({
@@ -1151,9 +1743,9 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       fields: [
-        { id: "field-name", label: "姓名", type: "text", required: true, options: [], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "field-name", label: "姓名", type: "text", required: true, options: [], currentValue: "" }
       ],
-      actions: [{ id: "action-preview-submit", text: "预览并提交", class: "terminal_submit" }]
+      actions: [{ nodeRef: fixtureNodeRef, id: "action-preview-submit", text: "预览并提交", class: "terminal_submit" }]
     };
     const execute = vi.fn(async (): Promise<Extract<WorkerResponse, { type: "execution_result" }>> => ({
       type: "execution_result",
@@ -1185,7 +1777,7 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "field-certification",
         label: "I certify that the information is true and agree to the privacy policy",
         type: "checkbox",
@@ -1193,7 +1785,7 @@ describe("application machine", () => {
         options: [],
         currentValue: false
       }],
-      actions: [{ id: "action-submit", text: "Submit Application", class: "terminal_submit" }]
+      actions: [{ nodeRef: fixtureNodeRef, id: "action-submit", text: "Submit Application", class: "terminal_submit" }]
     };
     const execute = vi.fn();
     const resolveField = vi.fn(async () => ({ status: "verified" as const, value: true }));
@@ -1219,9 +1811,9 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       fields: [
-        { id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }
       ],
-      actions: [{ id: "action-preview-submit", text: "预览并提交", class: "terminal_submit" }]
+      actions: [{ nodeRef: fixtureNodeRef, id: "action-preview-submit", text: "预览并提交", class: "terminal_submit" }]
     };
     const execute = vi.fn(async (): Promise<Extract<WorkerResponse, { type: "execution_result" }>> => ({
       type: "execution_result",
@@ -1255,13 +1847,13 @@ describe("application machine", () => {
     const checkpoints = createCheckpointRepository(database);
     const form = {
       ...snapshot("application_form"),
-      actions: [{ id: "add-project", text: "添加", class: "intermediate_navigation" as const, context: "项目经历" }]
+      actions: [{ nodeRef: fixtureNodeRef, id: "add-project", text: "添加", class: "intermediate_navigation" as const, context: "项目经历" }]
     };
     const expanded = {
       ...form,
       id: "expanded",
-      fields: [{ id: "project-name", label: "项目名称", type: "text" as const, required: false, options: [], currentValue: "" }],
-      actions: [{ id: "preview", text: "预览并提交", class: "terminal_submit" as const }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "project-name", label: "项目名称", type: "text" as const, required: false, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" as const }]
     };
     const execute = vi.fn().mockResolvedValue({
       type: "execution_result", taskId: "task-1", snapshotId: expanded.id,
@@ -1272,11 +1864,319 @@ describe("application machine", () => {
       checkpoints,
       browser: { observe: async () => form, execute },
       resolveField: async () => ({ status: "verified", value: "ApplyPilot" }),
+      listProfileFacts: () => [{
+        id: "project-0",
+        fieldPath: "projects[0].name",
+        value: "ApplyPilot",
+        status: "user_confirmed",
+        confidence: 1,
+        scope: "profile",
+        revision: 1,
+        evidence: []
+      }],
       approve: () => "approved"
     });
     service.start({ taskId: "task-1", applicationUrl: form.url });
     await service.runUntilPause("task-1");
     expect(execute).toHaveBeenCalledWith(expect.objectContaining({ type: "click_intermediate", actionId: "add-project" }), expect.any(Number));
+    database.close();
+  });
+
+  it("allows more than two successful additions for one repeated section", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const projectPage = (count: number): FormSnapshot => ({
+      ...snapshot("application_form"),
+      id: `projects-${count}`,
+      fields: Array.from({ length: count }, (_, index) => ({ nodeRef: fixtureNodeRef, 
+        id: `project-name-${index}`,
+        label: "项目名称",
+        type: "text" as const,
+        required: false,
+        options: [],
+        currentValue: `Project ${index + 1}`,
+        semanticHint: `projects[${index}].name`
+      })),
+      actions: [
+        { nodeRef: fixtureNodeRef, id: "add-project", text: "添加", class: "intermediate_navigation", context: "项目经历" },
+        { nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }
+      ]
+    });
+    const pages = [projectPage(2), projectPage(3), projectPage(4)];
+    let pageIndex = 0;
+    const execute = vi.fn(async (): Promise<Extract<WorkerResponse, { type: "execution_result" }>> => {
+      const nextPage = pages[pageIndex++]!;
+      return {
+        type: "execution_result",
+        taskId: "task-1",
+        snapshotId: nextPage.id,
+        commandType: "click_intermediate",
+        status: "applied",
+        actualValue: nextPage.url,
+        snapshot: nextPage,
+        errors: []
+      };
+    });
+    const observe = vi.fn(async () => pages[pageIndex - 1]!);
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute },
+      resolveField: async () => ({ status: "verified", value: undefined }),
+      listProfileFacts: () => Array.from({ length: 4 }, (_, index) => ({
+        id: `project-${index}`,
+        fieldPath: `projects[${index}].name`,
+        value: `Project ${index + 1}`,
+        status: "user_confirmed" as const,
+        confidence: 1,
+        scope: "profile" as const,
+        revision: 1,
+        evidence: []
+      })),
+      approve: () => "approved"
+    });
+
+    const initialPage = projectPage(1);
+    service.start({ taskId: "task-1", applicationUrl: initialPage.url });
+    await service.runUntilPause("task-1", initialPage);
+
+    expect(execute).toHaveBeenCalledTimes(3);
+    expect(observe).toHaveBeenCalledTimes(3);
+    expect(service.state("task-1").value).toBe("review_locked");
+    database.close();
+  });
+
+  it("does not treat an unneeded repeated-section add control as page navigation", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{ nodeRef: fixtureNodeRef, 
+        id: "formal-company",
+        label: "公司名称",
+        type: "text",
+        required: false,
+        options: [],
+        currentValue: "",
+        sectionHint: "work",
+        semanticHint: "work[0].company"
+      }],
+      actions: [
+        { nodeRef: fixtureNodeRef, id: "add-formal-work", text: "新增", class: "intermediate_navigation", context: "正式工作经历" },
+        { nodeRef: fixtureNodeRef, id: "submit", text: "提交申请", class: "terminal_submit" }
+      ]
+    };
+    const execute = vi.fn();
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute },
+      resolveField: async () => ({ status: "deferred" }),
+      listProfileFacts: () => [{
+        id: "internship-type",
+        fieldPath: "work[0].employmentType",
+        value: "实习",
+        status: "user_confirmed",
+        confidence: 1,
+        scope: "profile",
+        revision: 1,
+        evidence: []
+      }],
+      approve: () => "approved"
+    });
+
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+
+    expect(execute).not.toHaveBeenCalled();
+    expect(service.state("task-1").value).toBe("review_locked");
+    database.close();
+  });
+
+  it("treats page instability during repeated-section expansion as a controlled pause", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form = {
+      ...snapshot("application_form"),
+      actions: [{ nodeRef: fixtureNodeRef, id: "add-project", text: "添加", class: "intermediate_navigation" as const, context: "项目经历" }]
+    };
+    const execute = vi.fn(() => new Promise<never>(() => undefined));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute },
+      resolveField: async () => ({ status: "verified", value: "ApplyPilot" }),
+      listProfileFacts: () => [0, 1].map((index) => ({
+        id: `project-${index}`,
+        fieldPath: `projects[${index}].name`,
+        value: `项目 ${index + 1}`,
+        status: "user_confirmed" as const,
+        confidence: 1,
+        scope: "profile" as const,
+        revision: 1,
+        evidence: []
+      })),
+      approve: () => "approved"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    const running = service.runUntilPause("task-1");
+    await vi.waitFor(() => expect(execute).toHaveBeenCalledOnce());
+
+    await service.handleActivity({ type: "page_unstable", taskId: "task-1", fingerprint: "expanding-project" });
+
+    await expect(running).resolves.toBeUndefined();
+    expect(service.progress("task-1")).toMatchObject({ status: "paused", busy: false });
+    expect(service.state("task-1").value).not.toBe("cancelled");
+    database.close();
+  });
+
+  it("re-observes a repeated section and does not click add again without a new entry", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form = {
+      ...snapshot("application_form"),
+      actions: [{ nodeRef: fixtureNodeRef, id: "add-project", text: "添加", class: "intermediate_navigation" as const, context: "项目经历" }]
+    };
+    const observe = vi.fn().mockResolvedValue(form);
+    const execute = vi.fn().mockResolvedValue({
+      type: "execution_result", taskId: "task-1", snapshotId: form.id,
+      commandType: "click_intermediate", status: "applied", actualValue: form.url,
+      snapshot: form, errors: []
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute },
+      resolveField: async () => ({ status: "verified", value: "ApplyPilot" }),
+      listProfileFacts: () => [{
+        id: "project-0",
+        fieldPath: "projects[0].name",
+        value: "ApplyPilot",
+        status: "user_confirmed" as const,
+        confidence: 1,
+        scope: "profile" as const,
+        revision: 1,
+        evidence: []
+      }],
+      approve: () => "approved"
+    });
+
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(observe).toHaveBeenCalledTimes(2);
+    expect(service.progress("task-1")).toMatchObject({
+      status: "paused",
+      stalledFieldId: "add-project"
+    });
+    database.close();
+  });
+
+  it("does not automatically retry a repeated section after readback mismatch", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form = {
+      ...snapshot("application_form"),
+      actions: [{ nodeRef: fixtureNodeRef, id: "add-project", text: "添加", class: "intermediate_navigation" as const, context: "项目经历" }]
+    };
+    const observe = vi.fn().mockResolvedValue(form);
+    const execute = vi.fn().mockResolvedValue({
+      type: "execution_result", taskId: "task-1", snapshotId: form.id,
+      commandType: "click_intermediate", status: "applied", actualValue: form.url,
+      snapshot: form, errors: []
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute },
+      resolveField: async () => ({ status: "verified", value: "ApplyPilot" }),
+      listProfileFacts: () => [{
+        id: "project-0",
+        fieldPath: "projects[0].name",
+        value: "ApplyPilot",
+        status: "user_confirmed" as const,
+        confidence: 1,
+        scope: "profile" as const,
+        revision: 1,
+        evidence: []
+      }],
+      approve: () => "approved"
+    });
+
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+    await service.handleActivity({ type: "page_stable", taskId: "task-1", fingerprint: "unchanged-projects" });
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(service.progress("task-1")).toMatchObject({
+      status: "paused",
+      stalledFieldId: "add-project",
+      recovery: ["retry_current", "cancel"]
+    });
+    database.close();
+  });
+
+  it("continues filling after a repeated entry appears in the post-click observation", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form = {
+      ...snapshot("application_form"),
+      actions: [{ nodeRef: fixtureNodeRef, id: "add-project", text: "添加", class: "intermediate_navigation" as const, context: "项目经历" }]
+    };
+    const expanded: FormSnapshot = {
+      ...form,
+      id: "expanded-project",
+      fields: [{ nodeRef: fixtureNodeRef, 
+        id: "project-name",
+        label: "项目名称",
+        type: "text",
+        required: false,
+        options: [],
+        currentValue: ""
+      }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
+    };
+    const filled: FormSnapshot = {
+      ...expanded,
+      fields: [{ ...expanded.fields[0]!, currentValue: "ApplyPilot" }]
+    };
+    const observe = vi.fn()
+      .mockResolvedValueOnce(form)
+      .mockResolvedValueOnce(expanded)
+      .mockResolvedValue(filled);
+    const execute = vi.fn()
+      .mockResolvedValueOnce({
+        type: "execution_result", taskId: "task-1", snapshotId: form.id,
+        commandType: "click_intermediate", status: "applied", actualValue: form.url,
+        snapshot: form, errors: []
+      })
+      .mockResolvedValueOnce({
+        type: "execution_result", taskId: "task-1", snapshotId: filled.id,
+        commandType: "fill", status: "applied", actualValue: "ApplyPilot",
+        snapshot: filled, errors: []
+      });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute },
+      resolveField: async () => ({ status: "verified", value: "ApplyPilot" }),
+      listProfileFacts: () => [{
+        id: "project-0",
+        fieldPath: "projects[0].name",
+        value: "ApplyPilot",
+        status: "user_confirmed" as const,
+        confidence: 1,
+        scope: "profile" as const,
+        revision: 1,
+        evidence: []
+      }],
+      approve: () => "approved"
+    });
+
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+
+    expect(observe).toHaveBeenCalledTimes(3);
+    expect(execute.mock.calls.map(([command]) => command)).toEqual([
+      expect.objectContaining({ type: "click_intermediate", actionId: "add-project" }),
+      expect.objectContaining({ type: "fill", fieldId: "project-name", value: "ApplyPilot" })
+    ]);
+    expect(service.state("task-1").value).toBe("review_locked");
     database.close();
   });
 
@@ -1286,10 +2186,10 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       fields: [
-        { id: "project-name", label: "项目名称", type: "text", required: true, options: [], currentValue: "" },
-        { id: "project-description", label: "项目描述", type: "textarea", required: true, options: [], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "project-name", label: "项目名称", type: "text", required: true, options: [], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "project-description", label: "项目描述", type: "textarea", required: true, options: [], currentValue: "" }
       ],
-      actions: [{ id: "preview", text: "预览并提交", class: "terminal_submit" }]
+      actions: [{ nodeRef: fixtureNodeRef, id: "preview", text: "预览并提交", class: "terminal_submit" }]
     };
     const execute = vi.fn(async (command: ExecutableCommand): Promise<Extract<WorkerResponse, { type: "execution_result" }>> => ({
       type: "execution_result",
@@ -1442,8 +2342,8 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       fields: [
-        { id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" },
-        { id: "field-city", label: "城市", type: "text", required: true, options: [], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "field-city", label: "城市", type: "text", required: true, options: [], currentValue: "" }
       ]
     };
     const applyAnswers = vi.fn();
@@ -1485,8 +2385,8 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       fields: [
-        { id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" },
-        { id: "field-city", label: "城市", type: "text", required: true, options: [], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "field-city", label: "城市", type: "text", required: true, options: [], currentValue: "" }
       ]
     };
     const applyAnswers = vi.fn();
@@ -1514,7 +2414,7 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-city", label: "城市", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-city", label: "城市", type: "text", required: true, options: [], currentValue: "" }]
     };
     const service = createApplicationService({
       checkpoints: createCheckpointRepository(database),
@@ -1537,7 +2437,7 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-city", label: "城市", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-city", label: "城市", type: "text", required: true, options: [], currentValue: "" }]
     };
     const service = createApplicationService({
       checkpoints: createCheckpointRepository(database),
@@ -1560,7 +2460,7 @@ describe("application machine", () => {
     const checkpoints = createCheckpointRepository(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" }]
     };
     checkpoints.save({
       taskId: "task-1",
@@ -1628,6 +2528,123 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("reopens the checkpoint page when retrying after the browser worker restarts on a blank page", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const checkpoints = createCheckpointRepository(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{ nodeRef: fixtureNodeRef, 
+        id: "field-email",
+        label: "邮箱",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: ""
+      }]
+    };
+    checkpoints.save({
+      taskId: "task-1",
+      state: "observing",
+      url: form.url,
+      stage: form.stage,
+      snapshotId: form.id,
+      fieldIds: form.fields.map((field) => field.id),
+      questions: [],
+      snapshot: form
+    });
+    checkpoints.saveProgress("task-1", {
+      status: "paused",
+      busy: false,
+      generation: 1,
+      retryCount: 0,
+      stalledFieldId: "field-email",
+      recovery: ["retry_current", "manual_done", "cancel"]
+    });
+    const blank: FormSnapshot = {
+      ...snapshot("unknown"),
+      id: "snapshot-blank",
+      url: "about:blank"
+    };
+    const open = vi.fn(async () => undefined);
+    const observe = vi.fn()
+      .mockResolvedValueOnce(blank)
+      .mockResolvedValueOnce(form);
+    const service = createApplicationService({
+      checkpoints,
+      browser: { open, observe, execute: vi.fn() },
+      resolveField: async () => ({ status: "needs_question", question: "请确认邮箱" }),
+      approve: () => "unused"
+    });
+
+    expect(service.recoveryCommands("task-1")).toContain("retry_current");
+    await service.retryCurrent("task-1");
+
+    expect(open).toHaveBeenCalledWith("task-1", form.url);
+    expect(observe).toHaveBeenCalledTimes(2);
+    expect(service.state("task-1").value).toBe("needs_questions");
+    database.close();
+  });
+
+  it("clears a restored recovery checkpoint when the task is cancelled", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const checkpoints = createCheckpointRepository(database);
+    const form = snapshot("application_form", { action: true });
+    checkpoints.save({
+      taskId: "task-1",
+      state: "filling",
+      url: form.url,
+      stage: form.stage,
+      snapshotId: form.id,
+      fieldIds: [],
+      questions: [],
+      snapshot: form
+    });
+    const service = createApplicationService({
+      checkpoints,
+      browser: { observe: async () => form, execute: vi.fn() },
+      resolveField: async () => ({ status: "verified", value: "" }),
+      approve: () => "unused"
+    });
+
+    expect(service.state("task-1").value).toBe("observing");
+    expect(service.requiresRecovery("task-1")).toBe(true);
+
+    await service.cancel("task-1");
+
+    expect(service.state("task-1").value).toBe("cancelled");
+    expect(service.requiresRecovery("task-1")).toBe(false);
+    expect(service.recoveryCommands("task-1")).toEqual([]);
+    database.close();
+  });
+
+  it("finishes cancellation and releases the local reservation when browser cleanup fails", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form = snapshot("application_form", { action: true });
+    const releaseTask = vi.fn(async () => {
+      throw new Error("worker_disconnected");
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { open: vi.fn(), observe: async () => form, execute: vi.fn(), releaseTask },
+      resolveField: async () => ({ status: "verified", value: "" }),
+      approve: () => "unused"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    service.start({ taskId: "task-2", applicationUrl: form.url });
+    await service.openBrowser("task-1");
+
+    await expect(service.cancel("task-1")).resolves.toBeUndefined();
+
+    expect(releaseTask).toHaveBeenCalledWith("task-1");
+    expect(service.state("task-1").value).toBe("cancelled");
+    expect(service.recoveryCommands("task-1")).toEqual([]);
+    await expect(service.openBrowser("task-2")).resolves.toBeUndefined();
+    database.close();
+  });
+
   it("reserves the controlled browser before an asynchronous open completes", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
@@ -1652,6 +2669,26 @@ describe("application machine", () => {
       releaseFirstOpen?.();
       await opening;
     }
+    database.close();
+  });
+
+  it("preserves browser_task_in_use when a job match session owns the shared browser lease", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const browserOwnershipLease = new BrowserOwnershipLease();
+    browserOwnershipLease.acquire({ ownerKind: "job_match", ownerId: "jm-1" });
+    const open = vi.fn(async () => undefined);
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browserOwnershipLease,
+      browser: { open, observe: async () => snapshot("application_form"), execute: vi.fn() },
+      resolveField: async () => ({ status: "verified", value: "" }),
+      approve: () => "unused"
+    });
+    service.start({ taskId: "task-1", applicationUrl: "https://jobs.example.test/apply" });
+
+    await expect(service.openBrowser("task-1")).rejects.toThrow("browser_task_in_use");
+    expect(open).not.toHaveBeenCalled();
     database.close();
   });
 
@@ -1708,7 +2745,7 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form", { action: true }),
       taskId,
-      fields: [{ id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" }]
     };
     const filled: FormSnapshot = {
       ...form,
@@ -1777,7 +2814,7 @@ describe("application machine", () => {
     const checkpoints = createCheckpointRepository(database);
     const form: FormSnapshot = {
       ...snapshot("application_form", { action: true }),
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "field-self-evaluation",
         label: "自我评价",
         type: "textarea",
@@ -1835,7 +2872,7 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form", { action: true }),
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "field-self-evaluation",
         label: "自我评价",
         type: "textarea",
@@ -1882,7 +2919,7 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "self", label: "自我评价", type: "textarea", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "self", label: "自我评价", type: "textarea", required: true, options: [], currentValue: "" }]
     };
     const applyAnswers = vi.fn();
     const service = createApplicationService({
@@ -1914,7 +2951,7 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "self", label: "自我评价", type: "textarea", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "self", label: "自我评价", type: "textarea", required: true, options: [], currentValue: "" }]
     };
     const applyAnswers = vi.fn();
     const service = createApplicationService({
@@ -1941,7 +2978,7 @@ describe("application machine", () => {
       ...snapshot("application_form", { action: true }),
       id: `snapshot-${taskId}`,
       taskId,
-      fields: [{ id: "self", label: "自我评价", type: "textarea", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "self", label: "自我评价", type: "textarea", required: true, options: [], currentValue: "" }]
     });
     let current = formFor("task-a");
     const service = createApplicationService({
@@ -1969,7 +3006,7 @@ describe("application machine", () => {
     const checkpoints = createCheckpointRepository(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "self", label: "自我评价", type: "textarea", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "self", label: "自我评价", type: "textarea", required: true, options: [], currentValue: "" }]
     };
     const first = createApplicationService({
       checkpoints,
@@ -2062,7 +3099,7 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form", { action: true }),
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
     };
     let finishFill!: (result: WorkerResponse & { type: "execution_result" }) => void;
     const execute = vi.fn().mockImplementationOnce(() => new Promise<WorkerResponse & { type: "execution_result" }>((resolve) => {
@@ -2098,7 +3135,7 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form", { action: true }),
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
     };
     let finishResolution!: (decision: { status: "verified"; value: string }) => void;
     const resolveField = vi.fn(() => new Promise<{ status: "verified"; value: string }>((resolve) => {
@@ -2133,7 +3170,7 @@ describe("application machine", () => {
     const checkpoints = createCheckpointRepository(database);
     const form: FormSnapshot = {
       ...snapshot("application_form", { action: true }),
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
     };
     const manuallyFilled: FormSnapshot = {
       ...form,
@@ -2182,7 +3219,7 @@ describe("application machine", () => {
       ...snapshot("application_form", { action: true }),
       id: "snapshot-contact",
       url: "https://jobs.example.test/apply/contact",
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "field-phone",
         label: "手机号码",
         type: "text",
@@ -2195,7 +3232,7 @@ describe("application machine", () => {
       ...snapshot("application_form"),
       id: "snapshot-profile",
       url: "https://jobs.example.test/apply/profile",
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "field-email",
         label: "邮箱",
         type: "text",
@@ -2203,7 +3240,7 @@ describe("application machine", () => {
         options: [],
         currentValue: ""
       }],
-      actions: [{ id: "action-submit", text: "提交申请", class: "terminal_submit" }]
+      actions: [{ nodeRef: fixtureNodeRef, id: "action-submit", text: "提交申请", class: "terminal_submit" }]
     };
     const filledSecondPage: FormSnapshot = {
       ...secondPage,
@@ -2268,13 +3305,13 @@ describe("application machine", () => {
       ...snapshot("application_form", { action: true }),
       id: "snapshot-contact",
       url: "https://jobs.example.test/apply/contact",
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
     };
     const jobsPage: FormSnapshot = {
       ...snapshot("application_form"),
       id: "snapshot-jobs",
       url: "https://jobs.example.test/jobs",
-      fields: [{ id: "field-keyword", label: "搜索岗位", type: "text", required: false, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-keyword", label: "搜索岗位", type: "text", required: false, options: [], currentValue: "" }]
     };
     const execute = vi.fn()
       .mockImplementationOnce(() => new Promise<never>(() => undefined))
@@ -2319,13 +3356,13 @@ describe("application machine", () => {
       ...snapshot("application_form", { action: true }),
       id: "snapshot-mokahr-application",
       url: "https://app.mokahr.com/m/campus-recruitment/dji/143359#/application/contact",
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }]
     };
     const jobsPage: FormSnapshot = {
       ...snapshot("application_form"),
       id: "snapshot-mokahr-jobs",
       url: "https://app.mokahr.com/m/campus-recruitment/dji/143359#/jobs",
-      fields: [{ id: "field-keyword", label: "搜索岗位", type: "text", required: false, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-keyword", label: "搜索岗位", type: "text", required: false, options: [], currentValue: "" }]
     };
     const execute = vi.fn()
       .mockImplementationOnce(() => new Promise<never>(() => undefined))
@@ -2388,7 +3425,7 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form", { action: true }),
-      fields: [{ id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" }]
     };
     const execute = vi.fn(() => new Promise<never>(() => undefined));
     const service = createApplicationService({
@@ -2550,8 +3587,8 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
-      actions: [{ id: "review", text: "预览", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-phone", label: "手机号码", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "review", text: "预览", class: "terminal_submit" }]
     };
     const filled: FormSnapshot = {
       ...form,
@@ -2608,8 +3645,8 @@ describe("application machine", () => {
     migrateDatabase(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-manual", label: "Manual field", type: "text", required: true, options: [], currentValue: "" }],
-      actions: [{ id: "review", text: "Review", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-manual", label: "Manual field", type: "text", required: true, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "review", text: "Review", class: "terminal_submit" }]
     };
     const manuallyFilled: FormSnapshot = {
       ...form,
@@ -2651,8 +3688,8 @@ describe("application machine", () => {
     const checkpoints = createCheckpointRepository(database);
     const form: FormSnapshot = {
       ...snapshot("application_form"),
-      fields: [{ id: "field-optional", label: "Additional Information", type: "textarea", required: false, options: [], currentValue: "" }],
-      actions: [{ id: "action-submit", text: "Submit Application", class: "terminal_submit" }]
+      fields: [{ nodeRef: fixtureNodeRef, id: "field-optional", label: "Additional Information", type: "textarea", required: false, options: [], currentValue: "" }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "action-submit", text: "Submit Application", class: "terminal_submit" }]
     };
     const service = createApplicationService({
       checkpoints,
@@ -2675,8 +3712,8 @@ describe("application machine", () => {
     const form: FormSnapshot = {
       ...snapshot("application_form"),
       fields: [
-        { id: "field-month", label: "开始时间 月", type: "select", required: true, options: ["1", "2"], currentValue: "" },
-        { id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" }
+        { nodeRef: fixtureNodeRef, id: "field-month", label: "开始时间 月", type: "select", required: true, options: ["1", "2"], currentValue: "" },
+        { nodeRef: fixtureNodeRef, id: "field-email", label: "邮箱", type: "text", required: true, options: [], currentValue: "" }
       ]
     };
     const filledEmail: FormSnapshot = {
@@ -2741,10 +3778,216 @@ describe("application machine", () => {
 
     expect(execute).toHaveBeenCalledTimes(3);
     expect(service.fieldCoverage("task-1")?.fields).toEqual(expect.arrayContaining([
-      expect.objectContaining({ fieldId: "field-month", status: "missing", reason: "option_not_found" }),
+      expect.objectContaining({ fieldId: "field-month", status: "failed", reason: "option_not_found" }),
       expect.objectContaining({ fieldId: "field-email", status: "filled" })
     ]));
     expect(service.state("task-1").value).toBe("needs_questions");
+    database.close();
+  });
+
+  it("turns an unsafe semantic retry into a question without a false user pause", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const progressEvents: ProgressEventPayload[] = [];
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{ nodeRef: fixtureNodeRef, 
+        id: "field-award",
+        label: "赛事名称",
+        type: "select",
+        required: true,
+        options: [],
+        currentValue: "",
+        semanticHint: "awards[0].name"
+      }]
+    };
+    const changed = { ...form, id: "snapshot-page-changed" };
+    const observe = vi.fn()
+      .mockResolvedValueOnce(form)
+      .mockResolvedValue(changed);
+    const execute = vi.fn(async () => {
+      throw new Error("custom_option_ambiguous");
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      taskEvents: captureProgressEvents(progressEvents),
+      browser: { observe, execute },
+      resolveField: async (_taskId, field, phase) => phase === "deterministic"
+        ? { status: "deferred" as const, fieldPath: "awards[0].name" }
+        : {
+            status: "verified" as const,
+            value: "全国大学生竞赛",
+            fieldPath: "awards[0].name",
+            assessment: {
+              fieldId: field.id,
+              label: field.label,
+              semantic: field.semanticHint,
+              status: "ready" as const,
+              source: "semantic" as const,
+              confidence: 0.92,
+              reason: "semantic_match",
+              evidence: []
+            }
+          },
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(observe).toHaveBeenCalledTimes(2);
+    expect(service.state("task-1").value).toBe("needs_questions");
+    expect(service.state("task-1").context.questions).toContainEqual(expect.objectContaining({
+      fieldId: "field-award",
+      fieldPath: "awards[0].name"
+    }));
+    expect(service.progress("task-1")).toMatchObject({ status: "idle", busy: false, recovery: [] });
+    expect(progressEvents.some((event) => event.type === "task_paused")).toBe(false);
+
+    await service.handleActivity({
+      type: "page_unstable",
+      taskId: "task-1",
+      fingerprint: "delayed-dom-fluctuation"
+    });
+
+    expect(service.state("task-1").value).toBe("needs_questions");
+    expect(service.progress("task-1")).toMatchObject({ status: "idle", busy: false, recovery: [] });
+    expect(progressEvents.some((event) => event.type === "browser_activity")).toBe(true);
+    expect(progressEvents.some((event) => event.type === "task_paused")).toBe(false);
+    database.close();
+  });
+
+  it("搜索控件重渲染后使用稳定语义身份和保守专业名称完成第二次尝试", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const originalField: FormField = {nodeRef: fixtureNodeRef, 
+      id: "field-major-before",
+      label: "专业",
+      type: "select",
+      required: true,
+      options: [],
+      currentValue: "",
+      controlKind: "custom",
+      interactionMode: "search",
+      sectionHint: "education",
+      semanticHint: "education[0].major"
+    };
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [originalField],
+      actions: [{ nodeRef: fixtureNodeRef, id: "action-submit", text: "提交申请", class: "terminal_submit" }]
+    };
+    const rerendered: FormSnapshot = {
+      ...form,
+      id: "snapshot-rerendered",
+      fields: [{
+        ...originalField,
+        id: "field-major-after",
+        currentValue: "\u8f6f\u4ef6\u5de5\u7a0b\u4e13\u4e1a"
+      }]
+    };
+    const filled: FormSnapshot = {
+      ...rerendered,
+      id: "snapshot-filled",
+      fields: [{ ...rerendered.fields[0]!, currentValue: "软件工程" }]
+    };
+    const observe = vi.fn()
+      .mockResolvedValueOnce(form)
+      .mockResolvedValueOnce(rerendered)
+      .mockResolvedValue(filled);
+    const commands: ExecutableCommand[] = [];
+    const execute = vi.fn(async (command: ExecutableCommand) => {
+      commands.push(command);
+      if (commands.length === 1) throw new Error("custom_option_not_found");
+      return {
+        type: "execution_result" as const,
+        taskId: "task-1",
+        snapshotId: filled.id,
+        commandType: "select" as const,
+        status: "applied" as const,
+        actualValue: "软件工程",
+        snapshot: filled,
+        errors: []
+      };
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute, invalidateExecution: vi.fn(async () => undefined) },
+      resolveField: async (_taskId, field) => ({
+        status: "verified" as const,
+        value: "软件工程专业",
+        fieldPath: "education[0].major",
+        assessment: {
+          fieldId: field.id,
+          label: field.label,
+          semantic: "education[0].major",
+          status: "ready" as const,
+          source: "exact" as const,
+          confidence: 1,
+          reason: "已确认档案精确匹配",
+          evidence: []
+        }
+      }),
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(commands).toEqual([
+      expect.objectContaining({ type: "select", fieldId: "field-major-before", value: "软件工程专业" }),
+      expect.objectContaining({ type: "select", fieldId: "field-major-after", value: "软件工程" })
+    ]);
+    const attemptCounts = service.progress("task-1").attemptCountsByKey ?? {};
+    expect(Object.keys(attemptCounts)).toHaveLength(1);
+    expect(Object.keys(attemptCounts)[0]).toMatch(/^field-operation:/u);
+    expect(Object.values(attemptCounts)).toEqual([2]);
+    expect(service.state("task-1").value).toBe("review_locked");
+    database.close();
+  });
+
+  it("搜索值没有保守归一化候选时不执行第二次搜索", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{ nodeRef: fixtureNodeRef, 
+        id: "field-school",
+        label: "学校",
+        type: "select",
+        required: true,
+        options: [],
+        currentValue: "",
+        controlKind: "custom",
+        interactionMode: "search",
+        sectionHint: "education",
+        semanticHint: "education[0].institution"
+      }]
+    };
+    const execute = vi.fn(async () => {
+      throw new Error("custom_option_not_found");
+    });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: {
+        observe: vi.fn(async () => form),
+        execute,
+        invalidateExecution: vi.fn(async () => undefined)
+      },
+      resolveField: async () => ({
+        status: "verified" as const,
+        value: "华南理工大学",
+        fieldPath: "education[0].institution"
+      }),
+      approve: () => "approved-token"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(execute).toHaveBeenCalledOnce();
+    expect(service.progress("task-1")).toMatchObject({ status: "paused", busy: false });
     database.close();
   });
 

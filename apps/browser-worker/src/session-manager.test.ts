@@ -3,13 +3,21 @@ import { describe, expect, it, vi } from "vitest";
 
 const runtime = vi.hoisted(() => ({
   context: undefined as FakeContext | undefined,
-  executorPages: [] as FakePage[]
+  executorPages: [] as FakePage[],
+  executorTraces: [] as unknown[],
+  executorInvalidations: [] as string[],
+  onExecutorInvalidate: undefined as (() => void) | undefined,
+  jobObserverPages: [] as FakePage[],
+  jobFilterPlans: [] as unknown[],
+  jobAdvanceCursors: [] as Array<string | undefined>
 }));
 
-class FakePage {
+class FakePage extends EventEmitter {
   private closed = false;
 
-  constructor(readonly name: string, private readonly host = `${name}.example`) {}
+  constructor(readonly name: string, private readonly host = `${name}.example`) {
+    super();
+  }
 
   isClosed(): boolean {
     return this.closed;
@@ -20,6 +28,10 @@ class FakePage {
   }
 
   async goto(): Promise<void> {}
+
+  async addInitScript(): Promise<void> {}
+
+  async evaluate(): Promise<void> {}
 
   url(): string {
     if (this.closed) throw new Error(`页面 ${this.name} 已关闭`);
@@ -89,8 +101,22 @@ vi.mock("./executor.js", () => ({
   ControlledExecutor: class {
     private snapshotId = "";
 
-    constructor(private readonly observer: { page: FakePage }) {
+    constructor(
+      private readonly observer: { page: FakePage },
+      _approvalKey: unknown,
+      _fileResolver: unknown,
+      _activityMonitor: unknown,
+      trace: unknown
+    ) {
       runtime.executorPages.push(observer.page);
+      runtime.executorTraces.push(trace);
+    }
+
+    async release(): Promise<void> {}
+
+    async invalidate(taskId: string): Promise<void> {
+      runtime.executorInvalidations.push(taskId);
+      runtime.onExecutorInvalidate?.();
     }
 
     async observe(taskId: string) {
@@ -108,17 +134,37 @@ vi.mock("./executor.js", () => ({
       };
     }
 
-    async execute(command: { taskId: string; type: string }) {
+    async execute(command: { taskId: string; type: string }, isCurrent: () => boolean = () => true) {
+      const snapshot = await this.observe(command.taskId);
       return {
         type: "execution_result",
         taskId: command.taskId,
         snapshotId: this.snapshotId,
         commandType: command.type,
-        status: "applied",
-        snapshot: await this.observe(command.taskId),
+        status: isCurrent() ? "applied" : "blocked",
+        snapshot,
         actualValue: null,
-        errors: []
+        errors: isCurrent() ? [] : ["execution_invalidated"]
       };
+    }
+  }
+}));
+
+vi.mock("./job-observer.js", () => ({
+  JobObserver: class {
+    constructor(private readonly page: FakePage) {
+      runtime.jobObserverPages.push(page);
+    }
+    async observe(ownerId: string) {
+      return jobSnapshot(ownerId, this.page.name === "popup" ? 2 : 1);
+    }
+    async applyFilters(ownerId: string, plan: unknown) {
+      runtime.jobFilterPlans.push(plan);
+      return { ...jobSnapshot(ownerId, 1), filterState: [{ key: "location", values: ["深圳"] }] };
+    }
+    async advance(ownerId: string, cursor?: string) {
+      runtime.jobAdvanceCursors.push(cursor);
+      return jobSnapshot(ownerId, 2);
     }
   }
 }));
@@ -128,13 +174,124 @@ import { BrowserSessionManager } from "./session-manager.js";
 const executablePath = process.execPath;
 const approvalKey = Buffer.alloc(32).toString("base64url");
 
+it("replaces and disposes the main-document response listener with each page lifecycle", async () => {
+  const initial = new FakePage("initial");
+  const context = new FakeContext(initial);
+  const manager = createManager(context);
+  await manager.start(approvalKey);
+  expect(initial.listenerCount("response")).toBe(1);
+
+  const popup = new FakePage("popup", "initial.example");
+  context.addPage(popup);
+  await manager.observe("task-listener");
+
+  expect(initial.listenerCount("response")).toBe(0);
+  expect(popup.listenerCount("response")).toBe(1);
+  await manager.releaseTask("task-listener");
+  expect(popup.listenerCount("response")).toBe(0);
+  await manager.stop();
+});
+
+it("shares one runtime trace buffer across page rebinds", async () => {
+  const initial = new FakePage("initial");
+  const context = new FakeContext(initial);
+  const manager = createManager(context);
+  await manager.start(approvalKey);
+
+  const popup = new FakePage("popup", "initial.example");
+  context.addPage(popup);
+  await manager.observe("task-trace");
+
+  expect(runtime.executorTraces).toHaveLength(2);
+  expect(runtime.executorTraces[0]).toBeDefined();
+  expect(runtime.executorTraces[1]).toBe(runtime.executorTraces[0]);
+  await manager.stop();
+});
+
 function createManager(context: FakeContext): BrowserSessionManager {
   runtime.context = context;
   runtime.executorPages = [];
+  runtime.executorTraces = [];
+  runtime.executorInvalidations = [];
+  runtime.onExecutorInvalidate = undefined;
+  runtime.jobObserverPages = [];
+  runtime.jobFilterPlans = [];
+  runtime.jobAdvanceCursors = [];
   return new BrowserSessionManager({ profileDir: ".test-profile", headless: true, executablePath });
 }
 
+function jobSnapshot(ownerId: string, current: number) {
+  return {
+    id: `job-snapshot-${current}`,
+    ownerId,
+    url: "https://initial.example/jobs",
+    title: "Jobs",
+    capturedAt: "2026-08-16T00:00:00.000Z",
+    entryHint: "job_list" as const,
+    visibleText: ["Jobs"],
+    jobCards: [],
+    filterState: [],
+    pagination: { kind: "page" as const, current, hasNext: current === 1 },
+    boundaries: []
+  };
+}
+
 describe("BrowserSessionManager 页面生命周期", () => {
+  it("observes jobs and authorizes filter and page mutations by epoch", async () => {
+    const manager = createManager(new FakeContext(new FakePage("initial")));
+    await manager.start(approvalKey);
+    const plan = { source: "moka" as const, adapterVersion: "moka-job-v1", mapped: [], localOnly: [] };
+
+    await expect(manager.observeJob("jm-1")).resolves.toMatchObject({ ownerId: "jm-1" });
+    await expect(manager.applyJobFilters("jm-1", plan, 3)).resolves.toMatchObject({
+      filterState: [{ key: "location", values: ["深圳"] }]
+    });
+    await manager.invalidateExecution("jm-1", 4);
+    await expect(manager.advanceJobPage("jm-1", "page-2", 3)).rejects.toThrow("execution_invalidated");
+    await expect(manager.advanceJobPage("jm-1", "page-2", 4)).resolves.toMatchObject({
+      pagination: { current: 2 }
+    });
+    expect(runtime.jobFilterPlans).toEqual([plan]);
+    expect(runtime.jobAdvanceCursors).toEqual(["page-2"]);
+    await manager.stop();
+  });
+
+  it("advances the task epoch before invalidating executor state", async () => {
+    const initial = new FakePage("initial");
+    const manager = createManager(new FakeContext(initial));
+    await manager.start(approvalKey);
+    const snapshot = await manager.observe("task-invalidate");
+    let epochDuringInvalidation: number | undefined;
+    runtime.onExecutorInvalidate = () => {
+      epochDuringInvalidation = (manager as unknown as {
+        executionEpochs: Map<string, number>;
+      }).executionEpochs.get("task-invalidate");
+    };
+
+    await manager.invalidateExecution("task-invalidate", 2);
+
+    expect(epochDuringInvalidation).toBe(2);
+    expect(runtime.executorInvalidations).toEqual(["task-invalidate"]);
+    await expect(manager.execute({
+      type: "fill",
+      taskId: "task-invalidate",
+      snapshotId: snapshot.id,
+      fieldId: "field-1",
+      nodeRef: {
+        documentId: "document-fixture-00000001",
+        nodeId: "node-fixture-000000000001",
+        observedAt: 7
+      },
+      executionEpoch: 1,
+      value: "stale",
+      approval: "stale-approval"
+    }, 1)).resolves.toMatchObject({
+      status: "blocked",
+      errors: ["execution_invalidated"]
+    });
+    await manager.stop();
+  });
+
   it("当前页关闭后，observe 会切换到同一上下文中仍存活的页面", async () => {
     const current = new FakePage("current");
     const fallback = new FakePage("fallback", "current.example");
@@ -162,6 +319,12 @@ describe("BrowserSessionManager 页面生命周期", () => {
       taskId: "task-2",
       snapshotId: snapshot.id,
       fieldId: "field-1",
+      nodeRef: {
+        documentId: "document-fixture-00000001",
+        nodeId: "node-fixture-000000000001",
+        observedAt: 7
+      },
+      executionEpoch: 1,
       value: "测试",
       approval: "test-approval"
     }, 1);

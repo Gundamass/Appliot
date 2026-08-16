@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import type {
   ApplicationContentReview,
+  ApplicationExecutionCounts,
   ApplicationFieldAssessment,
   ApplicationFieldCoverage,
   ApplicationQuestion,
@@ -11,9 +12,11 @@ import type {
   ExecutableCommand,
   FormField,
   FormSnapshot,
+  ProfileFact,
   WorkerActivity,
   WorkerResponse
 } from "@resume/contracts";
+import { classifyMokahrAddActions } from "@resume/form-semantics";
 import { createActor } from "xstate";
 import {
   applicationMachine,
@@ -21,6 +24,10 @@ import {
   type ApplicationActor,
   type ApplicationStateValue
 } from "./application-machine.js";
+import {
+  createChallengeCoordinator,
+  type ChallengeCoordinator
+} from "./challenge-coordinator.js";
 import type {
   ApplicationCheckpoint,
   CheckpointRepository,
@@ -38,6 +45,15 @@ import { deriveEntrySemanticHints } from "./entry-field-semantics.js";
 import { annotateDjiFields } from "./dji-field-catalog.js";
 import { createFieldCoverageStore } from "./field-coverage.js";
 import { planRepeatedSectionActions } from "./repeated-section-planner.js";
+import { compatibleExperienceIndexes } from "./experience-routing.js";
+import { fieldOperationKey } from "./field-operation-key.js";
+import { BrowserOwnershipLease } from "../browser/browser-ownership-lease.js";
+import {
+  createFullPageAuditCoordinator,
+  type AuditMismatch,
+  type FullPageAuditCoordinator,
+  type FullPageAuditReason
+} from "./full-page-audit.js";
 
 type ExecutionResult = Extract<WorkerResponse, { type: "execution_result" }>;
 
@@ -57,6 +73,7 @@ export interface ApplicationService {
   requiresRecovery(taskId: string): boolean;
   openBrowser(taskId: string): Promise<void>;
   resume(taskId: string): Promise<void>;
+  resumeAfterChallenge(taskId: string): Promise<void>;
   resumeWithProfile(taskId: string): Promise<void>;
   refreshFromProfile(): Promise<void>;
   syncTaskFromProfile(taskId: string): Promise<void>;
@@ -94,6 +111,7 @@ interface ApplicationServiceDependencies {
   profileRevision?: () => number;
   taskEvents?: Pick<TaskEventBus, "emit" | "emitProgress">;
   browser: BrowserPort;
+  browserOwnershipLease?: BrowserOwnershipLease;
   resolveField(
     taskId: string,
     field: FormField,
@@ -104,6 +122,8 @@ interface ApplicationServiceDependencies {
     snapshotId: string;
     targetId: string;
     operation: ExecutableCommand["type"];
+    nodeRef: FormField["nodeRef"];
+    executionEpoch: number;
   }, snapshot: FormSnapshot): string;
   applyAnswers?: (
     taskId: string,
@@ -123,23 +143,41 @@ export interface StartApplicationInput {
 
 export function createApplicationService(dependencies: ApplicationServiceDependencies): ApplicationService {
   const actors = new Map<string, ApplicationActor>();
-  let activeBrowserTaskId: string | undefined;
+  const browserOwnershipLease = dependencies.browserOwnershipLease ?? new BrowserOwnershipLease();
+  const deriveSnapshot = (snapshot: FormSnapshot): FormSnapshot => withDerivedEntrySemantics(
+    snapshot,
+    dependencies.listProfileFacts?.() ?? []
+  );
 
   const releaseTerminalBrowserTask = (): string | undefined => {
-    if (activeBrowserTaskId === undefined) return undefined;
-    const actor = actors.get(activeBrowserTaskId);
+    const owner = browserOwnershipLease.current();
+    if (owner?.ownerKind !== "application") return undefined;
+    const actor = actors.get(owner.ownerId);
     if (actor && ["cancelled", "failed", "review_locked"].includes(actor.getSnapshot().value)) {
-      activeBrowserTaskId = undefined;
+      browserOwnershipLease.release(owner);
+      return undefined;
     }
-    return activeBrowserTaskId;
+    return owner.ownerId;
   };
   const reserveBrowserTask = (taskId: string): boolean => {
-    if (releaseTerminalBrowserTask() !== undefined && activeBrowserTaskId !== taskId) {
-      throw new Error("browser_task_in_use");
+    releaseTerminalBrowserTask();
+    const owner = browserOwnershipLease.current();
+    const newlyReserved = owner?.ownerKind !== "application" || owner.ownerId !== taskId;
+    try {
+      browserOwnershipLease.acquire({ ownerKind: "application", ownerId: taskId });
+    } catch (error) {
+      if (error instanceof Error && error.message === "browser_lease_in_use") {
+        throw new Error("browser_task_in_use");
+      }
+      throw error;
     }
-    const newlyReserved = activeBrowserTaskId !== taskId;
-    activeBrowserTaskId = taskId;
     return newlyReserved;
+  };
+  const releaseBrowserTask = (taskId: string): void => {
+    const owner = browserOwnershipLease.current();
+    if (owner?.ownerKind === "application" && owner.ownerId === taskId) {
+      browserOwnershipLease.release(owner);
+    }
   };
   const latestSnapshots = new Map<string, FormSnapshot>();
   const contentReviews = new Map<string, ContentReview>();
@@ -148,8 +186,12 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
   const stableActivities = new Map<string, Promise<void>>();
   const activeRuns = new Map<string, Promise<void>>();
   const applicationFormsReached = new Set<string>();
+  const retryReadbacks = new Set<string>();
   const runGenerations = new Map<string, number>();
   const executionEpochs = new Map<string, number>();
+  const fullPageAudits = new Map<string, FullPageAuditCoordinator>();
+  const fullPageAuditOperations = new Map<string, Map<string, StartOperationInput>>();
+  let challengeCoordinator: ChallengeCoordinator;
   const fieldCoverageStore = createFieldCoverageStore();
   const progress = createApplicationProgressCoordinator({
     emit(taskId, event) {
@@ -160,6 +202,30 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     }
   });
 
+  const publishCoverageCounts = (taskId: string): void => {
+    const coverage = fieldCoverageStore.snapshot(taskId);
+    if (coverage === undefined) return;
+    const counts: ApplicationExecutionCounts = {
+      exact: coverage.fields.filter((field) =>
+        field.status === "filled" && (field.source === "exact" || field.source === "dji_catalog")).length,
+      semantic: coverage.fields.filter((field) =>
+        field.status === "filled" && field.source === "semantic").length,
+      user: coverage.fields.filter((field) =>
+        field.status === "filled" && field.source === "user").length,
+      missing: coverage.fields.filter((field) =>
+        field.status === "missing" || field.status === "unsupported" || field.status === "review").length,
+      failed: coverage.failed
+    };
+    const current = progress.snapshot(taskId).executionProgress?.counts;
+    if (current !== undefined && Object.keys(counts).every((key) =>
+      counts[key as keyof ApplicationExecutionCounts] === current[key as keyof ApplicationExecutionCounts])) return;
+    progress.setCounts(taskId, counts);
+  };
+
+  const enterFinalReview = (taskId: string): void => {
+    progress.setPhase(taskId, "final_review", "running");
+  };
+
   const requireActor = (taskId: string): ApplicationActor => {
     const existing = actors.get(taskId);
     if (existing) return existing;
@@ -169,7 +235,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       input: { taskId, applicationUrl: checkpoint.url }
     }).start();
     sendApplicationEvent(actor, { type: "START" });
-    restoreActor(actor, checkpoint.state, checkpoint.questions);
+    restoreActor(actor, checkpoint.state, checkpoint.questions, checkpoint.snapshot?.challenge);
     actors.set(taskId, actor);
     if (["created", "observing", "filling", "validating", "navigating"].includes(checkpoint.state)) {
       recoveryCheckpoints.set(taskId, checkpoint);
@@ -199,6 +265,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       }
     }
     const coverage = fieldCoverageStore.snapshot(taskId);
+    publishCoverageCounts(taskId);
     dependencies.checkpoints.save({
       taskId,
       state: machineState.value as ApplicationStateValue,
@@ -218,6 +285,51 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       dependencies.taskEvents?.emit(machineState.context.taskId, state);
       lastPublishedStates.set(machineState.context.taskId, state);
     }
+    releaseTerminalBrowserTask();
+  };
+
+  const fullPageAuditFor = (taskId: string): FullPageAuditCoordinator => {
+    const existing = fullPageAudits.get(taskId);
+    if (existing !== undefined) return existing;
+    const created = createFullPageAuditCoordinator(taskId);
+    fullPageAudits.set(taskId, created);
+    return created;
+  };
+
+  const auditOperationsFor = (taskId: string): Map<string, StartOperationInput> => {
+    const existing = fullPageAuditOperations.get(taskId);
+    if (existing !== undefined) return existing;
+    const created = new Map<string, StartOperationInput>();
+    fullPageAuditOperations.set(taskId, created);
+    return created;
+  };
+
+  const runFullPageAudit = async (
+    taskId: string,
+    actor: ApplicationActor,
+    current: FormSnapshot,
+    reason: FullPageAuditReason
+  ): Promise<{ snapshot: FormSnapshot; mismatches: AuditMismatch[]; challenged: boolean }> => {
+    const coordinator = fullPageAuditFor(taskId);
+    if (current.stage !== "application_form"
+      || auditOperationsFor(taskId).size === 0
+      || !coordinator.shouldAudit(reason)) {
+      return { snapshot: current, mismatches: [], challenged: false };
+    }
+
+    const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+    latestSnapshots.set(taskId, observed);
+    if (await pauseForChallenge(actor, observed)) {
+      return { snapshot: observed, mismatches: [], challenged: true };
+    }
+    const mismatches = coordinator.audit(observed);
+    for (const mismatch of mismatches) {
+      fieldCoverageStore.markFailed(taskId, mismatch.fieldId, "controlled_value_reverted");
+      const operation = auditOperationsFor(taskId).get(mismatch.operationKey);
+      if (operation !== undefined) progress.recordFailure(operation, "READBACK_MISMATCH");
+    }
+    persist(actor, observed);
+    return { snapshot: observed, mismatches, challenged: false };
   };
 
   const nextRunGeneration = (taskId: string): number => {
@@ -238,6 +350,14 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     return epoch;
   };
 
+  const pauseForChallenge = async (
+    actor: ApplicationActor,
+    snapshot: FormSnapshot
+  ): Promise<boolean> => {
+    latestSnapshots.set(actor.getSnapshot().context.taskId, snapshot);
+    return challengeCoordinator.pause(actor, snapshot);
+  };
+
   const invalidateRunGeneration = (taskId: string): number => {
     const generation = (runGenerations.get(taskId) ?? 0) + 1;
     runGenerations.set(taskId, generation);
@@ -250,12 +370,13 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     return generation;
   };
 
-  const executeWithFreshEpoch = (command: ExecutableCommand): Promise<ExecutionResult> =>
-    dependencies.browser.execute(command, nextExecutionEpoch(command.taskId));
+  const executeWithSignedEpoch = (command: ExecutableCommand): Promise<ExecutionResult> =>
+    dependencies.browser.execute(command, command.executionEpoch);
 
   const runIsLive = (taskId: string, generation: number, actor: ApplicationActor): boolean =>
     runGenerations.get(taskId) === generation
-    && actor.getSnapshot().value !== "cancelled";
+    && actor.getSnapshot().value !== "cancelled"
+    && actor.getSnapshot().value !== "awaiting_challenge";
 
   const runIsCurrent = (taskId: string, generation: number, actor: ApplicationActor): boolean =>
     runIsLive(taskId, generation, actor)
@@ -290,6 +411,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       actors.set(input.taskId, actor);
       const storedProgress = dependencies.checkpoints.latestProgress(input.taskId);
       if (storedProgress) progress.restore(input.taskId, storedProgress);
+      else progress.setPhase(input.taskId, "waiting_for_form", "running");
     },
 
     activeBrowserTaskId(): string | undefined {
@@ -332,19 +454,23 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       try {
         await dependencies.browser.open(taskId, actor.getSnapshot().context.applicationUrl);
       } catch (error) {
-        if (newlyReserved && activeBrowserTaskId === taskId) activeBrowserTaskId = undefined;
+        if (newlyReserved) releaseBrowserTask(taskId);
         throw error;
       }
     },
 
     async resume(taskId: string): Promise<void> {
+      const storedState = actors.get(taskId)?.getSnapshot().value
+        ?? dependencies.checkpoints.latest(taskId)?.state;
+      if (storedState === "awaiting_challenge") throw new Error("challenge_resume_not_allowed");
       const newlyReserved = reserveBrowserTask(taskId);
       try {
         const existingActor = actors.get(taskId);
         if (existingActor) {
           const recoveryCheckpoint = recoveryCheckpoints.get(taskId);
           if (recoveryCheckpoint) {
-            const observed = await dependencies.browser.observe(taskId);
+            const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+            if (await pauseForChallenge(existingActor, observed)) return;
             if (observed.stage !== "login" && !matchesCheckpoint(observed, recoveryCheckpoint)) {
               actors.delete(taskId);
               recoveryCheckpoints.delete(taskId);
@@ -361,7 +487,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           if (existingActor.getSnapshot().value !== "awaiting_login") {
             throw new Error(`投递任务已在当前进程恢复：${taskId}`);
           }
-          const observed = await dependencies.browser.observe(taskId);
+          const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+          if (await pauseForChallenge(existingActor, observed)) return;
           latestSnapshots.set(taskId, observed);
           if (observed.stage !== "login") {
             sendApplicationEvent(existingActor, { type: "RESUME" });
@@ -375,10 +502,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           input: { taskId, applicationUrl: checkpoint.url }
         }).start();
         sendApplicationEvent(actor, { type: "START" });
-        restoreActor(actor, checkpoint.state, checkpoint.questions);
+        restoreActor(actor, checkpoint.state, checkpoint.questions, checkpoint.snapshot?.challenge);
         actors.set(taskId, actor);
 
-        const observed = await dependencies.browser.observe(taskId);
+        const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+        if (await pauseForChallenge(actor, observed)) return;
         if (checkpoint.state !== "awaiting_login" && !matchesCheckpoint(observed, checkpoint)) {
           actors.delete(taskId);
           throw new Error("checkpoint_mismatch");
@@ -389,7 +517,17 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         latestSnapshots.set(taskId, observed);
         persist(actor, observed);
       } catch (error) {
-        if (newlyReserved && activeBrowserTaskId === taskId) activeBrowserTaskId = undefined;
+        if (newlyReserved) releaseBrowserTask(taskId);
+        throw error;
+      }
+    },
+
+    async resumeAfterChallenge(taskId: string): Promise<void> {
+      const newlyReserved = reserveBrowserTask(taskId);
+      try {
+        await challengeCoordinator.resume(requireActor(taskId));
+      } catch (error) {
+        if (newlyReserved) releaseBrowserTask(taskId);
         throw error;
       }
     },
@@ -427,13 +565,14 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       if (actor.getSnapshot().value !== "needs_questions") throw new Error("profile_resumption_not_allowed");
       const newlyReserved = reserveBrowserTask(taskId);
       try {
-        const observed = await dependencies.browser.observe(taskId);
+        const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+        if (await pauseForChallenge(actor, observed)) return;
         sendApplicationEvent(actor, { type: "PROFILE_UPDATED" });
         latestSnapshots.set(taskId, observed);
         persist(actor, observed);
         await service.runUntilPause(taskId, observed);
       } catch (error) {
-        if (newlyReserved && activeBrowserTaskId === taskId) activeBrowserTaskId = undefined;
+        if (newlyReserved) releaseBrowserTask(taskId);
         throw error;
       }
     },
@@ -563,10 +702,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       const actor = requireActor(taskId);
       invalidateRunGeneration(taskId);
       progress.cancel(taskId);
+      recoveryCheckpoints.delete(taskId);
       await invalidateExecution(taskId).catch(() => undefined);
-      await dependencies.browser.releaseTask?.(taskId);
+      await dependencies.browser.releaseTask?.(taskId).catch(() => undefined);
       sendApplicationEvent(actor, { type: "CANCEL" });
-      if (activeBrowserTaskId === taskId) activeBrowserTaskId = undefined;
+      releaseBrowserTask(taskId);
       const snapshot = latestSnapshots.get(taskId);
       if (snapshot) persist(actor, snapshot);
     },
@@ -583,9 +723,12 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       lastPublishedStates.delete(taskId);
       stableActivities.delete(taskId);
       applicationFormsReached.delete(taskId);
+      retryReadbacks.delete(taskId);
       runGenerations.delete(taskId);
       executionEpochs.delete(taskId);
-      if (activeBrowserTaskId === taskId) activeBrowserTaskId = undefined;
+      fullPageAudits.delete(taskId);
+      fullPageAuditOperations.delete(taskId);
+      releaseBrowserTask(taskId);
     },
 
     async runUntilPause(taskId: string, initialSnapshot?: FormSnapshot): Promise<void> {
@@ -595,6 +738,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       activeRuns.set(taskId, run);
       try {
         await run;
+      } catch (error) {
+        if (!isCancellation(error)) throw error;
       } finally {
         if (activeRuns.get(taskId) === run) activeRuns.delete(taskId);
       }
@@ -603,6 +748,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     async runUntilPauseInternal(taskId: string, initialSnapshot?: FormSnapshot): Promise<void> {
       const actor = requireActor(taskId);
       if (actor.getSnapshot().value === "review_locked") return;
+      if (actor.getSnapshot().value === "awaiting_challenge") return;
       if (progress.snapshot(taskId).status === "paused") return;
       const runGeneration = nextRunGeneration(taskId);
       let page: FormSnapshot;
@@ -616,17 +762,20 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           throw error;
         }
       }
-      page = withDerivedEntrySemantics(page);
+      page = deriveSnapshot(page);
       if (!runIsCurrent(taskId, runGeneration, actor)) return;
+      if (await pauseForChallenge(actor, page)) return;
       latestSnapshots.set(taskId, page);
       persist(actor, page);
 
       if (page.stage === "review" || page.stage === "success") {
+        enterFinalReview(taskId);
         sendApplicationEvent(actor, { type: "REVIEW_REACHED" });
         persist(actor, page);
         return;
       }
       if (page.stage === "login") {
+        progress.setPhase(taskId, "waiting_for_form", "running");
         if (actor.getSnapshot().value !== "awaiting_login") {
           sendApplicationEvent(actor, { type: "LOGIN_REQUIRED" });
         }
@@ -634,39 +783,74 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         return;
       }
       if (!applicationFormsReached.has(taskId)) {
-        if (!isApplicationFormReady(page)) return;
+        if (!isApplicationFormReady(page)) {
+          progress.setPhase(taskId, "waiting_for_form", "running");
+          return;
+        }
         applicationFormsReached.add(taskId);
       }
+      progress.setPhase(taskId, "waiting_for_form", "completed");
 
       const repeatedAction = planRepeatedSectionActions(
         page,
         dependencies.listProfileFacts?.() ?? []
       )[0];
       if (repeatedAction) {
+        const profileFacts = dependencies.listProfileFacts?.() ?? [];
+        const action = page.actions.find((candidate) => candidate.id === repeatedAction.actionId);
+        if (action === undefined) throw new Error("repeated_section_action_not_found");
+        const executionEpoch = nextExecutionEpoch(taskId);
         const approval = dependencies.approve({
           taskId,
           snapshotId: page.id,
           targetId: repeatedAction.actionId,
-          operation: "click_intermediate"
+          operation: "click_intermediate",
+          nodeRef: action.nodeRef,
+          executionEpoch
         }, page);
         const operation = operationInput(taskId, "navigate", repeatedAction.actionId, "项目经历", 1, 1, 15_000);
-        const result = await progress.runWithPolicy(operation, () => executeWithFreshEpoch({
+        const result = await progress.runOperation(operation, () => executeWithSignedEpoch({
           type: "click_intermediate",
           taskId,
           snapshotId: page.id,
           actionId: repeatedAction.actionId,
+          nodeRef: action.nodeRef,
+          executionEpoch,
           approval
         }));
         if (!runIsCurrent(taskId, runGeneration, actor)) return;
-        const expanded = withDerivedEntrySemantics(result.snapshot);
+        const expanded = deriveSnapshot(result.snapshot);
         latestSnapshots.set(taskId, expanded);
+        if (await pauseForChallenge(actor, expanded)) return;
         persist(actor, expanded);
         if (result.status !== "applied") {
           pauseAfterExecutionFailure(actor, operation, result);
           persist(actor, expanded);
           return;
         }
-        await service.runUntilPauseInternal(taskId, expanded);
+        let observed: FormSnapshot;
+        try {
+          observed = await progress.runOperation(
+            operationInput(taskId, "observe", "page", "页面状态", 1, 1, 10_000),
+            () => dependencies.browser.observe(taskId)
+          );
+        } catch (error) {
+          if (isCancellation(error)) return;
+          throw error;
+        }
+        if (!runIsCurrent(taskId, runGeneration, actor)) return;
+        const verified = deriveSnapshot(observed);
+        latestSnapshots.set(taskId, verified);
+        if (await pauseForChallenge(actor, verified)) return;
+        const remaining = planRepeatedSectionActions(verified, profileFacts)
+          .find((candidate) => candidate.section === repeatedAction.section)?.missingEntries ?? 0;
+        if (remaining >= repeatedAction.missingEntries) {
+          progress.recordFailure(operation, "READBACK_MISMATCH");
+          persist(actor, verified);
+          return;
+        }
+        persist(actor, verified);
+        await service.runUntilPauseInternal(taskId, verified);
         return;
       }
 
@@ -680,23 +864,30 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           page,
           resumeField,
           undefined,
+          nextExecutionEpoch(taskId),
           dependencies.approve,
           dependencies.resolveFileId
         );
         const uploadOperation = operationInput(taskId, "upload", resumeField.id, "附件", 1, 1, 60_000);
         const result = await progress.runWithPolicy(
           uploadOperation,
-          () => executeWithFreshEpoch(command)
+          () => executeWithSignedEpoch(command)
         );
         if (!runIsCurrent(taskId, runGeneration, actor)) return;
+        const uploadSnapshot = deriveSnapshot(result.snapshot);
+        latestSnapshots.set(taskId, uploadSnapshot);
+        if (await pauseForChallenge(actor, uploadSnapshot)) return;
         if (result.status !== "applied") {
           pauseAfterExecutionFailure(actor, uploadOperation, result);
-          persist(actor, result.snapshot);
+          persist(actor, uploadSnapshot);
           return;
         }
-        page = withDerivedEntrySemantics(result.snapshot);
-        latestSnapshots.set(taskId, page);
+        page = uploadSnapshot;
         persist(actor, page);
+        if (planRepeatedSectionActions(page, dependencies.listProfileFacts?.() ?? []).length > 0) {
+          await service.runUntilPauseInternal(taskId, page);
+          return;
+        }
       }
 
       let current = page;
@@ -753,56 +944,163 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         if (state === "observing") sendApplicationEvent(actor, { type: "READY_TO_FILL" });
         else if (state !== "filling") throw new Error(`状态 ${String(state)} 不能开始填写`);
 
+        const recordSuccessfulApply = async (
+          field: FormField,
+          operation: StartOperationInput,
+          result: ExecutionResult
+        ): Promise<boolean> => {
+          fieldCoverageStore.markFilled(taskId, field.id, result.warnings ?? []);
+          if (operation.retryKey !== undefined
+            && operation.retryKey === auditableOperationKey(taskId, field)) {
+            fullPageAuditFor(taskId).recordApplied(operation.retryKey, result.actualValue, field.id);
+            auditOperationsFor(taskId).set(operation.retryKey, operation);
+          }
+          persist(actor, current);
+          const audited = await runFullPageAudit(taskId, actor, current, "field_applied");
+          current = audited.snapshot;
+          if (audited.challenged) return false;
+          audited.mismatches.forEach((mismatch) => failedFieldIds.add(mismatch.fieldId));
+          return audited.mismatches.length === 0 && runIsCurrent(taskId, runGeneration, actor);
+        };
+
         for (let index = 0; index < fillable.length; index += 1) {
           if (!runIsCurrent(taskId, runGeneration, actor)) return false;
           const { field, decision } = fillable[index]!;
           const observedField = current.fields.find((candidate) => candidate.id === field.id);
           if (hasUserValue(observedField?.currentValue)) continue;
-          const command = fieldCommand(
-            current,
-            field,
-            decision.value,
-            dependencies.approve,
-            dependencies.resolveFileId
-          );
+          if (observedField === undefined
+            || observedField.type !== field.type
+            || observedField.label !== field.label
+            || observedField.semanticHint !== field.semanticHint) {
+            persist(actor, current);
+            await service.runUntilPauseInternal(taskId, current);
+            return false;
+          }
+          const semanticPath = decision.fieldPath ?? observedField.semanticHint;
+          const operationSemanticPath = semanticPath !== undefined
+            && observedField.semanticHint?.startsWith(`${semanticPath}.`)
+            ? observedField.semanticHint
+            : semanticPath;
+          const entryIndex = semanticPath === undefined ? undefined : entryIndexFromSemanticPath(semanticPath);
+          const searchValues = observedField.interactionMode === "search"
+            && semanticPath !== undefined
+            ? conservativeSearchValues(String(decision.value ?? ""), semanticPath)
+            : undefined;
+          let operationSnapshot = current;
+          let operationField = observedField;
+          const commandType = fieldCommandType(observedField);
           let result: ExecutionResult;
           const fillOperation = operationInput(
             taskId,
-            command.type === "click_intermediate" ? "navigate" : command.type,
+            commandType === "click_intermediate" ? "navigate" : commandType,
             field.id,
             displayCategory(field),
             index + 1,
             fillable.length,
-            command.type === "upload" ? 60_000 : 15_000,
-            displayPhase
+            commandType === "upload" ? 60_000 : 15_000,
+            displayPhase,
+            operationSemanticPath === undefined || (commandType !== "fill" && commandType !== "select")
+              ? undefined
+              : fieldOperationKey({
+                  taskId,
+                  semanticPath: operationSemanticPath,
+                  controlRole: field.interactionMode ?? field.type,
+                  fieldLabel: field.label,
+                  ...(field.sectionHint === undefined ? {} : { sectionHint: field.sectionHint }),
+                  ...(entryIndex === undefined ? {} : { entryIndex })
+                })
           );
           try {
             result = await progress.runWithPolicy(
               fillOperation,
-              () => executeWithFreshEpoch(command),
+              async (attempt) => {
+                const attemptValue = searchValues?.[attempt - 1] ?? (searchValues === undefined
+                  ? decision.value
+                  : undefined);
+                if (searchValues !== undefined && attemptValue === undefined) {
+                  throw new Error("conservative_search_value_unavailable");
+                }
+                const attemptCommand = fieldCommand(
+                  operationSnapshot,
+                  operationField,
+                  attemptValue,
+                  nextExecutionEpoch(taskId),
+                  dependencies.approve,
+                  dependencies.resolveFileId
+                );
+                progress.setCurrentAction(taskId, {
+                  action: attemptCommand.type === "select"
+                    ? `正在选择：${field.label}`
+                    : attemptCommand.type === "upload"
+                      ? `正在上传：${field.label}`
+                      : `正在填写：${field.label}`,
+                  fieldId: operationField.id,
+                  attempt,
+                  maxAttempts: 2
+                });
+                const attemptResult = await executeWithSignedEpoch(attemptCommand);
+                if (operationField.interactionMode === "search"
+                  && attemptResult.status !== "applied"
+                  && !isTerminalSafetyBlock(attemptResult)) {
+                  throw new Error(attemptResult.errors[0] ?? "search_selection_failed");
+                }
+                return attemptResult;
+              },
               {
+                finalFailureMode: displayPhase === "semantic_fill" ? "defer" : "pause",
                 canRetry: async () => {
-                  if (!runIsLive(taskId, runGeneration, actor)) return false;
-                  await invalidateExecution(taskId);
-                  if (!runIsLive(taskId, runGeneration, actor)) return false;
-                  const observed = await dependencies.browser.observe(taskId);
-                  if (!runIsLive(taskId, runGeneration, actor)) return false;
-                  latestSnapshots.set(taskId, observed);
-                  const candidate = observed.fields.find((candidate) => candidate.id === field.id);
-                  return observed.id === current.id
-                    && sameStructure(current, observed)
-                    && candidate !== undefined
-                    && !hasUserValue(candidate.currentValue);
+                  if (searchValues !== undefined && searchValues[1] === undefined) return false;
+                  retryReadbacks.add(taskId);
+                  try {
+                    if (!runIsLive(taskId, runGeneration, actor)) return false;
+                    await invalidateExecution(taskId);
+                    if (!runIsLive(taskId, runGeneration, actor)) return false;
+                    const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+                    if (!runIsLive(taskId, runGeneration, actor)) return false;
+                    latestSnapshots.set(taskId, observed);
+                    if (await pauseForChallenge(actor, observed)) return false;
+                    const candidate = searchValues === undefined
+                      ? observed.fields.find((candidate) => candidate.id === field.id)
+                      : findSemanticField(observed, field, semanticPath!);
+                    const retryAllowed = searchValues === undefined
+                      ? observed.id === current.id && sameStructure(current, observed)
+                      : samePageContext(current, observed);
+                    if (!retryAllowed || candidate === undefined) {
+                      return false;
+                    }
+                    const failedSearchValue = searchValues?.[0];
+                    const retainsFailedSearchValue = failedSearchValue !== undefined
+                      && String(candidate.currentValue ?? "").trim() === failedSearchValue.trim();
+                    if (hasUserValue(candidate.currentValue) && !retainsFailedSearchValue) {
+                      return false;
+                    }
+                    operationSnapshot = observed;
+                    operationField = candidate;
+                    return true;
+                  } finally {
+                    retryReadbacks.delete(taskId);
+                  }
                 }
               }
             );
           } catch (error) {
             if (isCancellation(error) || progress.snapshot(taskId).status === "paused") return false;
+            if (displayPhase === "semantic_fill") {
+              fieldCoverageStore.markFailed(
+                taskId,
+                field.id,
+                error instanceof Error ? error.message : "field_execution_failed"
+              );
+              failedFieldIds.add(field.id);
+              persist(actor, current);
+              continue;
+            }
             throw error;
           }
           if (!runIsCurrent(taskId, runGeneration, actor)) return false;
-          current = withDerivedEntrySemantics(result.snapshot);
+          current = deriveSnapshot(result.snapshot);
           latestSnapshots.set(taskId, current);
+          if (await pauseForChallenge(actor, current)) return false;
           const approvedReview = contentReviews.get(taskId);
           if (result.status === "applied"
             && approvedReview?.status === "approved"
@@ -815,12 +1113,13 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
               persist(actor, current);
               return false;
             }
-            if (command.type === "fill" || command.type === "select") {
+            if (commandType === "fill" || commandType === "select") {
               await invalidateExecution(taskId);
               if (!runIsCurrent(taskId, runGeneration, actor)) return false;
-              const observed = withDerivedEntrySemantics(await dependencies.browser.observe(taskId));
+              const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
               if (!runIsCurrent(taskId, runGeneration, actor)) return false;
               latestSnapshots.set(taskId, observed);
+              if (await pauseForChallenge(actor, observed)) return false;
               const retryField = observed.fields.find((candidate) => candidate.id === field.id);
               if (sameStructure(current, observed)
                 && retryField !== undefined
@@ -829,29 +1128,54 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
                 if (!runIsCurrent(taskId, runGeneration, actor)) return false;
                 if (retryResolution?.decision.status === "verified"
                   && !retryResolution.decision.requiresContentReview) {
-                  const retryCommand = fieldCommand(
-                    observed,
-                    retryField,
-                    retryResolution.decision.value,
-                    dependencies.approve,
-                    dependencies.resolveFileId
-                  );
-                  if (retryCommand.type === "fill" || retryCommand.type === "select") {
+                  const retryCommandType = fieldCommandType(retryField);
+                  if (retryCommandType === "fill" || retryCommandType === "select") {
                     try {
                       result = await progress.runWithPolicy(
                         fillOperation,
-                        () => executeWithFreshEpoch(retryCommand)
+                        (attempt) => {
+                          const retryCommand = fieldCommand(
+                            observed,
+                            retryField,
+                            retryResolution.decision.value,
+                            nextExecutionEpoch(taskId),
+                            dependencies.approve,
+                            dependencies.resolveFileId
+                          );
+                          progress.setCurrentAction(taskId, {
+                            action: retryCommand.type === "select"
+                              ? `正在选择：${retryField.label}`
+                              : `正在填写：${retryField.label}`,
+                            fieldId: retryField.id,
+                            attempt,
+                            maxAttempts: 2
+                          });
+                          return executeWithSignedEpoch(retryCommand);
+                        },
+                        {
+                          finalFailureMode: displayPhase === "semantic_fill" ? "defer" : "pause"
+                        }
                       );
                     } catch (error) {
                       if (isCancellation(error) || progress.snapshot(taskId).status === "paused") return false;
+                      if (displayPhase === "semantic_fill") {
+                        fieldCoverageStore.markFailed(
+                          taskId,
+                          field.id,
+                          error instanceof Error ? error.message : "field_execution_failed"
+                        );
+                        failedFieldIds.add(field.id);
+                        persist(actor, current);
+                        continue;
+                      }
                       throw error;
                     }
                     if (!runIsCurrent(taskId, runGeneration, actor)) return false;
-                    current = withDerivedEntrySemantics(result.snapshot);
+                    current = deriveSnapshot(result.snapshot);
                     latestSnapshots.set(taskId, current);
+                    if (await pauseForChallenge(actor, current)) return false;
                     if (result.status === "applied") {
-                      fieldCoverageStore.markFilled(taskId, field.id, result.warnings ?? []);
-                      persist(actor, current);
+                      if (!await recordSuccessfulApply(field, fillOperation, result)) return false;
                       continue;
                     }
                     if (isTerminalSafetyBlock(result)) {
@@ -873,18 +1197,27 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
             persist(actor, current);
             continue;
           }
-          fieldCoverageStore.markFilled(taskId, field.id, result.warnings ?? []);
-          persist(actor, current);
+          if (!await recordSuccessfulApply(field, fillOperation, result)) return false;
         }
         return true;
+      };
+
+      const auditBoundary = async (reason: FullPageAuditReason): Promise<boolean> => {
+        const audited = await runFullPageAudit(taskId, actor, current, reason);
+        current = audited.snapshot;
+        if (audited.challenged) return false;
+        audited.mismatches.forEach((mismatch) => failedFieldIds.add(mismatch.fieldId));
+        return audited.mismatches.length === 0 && runIsCurrent(taskId, runGeneration, actor);
       };
 
       const deterministicFields = current.fields.filter((field) =>
         !hasUserValue(field.currentValue) && !isLegalAcknowledgementField(field));
       deterministicFields.forEach((field) => seenFieldIds.add(field.id));
+      progress.setPhase(taskId, "deterministic_fill", "running");
       const deterministic = await resolvePass(deterministicFields, "deterministic");
       if (!runIsCurrent(taskId, runGeneration, actor)) return;
       if (!await applyVerified(deterministic, "deterministic_fill")) return;
+      progress.setPhase(taskId, "deterministic_fill", "completed");
       pendingDecisions.push(...deterministic.filter(({ field, decision }) =>
         decision.status !== "verified" || decision.requiresContentReview || failedFieldIds.has(field.id)
       ));
@@ -892,6 +1225,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       let semanticIds = new Set(deterministic
         .filter(({ decision }) => decision.status === "deferred")
         .map(({ field }) => field.id));
+      let semanticStarted = false;
       for (let semanticRound = 0; semanticRound < 2; semanticRound += 1) {
         const semanticFields = current.fields.filter((field) =>
           !hasUserValue(field.currentValue)
@@ -899,6 +1233,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           && (semanticIds.has(field.id) || !seenFieldIds.has(field.id))
         );
         if (semanticFields.length === 0) break;
+        if (!semanticStarted) {
+          if (!await auditBoundary("phase_boundary")) return;
+          progress.setPhase(taskId, "semantic_fill", "running");
+          semanticStarted = true;
+        }
         semanticFields.forEach((field) => seenFieldIds.add(field.id));
         const semantic = await resolvePass(semanticFields, "semantic");
         if (!runIsCurrent(taskId, runGeneration, actor)) return;
@@ -910,6 +1249,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           .filter(({ decision }) => decision.status === "deferred")
           .map(({ field }) => field.id));
       }
+      progress.setPhase(taskId, "semantic_fill", semanticStarted ? "completed" : "skipped");
+      if (semanticStarted && !await auditBoundary("phase_boundary")) return;
 
       const unresolved = pendingDecisions.filter(({ field, decision }) => {
         const observed = current.fields.find((candidate) => candidate.id === field.id);
@@ -969,6 +1310,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       const legalReviewFields = current.fields.filter((field) =>
         isLegalAcknowledgementField(field) && !hasUserValue(field.currentValue));
       if (legalReviewFields.length > 0) {
+        if (!await auditBoundary("final_review")) return;
+        enterFinalReview(taskId);
         sendApplicationEvent(actor, { type: "REVIEW_REACHED" });
         persist(actor, current);
         return;
@@ -979,6 +1322,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       else if (currentState !== "filling") throw new Error(`状态 ${String(currentState)} 不能完成填写`);
       const missingRequired = current.fields.filter((field) => field.required && !hasUserValue(field.currentValue));
       if (missingRequired.length > 0) {
+        progress.setPhase(taskId, "readback_validation", "failed");
         sendApplicationEvent(actor, {
           type: "FAIL",
           errors: missingRequired.map((field) => `required_fields_empty:${field.label}`)
@@ -988,23 +1332,35 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       }
       sendApplicationEvent(actor, { type: "PAGE_FILLED" });
       persist(actor, current);
+      progress.setPhase(taskId, "readback_validation", "running");
+      progress.setCurrentAction(taskId, { action: "正在校验页面填写结果", maxAttempts: 2 });
       const validation = progress.startOperation(
         operationInput(taskId, "validate", "page", "页面状态", pendingDecisions.length || 1, pendingDecisions.length || 1, 10_000)
       );
       if (current.errors.length > 0) {
         progress.failOperation(taskId, validation.generation, "VALIDATION_FAILED");
+        progress.setPhase(taskId, "readback_validation", "failed");
         sendApplicationEvent(actor, { type: "PAGE_INVALID", errors: current.errors });
         persist(actor, current);
         return;
       }
       progress.completeOperation(taskId, validation.generation);
+      progress.setPhase(taskId, "readback_validation", "completed");
       sendApplicationEvent(actor, { type: "PAGE_VALID" });
       persist(actor, current);
 
+      const repeatedSectionActionIds = new Set(classifyMokahrAddActions(current.actions.map((action) => ({
+        id: action.id,
+        text: action.text,
+        nearbyText: action.context ?? ""
+      }))).map((action) => action.actionId));
       const intermediate = current.actions.find((action) =>
-        action.class === "intermediate_navigation" || action.class === "intermediate_save");
+        (action.class === "intermediate_navigation" || action.class === "intermediate_save")
+        && !repeatedSectionActionIds.has(action.id));
       if (!intermediate) {
         if (current.actions.some((action) => action.class === "terminal_submit")) {
+          if (!await auditBoundary("final_review")) return;
+          enterFinalReview(taskId);
           sendApplicationEvent(actor, { type: "REVIEW_REACHED" });
           persist(actor, current);
           return;
@@ -1013,11 +1369,14 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         persist(actor, current);
         return;
       }
+      const executionEpoch = nextExecutionEpoch(taskId);
       const approval = dependencies.approve({
         taskId,
         snapshotId: current.id,
         targetId: intermediate.id,
-        operation: "click_intermediate"
+        operation: "click_intermediate",
+        nodeRef: intermediate.nodeRef,
+        executionEpoch
       }, current);
       let result: ExecutionResult;
       const navigationOperation = operationInput(
@@ -1032,11 +1391,13 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       try {
         result = await progress.runWithPolicy(
           navigationOperation,
-          () => executeWithFreshEpoch({
+          () => executeWithSignedEpoch({
             type: "click_intermediate",
             taskId,
             snapshotId: current.id,
             actionId: intermediate.id,
+            nodeRef: intermediate.nodeRef,
+            executionEpoch,
             approval
           })
         );
@@ -1045,8 +1406,9 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         throw error;
       }
       if (!runIsCurrent(taskId, runGeneration, actor)) return;
-      const nextPage = withDerivedEntrySemantics(result.snapshot);
+      const nextPage = deriveSnapshot(result.snapshot);
       latestSnapshots.set(taskId, nextPage);
+      if (await pauseForChallenge(actor, nextPage)) return;
       if (result.status !== "applied") {
         pauseAfterExecutionFailure(actor, navigationOperation, result);
         persist(actor, nextPage);
@@ -1058,6 +1420,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         return;
       }
       if (nextPage.stage === "review" || nextPage.stage === "success") {
+        enterFinalReview(taskId);
         sendApplicationEvent(actor, { type: "REVIEW_REACHED" });
         persist(actor, nextPage);
         return;
@@ -1079,6 +1442,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         type: "browser_activity",
         activity: toApplicationActivity(activity)
       });
+      if (actor.getSnapshot().value === "awaiting_challenge") return;
       if (activity.type === "user_activity") {
         const currentPage = latestSnapshots.get(activity.taskId);
         if (actor.getSnapshot().value === "observing"
@@ -1098,10 +1462,12 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       }
       if (activity.type === "page_unstable") {
         const currentPage = latestSnapshots.get(activity.taskId);
-        if (actor.getSnapshot().value === "observing"
+        const machineState = actor.getSnapshot().value;
+        if (machineState === "observing"
           && currentPage !== undefined
           && !applicationFormsReached.has(activity.taskId)
           && !isApplicationFormReady(currentPage)) return;
+        if (!progress.snapshot(activity.taskId).busy && !retryReadbacks.has(activity.taskId)) return;
         invalidateRun(activity.taskId);
         progress.pause(activity.taskId, "page_unstable");
         return;
@@ -1110,7 +1476,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       const existing = stableActivities.get(activity.taskId);
       if (existing) return existing;
       const handling = (async () => {
-        const observed = await dependencies.browser.observe(activity.taskId);
+        const observed = deriveSnapshot(await dependencies.browser.observe(activity.taskId));
+        if (await pauseForChallenge(actor, observed)) return;
         latestSnapshots.set(activity.taskId, observed);
         const machineState = actor.getSnapshot().value;
         if (machineState === "awaiting_login") {
@@ -1129,8 +1496,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           await service.runUntilPause(activity.taskId, observed);
           return;
         }
+        const progressSnapshot = progress.snapshot(activity.taskId);
+        if (progressSnapshot.status === "paused"
+          && !progressSnapshot.recovery.includes("manual_done")) return;
         const checkpoint = dependencies.checkpoints.latest(activity.taskId);
-        const stalledFieldId = progress.snapshot(activity.taskId).stalledFieldId;
+        const stalledFieldId = progressSnapshot.stalledFieldId;
         const stalledField = stalledFieldId === undefined
           ? undefined
           : observed.fields.find((field) => field.id === stalledFieldId);
@@ -1153,24 +1523,48 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     async retryCurrent(taskId: string): Promise<void> {
       requireActor(taskId);
       if (!progress.snapshot(taskId).recovery.includes("retry_current")) throw new Error("recovery_not_allowed");
-      await invalidateExecution(taskId);
-      const observed = await dependencies.browser.observe(taskId);
-      latestSnapshots.set(taskId, observed);
-      const checkpoint = dependencies.checkpoints.latest(taskId);
-      const failedObservation = progress.snapshot(taskId).lastResult?.operation.kind === "observe"
-        && progress.snapshot(taskId).lastResult?.operation.errorCode === "PAGE_ERROR";
-      if (!progress.resumeIfCheckpointMatches(taskId,
-        failedObservation || (checkpoint !== undefined && matchesCheckpointStructure(observed, checkpoint)))) {
-        throw new Error("checkpoint_mismatch");
+      const newlyReserved = reserveBrowserTask(taskId);
+      try {
+        await invalidateExecution(taskId);
+        let observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+        if (await pauseForChallenge(requireActor(taskId), observed)) return;
+        latestSnapshots.set(taskId, observed);
+        const checkpoint = dependencies.checkpoints.latest(taskId);
+        const failedObservation = progress.snapshot(taskId).lastResult?.operation.kind === "observe"
+          && progress.snapshot(taskId).lastResult?.operation.errorCode === "PAGE_ERROR";
+        let reopenedCheckpoint = false;
+        if (!failedObservation
+          && checkpoint !== undefined
+          && !matchesCheckpointStructure(observed, checkpoint)
+          && isBrowserStartupPage(observed)
+          && dependencies.browser.open !== undefined) {
+          await dependencies.browser.open(taskId, checkpoint.url);
+          observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+          if (await pauseForChallenge(requireActor(taskId), observed)) return;
+          latestSnapshots.set(taskId, observed);
+          reopenedCheckpoint = true;
+        }
+        const checkpointMatches = checkpoint !== undefined && (
+          matchesCheckpointStructure(observed, checkpoint)
+          || reopenedCheckpoint && (observed.stage === "login" || isSameApplicationPath(observed.url, checkpoint.url))
+        );
+        if (!progress.resumeIfCheckpointMatches(taskId, failedObservation || checkpointMatches)) {
+          throw new Error("checkpoint_mismatch");
+        }
+        await service.runUntilPause(taskId, observed);
+      } catch (error) {
+        if (newlyReserved) releaseBrowserTask(taskId);
+        throw error;
       }
-      await service.runUntilPause(taskId, observed);
     },
 
     async manualDone(taskId: string): Promise<void> {
       requireActor(taskId);
       if (!progress.snapshot(taskId).recovery.includes("manual_done")) throw new Error("recovery_not_allowed");
       await invalidateExecution(taskId);
-      const observed = await dependencies.browser.observe(taskId);
+      const actor = requireActor(taskId);
+      const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+      if (await pauseForChallenge(actor, observed)) return;
       latestSnapshots.set(taskId, observed);
       const fieldId = progress.snapshot(taskId).stalledFieldId;
       const field = observed.fields.find((candidate) => candidate.id === fieldId);
@@ -1181,6 +1575,13 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       await service.runUntilPause(taskId, observed);
     }
   };
+
+  challengeCoordinator = createChallengeCoordinator({
+    invalidateExecution,
+    persist,
+    observe: async (taskId) => deriveSnapshot(await dependencies.browser.observe(taskId)),
+    continueWithSnapshot: (taskId, snapshot) => service.runUntilPauseInternal(taskId, snapshot)
+  });
 
   dependencies.browser.onActivity?.((activity) => {
     void service.handleActivity(activity).catch((error: unknown) => {
@@ -1213,15 +1614,25 @@ function questionInputType(type: FormField["type"]): ApplicationQuestion["inputT
   return type;
 }
 
-function withDerivedEntrySemantics(snapshot: FormSnapshot): FormSnapshot {
+function withDerivedEntrySemantics(snapshot: FormSnapshot, profileFacts: readonly ProfileFact[]): FormSnapshot {
   const catalogued = annotateDjiFields(snapshot);
-  return { ...catalogued, fields: deriveEntrySemanticHints(catalogued.fields) };
+  return {
+    ...catalogued,
+    fields: deriveEntrySemanticHints(catalogued.fields, {
+      experienceIndexesBySection: {
+        work: compatibleExperienceIndexes(profileFacts, "work"),
+        internship: compatibleExperienceIndexes(profileFacts, "internship"),
+        work_combined: compatibleExperienceIndexes(profileFacts, "work_combined")
+      }
+    })
+  };
 }
 
 function restoreActor(
   actor: ApplicationActor,
   state: ApplicationStateValue,
-  questions: ApplicationQuestion[]
+  questions: ApplicationQuestion[],
+  challenge: FormSnapshot["challenge"]
 ): void {
   if (state === "awaiting_login") {
     sendApplicationEvent(actor, { type: "LOGIN_REQUIRED" });
@@ -1229,6 +1640,9 @@ function restoreActor(
     sendApplicationEvent(actor, { type: "QUESTIONS_REQUIRED", questions });
   } else if (state === "awaiting_content_review") {
     sendApplicationEvent(actor, { type: "CONTENT_REVIEW_REQUIRED" });
+  } else if (state === "awaiting_challenge") {
+    if (challenge === undefined) throw new Error("challenge_checkpoint_invalid");
+    sendApplicationEvent(actor, { type: "CHALLENGE_DETECTED", challenge });
   } else if (state === "review_locked") {
     sendApplicationEvent(actor, { type: "REVIEW_REACHED" });
   } else if (state === "failed") {
@@ -1247,6 +1661,7 @@ function toApiState(state: ApplicationStateValue): ApplicationTaskState {
     awaiting_login: "waiting_for_login",
     needs_questions: "needs_questions",
     awaiting_content_review: "awaiting_content_review",
+    awaiting_challenge: "awaiting_challenge",
     filling: "filling",
     validating: "validating",
     navigating: "navigating",
@@ -1271,6 +1686,15 @@ function matchesCheckpointStructure(snapshot: FormSnapshot, checkpoint: Applicat
   return snapshot.url === checkpoint.url
     && snapshot.stage === checkpoint.stage
     && snapshot.fields.map((field) => field.id).join("\u0000") === checkpoint.fieldIds.join("\u0000");
+}
+
+function isBrowserStartupPage(snapshot: FormSnapshot): boolean {
+  if (snapshot.fields.length > 0 || snapshot.actions.length > 0) return false;
+  try {
+    return new Set(["about:", "chrome:", "edge:"]).has(new URL(snapshot.url).protocol);
+  } catch {
+    return false;
+  }
 }
 
 function isSameApplicationPath(currentUrl: string, checkpointUrl: string): boolean {
@@ -1298,6 +1722,44 @@ function sameStructure(left: FormSnapshot, right: FormSnapshot): boolean {
   return left.url === right.url
     && left.stage === right.stage
     && left.fields.map((field) => field.id).join("\u0000") === right.fields.map((field) => field.id).join("\u0000");
+}
+
+function samePageContext(left: FormSnapshot, right: FormSnapshot): boolean {
+  return left.url === right.url && left.stage === right.stage;
+}
+
+function findSemanticField(snapshot: FormSnapshot, original: FormField, semanticPath: string): FormField | undefined {
+  const controlRole = original.interactionMode ?? original.type;
+  const candidates = snapshot.fields.filter((candidate) =>
+    candidate.semanticHint === semanticPath
+    && candidate.sectionHint === original.sectionHint
+    && (candidate.interactionMode ?? candidate.type) === controlRole
+  );
+  return candidates.length === 1 ? candidates[0] : undefined;
+}
+
+function entryIndexFromSemanticPath(semanticPath: string): number | undefined {
+  const match = /^[^[.]+\[(\d+)\]/u.exec(semanticPath);
+  return match === null ? undefined : Number(match[1]);
+}
+
+function auditableOperationKey(taskId: string, field: FormField): string | undefined {
+  if (field.semanticHint === undefined) return undefined;
+  const entryIndex = entryIndexFromSemanticPath(field.semanticHint);
+  return fieldOperationKey({
+    taskId,
+    semanticPath: field.semanticHint,
+    controlRole: field.interactionMode ?? field.type,
+    fieldLabel: field.label,
+    ...(field.sectionHint === undefined ? {} : { sectionHint: field.sectionHint }),
+    ...(entryIndex === undefined ? {} : { entryIndex })
+  });
+}
+
+function conservativeSearchValues(value: string, semanticPath: string): readonly [string, string?] {
+  const normalized = value.normalize("NFKC").trim();
+  const fallback = /\.major$/u.test(semanticPath) ? normalized.replace(/专业$/u, "") : normalized;
+  return fallback !== "" && fallback !== normalized ? [normalized, fallback] : [normalized];
 }
 
 function hasObservablePageProgress(before: FormSnapshot, after: FormSnapshot): boolean {
@@ -1348,7 +1810,8 @@ function operationInput(
   current: number,
   total: number,
   timeoutMs: number,
-  displayPhase?: ApplicationDisplayPhase
+  displayPhase?: ApplicationDisplayPhase,
+  retryKey?: string
 ): StartOperationInput {
   return {
     taskId,
@@ -1358,7 +1821,8 @@ function operationInput(
     current,
     total,
     timeoutMs,
-    ...(displayPhase === undefined ? {} : { displayPhase })
+    ...(displayPhase === undefined ? {} : { displayPhase }),
+    ...(retryKey === undefined ? {} : { retryKey })
   };
 }
 
@@ -1401,17 +1865,18 @@ function fieldCommand(
   snapshot: FormSnapshot,
   field: FormField,
   value: unknown,
+  executionEpoch: number,
   approve: ApplicationServiceDependencies["approve"],
   resolveFileId?: ApplicationServiceDependencies["resolveFileId"]
 ): ExecutableCommand {
-  const operation = field.type === "file"
-    ? "upload"
-    : field.type === "select" || field.type === "radio" ? "select" : "fill";
+  const operation = fieldCommandType(field);
   const approval = approve({
     taskId: snapshot.taskId,
     snapshotId: snapshot.id,
     targetId: field.id,
-    operation
+    operation,
+    nodeRef: field.nodeRef,
+    executionEpoch
   }, snapshot);
   if (operation === "select") {
     return {
@@ -1420,6 +1885,8 @@ function fieldCommand(
       snapshotId: snapshot.id,
       fieldId: field.id,
       value: String(value ?? ""),
+      nodeRef: field.nodeRef,
+      executionEpoch,
       approval
     };
   }
@@ -1432,6 +1899,8 @@ function fieldCommand(
       snapshotId: snapshot.id,
       fieldId: field.id,
       fileId,
+      nodeRef: field.nodeRef,
+      executionEpoch,
       approval
     };
   }
@@ -1441,8 +1910,16 @@ function fieldCommand(
     snapshotId: snapshot.id,
     fieldId: field.id,
     value,
+    nodeRef: field.nodeRef,
+    executionEpoch,
     approval
   };
+}
+
+function fieldCommandType(field: FormField): ExecutableCommand["type"] {
+  return field.type === "file"
+    ? "upload"
+    : field.type === "select" || field.type === "radio" ? "select" : "fill";
 }
 
 function isLegalAcknowledgementField(field: FormField): boolean {

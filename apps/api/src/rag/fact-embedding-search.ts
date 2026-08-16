@@ -3,6 +3,7 @@ import { ProfileFactSchema, type JsonValue, type ProfileFact } from "@resume/con
 import type { EmbeddingProvider } from "@resume/model-provider";
 import { EmbeddingSearchUnavailableError } from "@resume/rag";
 import type { SqliteDatabase } from "../db/client.js";
+import type { EmbeddingTraceSink } from "../observability/embedding-trace.js";
 import type { ProfileRepository } from "../profile/profile-repository.js";
 import {
   createEmbeddingIndexRepository,
@@ -31,9 +32,11 @@ export function createFactEmbeddingSearch(
   database: SqliteDatabase,
   profileRepository: ProfileRepository,
   embeddingProvider: EmbeddingProvider,
-  indexConfig: FactEmbeddingIndexConfig
+  indexConfig: FactEmbeddingIndexConfig,
+  traceSink?: EmbeddingTraceSink
 ) {
   const indexRepository = createEmbeddingIndexRepository(database);
+  const inFlightBuilds = new Map<string, Promise<EmbeddingIndex>>();
   validateIndexConfig(indexConfig);
 
   return {
@@ -82,7 +85,7 @@ export function createFactEmbeddingSearch(
   async function synchronize(): Promise<EmbeddingIndex> {
     const facts = eligibleFacts(profileRepository.listActive());
     const active = indexRepository.getActive();
-    if (!active || !matchesConfig(active, indexConfig)) return rebuild(facts);
+    if (!active || !matchesConfig(active, indexConfig)) return singleflightRebuild(facts);
 
     const existing = indexRepository.listVectors(active.id);
     const byFactId = new Map(existing.map((vector) => [vector.factId, vector]));
@@ -97,10 +100,27 @@ export function createFactEmbeddingSearch(
       }
     }
     if (changed.length === 0 && existing.length === facts.length) return active;
-    return rebuild(facts, unchanged, changed);
+    return singleflightRebuild(facts, unchanged, changed);
+  }
+
+  function singleflightRebuild(
+    facts: ProfileFact[],
+    unchanged: StoredFactVector[] = [],
+    changed: ProfileFact[] = facts
+  ): Promise<EmbeddingIndex> {
+    const key = factIndexBuildKey(facts, indexConfig);
+    const active = inFlightBuilds.get(key);
+    if (active !== undefined) return active;
+
+    const build = rebuild(key, facts, unchanged, changed).finally(() => {
+      if (inFlightBuilds.get(key) === build) inFlightBuilds.delete(key);
+    });
+    inFlightBuilds.set(key, build);
+    return build;
   }
 
   async function rebuild(
+    cacheKeyHash: string,
     facts: ProfileFact[],
     unchanged: StoredFactVector[] = [],
     changed: ProfileFact[] = facts
@@ -122,10 +142,26 @@ export function createFactEmbeddingSearch(
       }
       const stored = indexRepository.listVectors(building.id);
       if (stored.length !== facts.length) throw new Error("embedding index row count mismatch");
-      return indexRepository.activate(building.id);
+      const active = indexRepository.activate(building.id);
+      recordBuild(cacheKeyHash, "succeeded");
+      return active;
     } catch (error) {
       if (buildingId) discardBuildingIndex(database, buildingId);
+      recordBuild(cacheKeyHash, "failed");
       throw error;
+    }
+  }
+
+  function recordBuild(cacheKeyHash: string, result: "succeeded" | "failed"): void {
+    try {
+      traceSink?.record({
+        operation: "fact_build",
+        cacheKeyHash,
+        deepSeekUsed: false,
+        result
+      });
+    } catch {
+      // Diagnostics must not alter index behavior.
     }
   }
 }
@@ -157,6 +193,26 @@ function matchesConfig(index: EmbeddingIndex, config: FactEmbeddingIndexConfig):
 
 function contentHash(fact: ProfileFact): string {
   return createHash("sha256").update(factEmbeddingText(fact), "utf8").digest("hex");
+}
+
+function factIndexBuildKey(
+  facts: readonly ProfileFact[],
+  config: FactEmbeddingIndexConfig
+): string {
+  return createHash("sha256").update(JSON.stringify({
+    config: {
+      model: config.model,
+      modelRevision: config.modelRevision,
+      dimensions: config.dimensions,
+      normalization: config.normalization,
+      instructionVersion: config.instructionVersion
+    },
+    facts: facts.map((fact) => ({
+      id: fact.id,
+      revision: fact.revision,
+      contentHash: contentHash(fact)
+    }))
+  }), "utf8").digest("hex");
 }
 
 function validatedVector(vector: unknown, dimensions: number): number[] {

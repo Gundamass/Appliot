@@ -1,5 +1,5 @@
 import type { ApplicationTask, ApplicationTaskProgressEvent } from "@resume/contracts";
-import { act, render, screen, within } from "@testing-library/react";
+import { render, screen } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
 import { ProgressSummary } from "./ApplicationTaskPage.js";
@@ -12,6 +12,22 @@ const task: ApplicationTask = {
   recoveryCommands: [],
   questions: [],
   taskAnswers: []
+};
+
+const progressTask: ApplicationTask = {
+  ...task,
+  executionProgress: {
+    currentPhase: "semantic_fill",
+    phases: [
+      { phase: "waiting_for_form", status: "completed" },
+      { phase: "deterministic_fill", status: "completed" },
+      { phase: "semantic_fill", status: "running" },
+      { phase: "readback_validation", status: "pending" },
+      { phase: "final_review", status: "pending" }
+    ],
+    current: { action: "正在选择：本科专业", fieldId: "major", attempt: 1, maxAttempts: 2 },
+    counts: { exact: 12, semantic: 3, user: 4, missing: 2, failed: 1 }
+  }
 };
 
 function progressEvent(
@@ -38,39 +54,17 @@ function progressEvent(
 }
 
 describe("ProgressSummary", () => {
-  it("shows the concise three-layer summary while keeping activity details collapsed", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-28T08:00:02.000Z"));
-    const activities: ApplicationTaskProgressEvent[] = [
-      progressEvent("1", "operation_completed", "succeeded", 4, "个人信息"),
-      progressEvent("2", "operation_started", "running", 5),
-      ...Array.from({ length: 6 }, (_, index): ApplicationTaskProgressEvent => ({
-        id: String(index + 3),
-        taskId: task.id,
-        type: "browser_activity",
-        createdAt: `2026-07-28T08:00:${index + 10}.000Z`,
-        activity: { kind: "page_stable", displayCategory: "页面状态" }
-      }))
-    ];
+  it("shows only backend-owned phase, current action, attempt and five counts", () => {
+    render(<ProgressSummary
+      task={progressTask}
+      activities={[progressEvent("1", "operation_started", "running", 5)]}
+    />);
 
-    try {
-      render(<ProgressSummary task={task} activities={activities} />);
-
-      expect(screen.getByRole("heading", { name: "正在填写联系方式" })).toBeVisible();
-      expect(screen.getByText("第 5 / 8 项")).toBeVisible();
-      expect(screen.getByText("已用时 1.2 秒")).toBeVisible();
-      expect(screen.getByText("上一项：个人信息已填写并验证成功")).toBeVisible();
-      expect(screen.getAllByRole("listitem", { name: /阶段/ })).toHaveLength(5);
-
-      const details = screen.getByText("执行历史").closest("details");
-      expect(details).not.toHaveAttribute("open");
-      for (const item of within(details!).getAllByText("页面已稳定")) expect(item).not.toBeVisible();
-      expect(within(details!).getAllByRole("listitem")).toHaveLength(5);
-      expect(within(details!).queryByRole("button")).not.toBeInTheDocument();
-      expect(within(details!).queryByRole("link")).not.toBeInTheDocument();
-    } finally {
-      vi.useRealTimers();
-    }
+    expect(screen.getByText("当前：语义补全")).toBeVisible();
+    expect(screen.getByRole("heading", { name: "正在选择：本科专业" })).toBeVisible();
+    expect(screen.getByText("尝试 1/2")).toBeVisible();
+    expect(screen.getByLabelText("填写统计")).toHaveTextContent("精确 12语义 3用户已有 4未匹配 2失败 1");
+    expect(screen.queryByRole("heading", { name: "正在填写联系方式" })).not.toBeInTheDocument();
   });
 
   it("shows only server-authorized recovery actions for a paused field", async () => {
@@ -126,64 +120,4 @@ describe("ProgressSummary", () => {
     expect(screen.queryByRole("button", { name: "取消任务" })).not.toBeInTheDocument();
   });
 
-  it("clears the running action after the operation completes", () => {
-    const activities: ApplicationTaskProgressEvent[] = [
-      progressEvent("1", "operation_started", "running", 5),
-      progressEvent("2", "operation_completed", "succeeded", 5)
-    ];
-
-    render(<ProgressSummary task={task} activities={activities} />);
-
-    expect(screen.queryByRole("heading", { name: "正在填写联系方式" })).not.toBeInTheDocument();
-    expect(screen.queryByText("第 5 / 8 项")).not.toBeInTheDocument();
-    expect(screen.getByText("上一项：联系方式已填写并验证成功")).toBeVisible();
-  });
-
-  it("does not revive an interrupted operation after the task resumes", () => {
-    const activities: ApplicationTaskProgressEvent[] = [
-      progressEvent("1", "operation_started", "running", 5),
-      {
-        id: "2", taskId: task.id, type: "task_paused", createdAt: "2026-07-28T08:00:02.000Z",
-        activity: { kind: "user_activity", fieldId: "field-1", displayCategory: "联系方式" }
-      },
-      {
-        id: "3", taskId: task.id, type: "task_resumed", createdAt: "2026-07-28T08:00:03.000Z",
-        activity: { kind: "page_stable", fieldId: "field-1", displayCategory: "页面状态" }
-      }
-    ];
-
-    render(<ProgressSummary task={task} activities={activities} />);
-
-    expect(screen.queryByRole("heading", { name: "正在填写联系方式" })).not.toBeInTheDocument();
-    expect(screen.getByRole("heading", { name: "正在填写" })).toBeVisible();
-  });
-
-  it("updates elapsed time while an operation remains active", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-28T08:00:01.000Z"));
-    const running = progressEvent("1", "operation_started", "running", 5);
-    running.createdAt = "2026-07-28T08:00:01.000Z";
-
-    render(<ProgressSummary task={task} activities={[running]} />);
-    expect(screen.getByText("已用时 1.2 秒")).toBeVisible();
-
-    act(() => vi.advanceTimersByTime(1_000));
-
-    expect(screen.getByText("已用时 2.2 秒")).toBeVisible();
-    vi.useRealTimers();
-  });
-
-  it("starts elapsed time from the reported value when an operation begins after idle time", () => {
-    vi.useFakeTimers();
-    vi.setSystemTime(new Date("2026-07-28T08:00:01.000Z"));
-    const { rerender } = render(<ProgressSummary task={task} activities={[]} />);
-
-    act(() => vi.advanceTimersByTime(5 * 60_000));
-    const running = progressEvent("1", "operation_started", "running", 5);
-    running.createdAt = "2026-07-28T08:05:01.000Z";
-    rerender(<ProgressSummary task={task} activities={[running]} />);
-
-    expect(screen.getByText("已用时 1.2 秒")).toBeVisible();
-    vi.useRealTimers();
-  });
 });

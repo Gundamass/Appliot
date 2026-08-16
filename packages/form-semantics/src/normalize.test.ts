@@ -7,6 +7,25 @@ import { normalizeForm } from "./normalize.js";
 import { collectRawFormObservation } from "./snapshot-script.js";
 
 describe("form semantics", () => {
+  it("normalizes the nearest internship heading into a finite section hint", () => {
+    const dom = new JSDOM(`
+      <section>
+        <h2>\u5b9e\u4e60\u7ecf\u5386</h2>
+        <label for="company">\u5b9e\u4e60\u5355\u4f4d</label>
+        <input id="company">
+      </section>
+    `, { url: "https://ats.example.test/application" });
+
+    const snapshot = normalizeForm(collectRawFormObservation(dom.window.document), {
+      taskId: "task-section",
+      url: dom.window.location.href,
+      title: "Application",
+      stage: "application_form"
+    });
+
+    expect(snapshot.fields[0]?.sectionHint).toBe("internship");
+  });
+
   it.each([
     ["下一步", "application_form", "intermediate_navigation"],
     ["保存草稿", "application_form", "intermediate_save"],
@@ -41,6 +60,15 @@ describe("form semantics", () => {
       expect.objectContaining({ label: "简历附件", type: "file", currentValue: "" })
     ]));
     expect(first.fields.every((field) => /^field_[a-f0-9]{16}$/.test(field.id))).toBe(true);
+    expect(first.frameRef).toEqual({
+      documentId: expect.stringMatching(/^document-/u),
+      kind: "main"
+    });
+    expect(first.mutationEpoch).toBe(0);
+    expect([...first.fields, ...first.actions].every((target) =>
+      target.nodeRef.documentId === first.frameRef.documentId
+      && target.nodeRef.observedAt === first.mutationEpoch
+      && /^node-/u.test(target.nodeRef.nodeId))).toBe(true);
     expect(JSON.stringify(first)).not.toContain("#full-name");
     expect(first.actions).toEqual(expect.arrayContaining([
       expect.objectContaining({ text: "保存草稿", class: "intermediate_save" }),

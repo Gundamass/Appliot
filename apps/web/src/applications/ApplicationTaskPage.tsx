@@ -1,11 +1,11 @@
-import type { ApplicationCommand, ApplicationCommandType, ApplicationTask, ApplicationTaskProgressEvent, ApplicationTaskState } from "@resume/contracts";
-import { ArrowLeft, Check, ChevronRight, CircleAlert, ExternalLink, Hand, History, MonitorUp, RotateCw, X } from "lucide-react";
+import type { ApplicationCommand, ApplicationCommandType, ApplicationExecutionProgress, ApplicationTask, ApplicationTaskProgressEvent, ApplicationTaskState } from "@resume/contracts";
+import { ArrowLeft, CircleAlert, ExternalLink, Hand, MonitorUp, RotateCw, X } from "lucide-react";
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import type { ApplicationApi, ApplicationRecoveryCommand } from "./api.js";
 import { ContentReviewPage } from "./ContentReviewPage.js";
 import { CompactActivityFeed } from "./CompactActivityFeed.js";
 import { FieldCoveragePanel } from "./FieldCoveragePanel.js";
-import { deriveAttentionItems, deriveDisplayPhase } from "./application-workbench.js";
+import { CHALLENGE_LABELS, deriveAttentionItems, executionProgressForTask } from "./application-workbench.js";
 import { LiveBrowserStatus } from "./LiveBrowserStatus.js";
 import { QuestionPanel, type QuestionSubmission } from "./QuestionPanel.js";
 import { TaskAttentionList } from "./TaskAttentionList.js";
@@ -22,18 +22,10 @@ interface ApplicationTaskPageProps {
 
 const STATE_LABELS: Record<ApplicationTaskState, string> = {
   created: "任务已创建", observing_page: "等待进入简历填写页面", waiting_for_login: "等待登录",
-  needs_questions: "等待补充信息", awaiting_content_review: "等待内容审核", filling: "正在填写",
+  needs_questions: "等待补充信息", awaiting_content_review: "等待内容审核", awaiting_challenge: "等待人工处理", filling: "正在填写",
   validating: "正在校验", navigating: "正在进入下一页", review_locked: "等待人工最终审核",
   cancelled: "任务已取消", failed: "任务失败"
 };
-
-const PHASES = [
-  { key: "prepare", label: "准备资料" },
-  { key: "observe", label: "识别页面" },
-  { key: "fill", label: "填写信息" },
-  { key: "validate", label: "校验内容" },
-  { key: "review", label: "人工审核" }
-] as const;
 
 function profileSyncErrorMessage(error: string | undefined): string {
   switch (error) {
@@ -66,6 +58,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
   const projectionVersion = useRef(0);
   const lastEventId = useRef(0n);
   const latestEventState = useRef<ApplicationTaskState | undefined>(undefined);
+  const latestExecutionProgress = useRef<ApplicationExecutionProgress | undefined>(undefined);
   const activeTaskId = useRef(taskId);
   activeTaskId.current = taskId;
 
@@ -73,7 +66,13 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     try {
       const next = await api.get(taskId);
       if (taskGeneration.current !== generation || projectionVersion.current !== version || next.id !== taskId) return;
-      setTask(latestEventState.current === undefined ? next : { ...next, state: latestEventState.current });
+      setTask({
+        ...next,
+        ...(latestEventState.current === undefined ? {} : { state: latestEventState.current }),
+        ...(latestExecutionProgress.current === undefined
+          ? {}
+          : { executionProgress: latestExecutionProgress.current })
+      });
       setError(undefined);
     } catch {
       if (taskGeneration.current !== generation || projectionVersion.current !== version) return;
@@ -88,6 +87,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     projectionVersion.current = 0;
     lastEventId.current = 0n;
     latestEventState.current = undefined;
+    latestExecutionProgress.current = undefined;
     setTask(undefined);
     setLoading(true);
     setError(undefined);
@@ -116,9 +116,15 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     const version = ++projectionVersion.current;
     setActivities((current) => [...current, event].slice(-50));
     if (event.type === "state_changed") latestEventState.current = event.state;
-    setTask((current) => current?.id === taskId && event.type === "state_changed"
-      ? { ...current, state: event.state, commands: [] }
-      : current);
+    if (event.type === "execution_progress_changed") latestExecutionProgress.current = event.executionProgress;
+    setTask((current) => {
+      if (current?.id !== taskId) return current;
+      if (event.type === "state_changed") return { ...current, state: event.state, commands: [] };
+      if (event.type === "execution_progress_changed") {
+        return { ...current, executionProgress: event.executionProgress };
+      }
+      return current;
+    });
     setBusyCommand(undefined);
     setBusyRecovery(undefined);
     void loadTask(generation, version);
@@ -139,11 +145,10 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     () => currentTask ? deriveAttentionItems(currentTask, activities) : [],
     [activities, currentTask]
   );
-  const displayPhase = useMemo(
-    () => currentTask ? deriveDisplayPhase(currentTask, activities) : "deterministic_fill",
-    [activities, currentTask]
+  const executionProgress = useMemo(
+    () => currentTask ? executionProgressForTask(currentTask) : undefined,
+    [currentTask]
   );
-  const completedCount = activities.filter((event) => event.type === "operation_completed").length;
   const [selectedAttentionId, setSelectedAttentionId] = useState<string>();
   useEffect(() => {
     if (attentionItems.length === 0) {
@@ -152,7 +157,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     }
     setSelectedAttentionId((current) => attentionItems.some((item) => item.id === current) ? current : attentionItems[0]!.id);
   }, [attentionItems]);
-  const hasVisibleCommand = currentTask?.commands.some((command) => ["open_browser", "resume", "resume_with_profile", "sync_profile", "cancel"].includes(command)) ?? false;
+  const hasVisibleCommand = currentTask?.commands.some((command) => ["open_browser", "resume", "resume_after_challenge", "resume_with_profile", "sync_profile", "cancel"].includes(command)) ?? false;
   const canDeleteTask = currentTask !== undefined
     && api.delete !== undefined
     && ["review_locked", "cancelled", "failed"].includes(currentTask.state);
@@ -250,10 +255,9 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
           </section>}
           {currentTask.profileSyncStatus === "pending" && <p className="profile-sync-pending" role="status"><RotateCw aria-hidden="true" size={15} />正在将最新档案匹配到当前投递任务</p>}
           <h2 className="workbench-title">投递任务工作台</h2>
-          <TaskStageStepper phase={displayPhase} counts={{ completed: completedCount, attention: attentionItems.length }} />
+          {executionProgress && <TaskStageStepper progress={executionProgress} />}
           <section className="task-workspace">
             <ProgressSummary
-              compact
               task={currentTask}
               activities={activities}
               connection={connection}
@@ -277,13 +281,22 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
                   onApprove={(editedValue) => runCommand({ type: "approve_content", reviewId: currentTask.contentReview!.id, editedValue })}
                   onReject={() => runCommand({ type: "reject_content", reviewId: currentTask.contentReview!.id })}
                 />}
-                {currentTask.state !== "needs_questions" && currentTask.state !== "awaiting_content_review" && <div className="detail-empty"><span>当前动作</span><strong>{selectedAttentionId ? "已选中处理项" : "系统正在安全推进"}</strong><p>需要人工判断的内容会在这里集中显示。</p></div>}
+                {currentTask.state === "awaiting_challenge" && currentTask.challenge && <section className="challenge-panel" role="alert">
+                  <CircleAlert aria-hidden="true" size={22} />
+                  <div>
+                    <span>需要人工处理</span>
+                    <h3>{CHALLENGE_LABELS[currentTask.challenge.kind]}</h3>
+                    <p>请在受控浏览器中完成处理，然后点击继续填写。</p>
+                  </div>
+                </section>}
+                {currentTask.state !== "needs_questions" && currentTask.state !== "awaiting_content_review" && currentTask.state !== "awaiting_challenge" && <div className="detail-empty"><span>当前动作</span><strong>{selectedAttentionId ? "已选中处理项" : "系统正在安全推进"}</strong><p>需要人工判断的内容会在这里集中显示。</p></div>}
               </section>
             </div>
             <CompactActivityFeed activities={activities} />
             {(hasVisibleCommand || canDeleteTask) && <section className="task-actions" aria-label="当前可用操作">
               {currentTask.commands.includes("open_browser") && <button className="button secondary" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "open_browser" })}><MonitorUp aria-hidden="true" size={16} />打开受控浏览器</button>}
               {currentTask.commands.includes("resume") && <button className="button primary" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "resume" })}><RotateCw aria-hidden="true" size={16} />我已完成登录，继续</button>}
+              {currentTask.commands.includes("resume_after_challenge") && <button className="button primary" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "resume_after_challenge" })}><RotateCw aria-hidden="true" size={16} />继续填写</button>}
               {currentTask.commands.includes("resume_with_profile") && <button className="button primary" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "resume_with_profile" })}><RotateCw aria-hidden="true" size={16} />我已补全档案，重新匹配</button>}
               {currentTask.commands.includes("sync_profile") && <button className="button primary" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "sync_profile" })}><RotateCw aria-hidden="true" size={16} />重新同步档案</button>}
               {currentTask.commands.includes("cancel") && <button className="button quiet danger" type="button" disabled={busyCommand !== undefined} onClick={() => void runCommand({ type: "cancel" })}><X aria-hidden="true" size={16} />取消任务</button>}
@@ -302,24 +315,22 @@ interface ProgressSummaryProps {
   activities: ApplicationTaskProgressEvent[];
   connection?: "connecting" | "connected" | "disconnected";
   busy?: boolean;
-  compact?: boolean;
   onRecovery?(command: ApplicationRecoveryCommand): void;
 }
 
-export function ProgressSummary({ task, activities, connection = "connected", busy = false, compact = false, onRecovery }: ProgressSummaryProps) {
-  const [now, setNow] = useState(Date.now);
+const EXECUTION_PHASE_LABELS: Record<ApplicationExecutionProgress["currentPhase"], string> = {
+  waiting_for_form: "等待表单",
+  deterministic_fill: "确定性填写",
+  semantic_fill: "语义补全",
+  readback_validation: "回读校验",
+  final_review: "最终审核"
+};
+
+export function ProgressSummary({ task, activities, connection = "connected", busy = false, onRecovery }: ProgressSummaryProps) {
+  const execution = executionProgressForTask(task);
   const latestLifecycle = [...activities].reverse().find((event) =>
     event.type === "operation_started" || event.type === "operation_completed" || event.type === "operation_failed");
   const latestPause = [...activities].reverse().find((event) => event.type === "task_paused" || event.type === "task_resumed");
-  const current = latestLifecycle?.type === "operation_started"
-    && (!latestPause || BigInt(latestLifecycle.id) > BigInt(latestPause.id))
-    ? latestLifecycle
-    : undefined;
-  const observedOperation = useRef<{ key: string; at: number } | undefined>(undefined);
-  const operationKey = current ? `${task.id}:${current.id}` : undefined;
-  if (current && observedOperation.current?.key !== operationKey) {
-    observedOperation.current = { key: operationKey!, at: Date.now() };
-  }
   const latestResult = [...activities].reverse().find((event) => event.type === "operation_completed" || event.type === "operation_failed");
   const paused = latestPause?.type === "task_paused"
     && (!latestLifecycle || BigInt(latestPause.id) > BigInt(latestLifecycle.id));
@@ -328,33 +339,27 @@ export function ProgressSummary({ task, activities, connection = "connected", bu
     ? `${failed.progress.displayCategory}${failed.operation.status === "timed_out" ? "填写超时" : "填写失败"}`
     : paused
       ? "已暂停自动填写"
-    : current
-      ? operationTitle(current)
-      : task.state === "waiting_for_login"
-        ? "请在受控浏览器中完成登录"
-        : STATE_LABELS[task.state];
-  const phaseIndex = currentPhase(task.state, current?.operation.kind);
-  const history = activities.filter((event) => event.type !== "state_changed").slice(-5).reverse();
-
-  useEffect(() => {
-    if (!current) return;
-    setNow(Date.now());
-    const timer = setInterval(() => setNow(Date.now()), 1_000);
-    return () => clearInterval(timer);
-  }, [current?.id]);
+      : execution.current.action;
 
   return <section className={`progress-summary${paused ? " paused" : ""}`} aria-labelledby="current-state-title" aria-live="polite">
     <div className="progress-primary">
       <div className="task-state-mark">{paused ? <CircleAlert aria-hidden="true" size={24} /> : <MonitorUp aria-hidden="true" size={24} />}</div>
       <div className="progress-action">
-        <span>当前动作</span>
+        <span>当前：{EXECUTION_PHASE_LABELS[execution.currentPhase]}</span>
         <h2 id="current-state-title">{action}</h2>
         {connection === "disconnected" && <p>上次状态：{STATE_LABELS[task.state]}</p>}
       </div>
-      {current && !paused && <dl className="progress-metrics">
-        <div><dt>字段进度</dt><dd>第 {current.progress.current} / {current.progress.total} 项</dd></div>
-        <div><dt>已用时</dt><dd>{formatElapsed(current.operation.elapsedMs + Math.max(0, now - (observedOperation.current?.at ?? now)))}</dd></div>
-      </dl>}
+      {!paused && execution.current.attempt !== undefined && <span className="progress-attempt">
+        尝试 {execution.current.attempt}/{execution.current.maxAttempts}
+      </span>}
+    </div>
+
+    <div className="execution-counts" aria-label="填写统计">
+      <span><strong>精确</strong> {execution.counts.exact}</span>
+      <span><strong>语义</strong> {execution.counts.semantic}</span>
+      <span><strong>用户已有</strong> {execution.counts.user}</span>
+      <span><strong>未匹配</strong> {execution.counts.missing}</span>
+      <span><strong>失败</strong> {execution.counts.failed}</span>
     </div>
 
     {paused ? <div className="progress-result stalled" role="status">
@@ -364,32 +369,8 @@ export function ProgressSummary({ task, activities, connection = "connected", bu
         {task.recoveryCommands.includes("manual_done") && <button className="button secondary" type="button" disabled={busy} onClick={() => onRecovery?.("manual_done")}><Hand aria-hidden="true" size={15} />我已手动完成</button>}
         {task.recoveryCommands.includes("cancel") && <button className="button quiet danger" type="button" disabled={busy} onClick={() => onRecovery?.("cancel")}><X aria-hidden="true" size={15} />取消任务</button>}
       </div>
-    </div> : latestResult?.type === "operation_completed" ? <p className="progress-result"><Check aria-hidden="true" size={16} />上一项：{latestResult.progress.displayCategory}已填写并验证成功</p> : null}
-
-    {!compact && <ol className="phase-track" aria-label="任务阶段">
-      {PHASES.map((phase, index) => <li key={phase.key} className={index < phaseIndex ? "complete" : index === phaseIndex ? "current" : "pending"} aria-label={`${phase.label}阶段`} aria-current={index === phaseIndex ? "step" : undefined}>
-        <span>{index < phaseIndex ? <Check aria-hidden="true" size={12} /> : index + 1}</span><strong>{phase.label}</strong>
-      </li>)}
-    </ol>}
-
-    {!compact && <details className="activity-details">
-      <summary><History aria-hidden="true" size={15} />执行历史<span>最近 {history.length} 条</span><ChevronRight className="details-chevron" aria-hidden="true" size={15} /></summary>
-      <ol>{history.map((event) => <li key={event.id}><time dateTime={event.createdAt}>{formatTime(event.createdAt)}</time><span>{activityText(event)}</span></li>)}</ol>
-    </details>}
+    </div> : null}
   </section>;
-}
-
-function findLatest(activities: ApplicationTaskProgressEvent[], type: "operation_started") {
-  return [...activities].reverse().find((event): event is Extract<ApplicationTaskProgressEvent, { type: typeof type }> => event.type === type);
-}
-
-function operationTitle(event: Extract<ApplicationTaskProgressEvent, { type: "operation_started" }>): string {
-  const verb = event.operation.kind === "observe" ? "正在识别" : event.operation.kind === "validate" ? "正在校验" : event.operation.kind === "navigate" ? "正在进入下一页" : "正在填写";
-  return `${verb}${event.progress.displayCategory}`;
-}
-
-function formatElapsed(elapsedMs: number): string {
-  return `已用时 ${(elapsedMs / 1000).toFixed(elapsedMs % 1000 === 0 ? 0 : 1)} 秒`;
 }
 
 function failureReason(errorCode?: string): string {
@@ -401,25 +382,3 @@ function failureReason(errorCode?: string): string {
   return "当前操作未能完成";
 }
 
-function currentPhase(state: ApplicationTaskState, kind?: string): number {
-  if (state === "review_locked") return 4;
-  if (kind === "validate" || state === "validating") return 3;
-  if (["filling", "needs_questions", "awaiting_content_review", "navigating"].includes(state) || ["fill", "select", "upload", "navigate"].includes(kind ?? "")) return 2;
-  if (["observing_page", "waiting_for_login"].includes(state) || kind === "observe") return 1;
-  return 0;
-}
-
-function activityText(event: ApplicationTaskProgressEvent): string {
-  if (event.type === "state_changed") return STATE_LABELS[event.state];
-  if (event.type === "operation_started") return `${event.progress.displayCategory}开始${event.operation.kind === "validate" ? "校验" : "处理"}`;
-  if (event.type === "operation_completed") return `${event.progress.displayCategory}处理成功`;
-  if (event.type === "operation_failed") return `${event.progress.displayCategory}${event.operation.status === "timed_out" ? "处理超时" : "处理失败"}`;
-  if (event.type === "task_paused") return `${event.activity.displayCategory}已暂停自动处理`;
-  if (event.type === "task_resumed") return "页面验证通过，已继续处理";
-  const labels = { page_changed: "页面已变化", page_stable: "页面已稳定", user_activity: "检测到用户操作", worker_connected: "受控浏览器已连接", worker_disconnected: "受控浏览器连接中断" } as const;
-  return labels[event.activity.kind];
-}
-
-function formatTime(value: string): string {
-  return new Intl.DateTimeFormat("zh-CN", { hour: "2-digit", minute: "2-digit", second: "2-digit", hour12: false }).format(new Date(value));
-}

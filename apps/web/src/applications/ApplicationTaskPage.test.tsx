@@ -1,4 +1,4 @@
-import type { ApplicationTask, ApplicationTaskEvent, ApplicationTaskProgressEvent } from "@resume/contracts";
+import type { ApplicationAutofillPhase, ApplicationExecutionProgress, ApplicationTask, ApplicationTaskEvent, ApplicationTaskProgressEvent, ChallengeKind } from "@resume/contracts";
 import { render, screen, waitFor } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -14,6 +14,39 @@ const task: ApplicationTask = {
   questions: [],
   taskAnswers: []
 };
+
+const challengeLabels: Array<[ChallengeKind, string]> = [
+  ["captcha", "需要完成验证码"],
+  ["access_denied", "页面拒绝了当前访问"],
+  ["rate_limited", "页面请求过于频繁"],
+  ["device_verification", "需要完成设备验证"],
+  ["risk_control", "需要完成安全验证"],
+  ["unsupported_iframe", "表单包含暂不支持的嵌入区域"],
+  ["unsupported_shadow_dom", "表单包含暂不支持的交互区域"]
+];
+
+function explicitProgress(
+  action: string,
+  currentPhase: ApplicationAutofillPhase = "waiting_for_form"
+): ApplicationExecutionProgress {
+  const phases: ApplicationAutofillPhase[] = [
+    "waiting_for_form",
+    "deterministic_fill",
+    "semantic_fill",
+    "readback_validation",
+    "final_review"
+  ];
+  const currentIndex = phases.indexOf(currentPhase);
+  return {
+    currentPhase,
+    phases: phases.map((phase, index) => ({
+      phase,
+      status: index < currentIndex ? "completed" : index === currentIndex ? "running" : "pending"
+    })),
+    current: { action, maxAttempts: 2 },
+    counts: { exact: 0, semantic: 0, user: 0, missing: 0, failed: 0 }
+  };
+}
 
 const submissionActionName = /^(?:提交(?:申请|简历)?|投递(?:申请|简历)?|发送(?:申请|简历)?|确认(?:申请|投递)|完成申请|立即申请)$/;
 
@@ -94,16 +127,49 @@ describe("ApplicationTaskPage", () => {
     expect(screen.queryByRole("button", { name: "查看来源" })).not.toBeInTheDocument();
   });
 
-  it("renders the workbench structure with four stages, browser status, attention, and compact activity", async () => {
+  it("renders the workbench structure with five stages, browser status, attention, and compact activity", async () => {
     const events = eventHarness();
     render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(task), command: vi.fn() }} connectEvents={events.connect} />);
 
     expect(await screen.findByRole("heading", { name: "投递任务工作台" })).toBeVisible();
-    expect(screen.getAllByRole("listitem", { name: /阶段/ })).toHaveLength(4);
+    expect(screen.getAllByRole("listitem", { name: /阶段/ })).toHaveLength(5);
     expect(screen.getByRole("status", { name: "受控浏览器状态" })).toHaveTextContent("受控浏览器已连接");
     expect(screen.getByRole("heading", { name: "需要你处理" })).toBeVisible();
     expect(screen.getByText("最近活动").closest("details")).not.toHaveAttribute("open");
     expect(screen.queryByRole("button", { name: submissionActionName })).not.toBeInTheDocument();
+  });
+
+  it("applies execution progress events immediately without inferring from operation history", async () => {
+    const events = eventHarness();
+    const refresh = deferred<ApplicationTask>();
+    const get = vi.fn()
+      .mockResolvedValueOnce(task)
+      .mockReturnValue(refresh.promise);
+    render(<ApplicationTaskPage taskId={task.id} api={{ get, command: vi.fn() }} connectEvents={events.connect} />);
+    await screen.findByRole("heading", { name: "等待进入简历填写页面" });
+
+    events.emit({
+      id: "5",
+      taskId: task.id,
+      type: "execution_progress_changed",
+      createdAt: "2026-08-14T12:00:00.000Z",
+      executionProgress: {
+        currentPhase: "semantic_fill",
+        phases: [
+          { phase: "waiting_for_form", status: "completed" },
+          { phase: "deterministic_fill", status: "completed" },
+          { phase: "semantic_fill", status: "running" },
+          { phase: "readback_validation", status: "pending" },
+          { phase: "final_review", status: "pending" }
+        ],
+        current: { action: "正在选择：本科专业", fieldId: "major", attempt: 1, maxAttempts: 2 },
+        counts: { exact: 12, semantic: 3, user: 4, missing: 2, failed: 1 }
+      }
+    });
+
+    expect(await screen.findByRole("heading", { name: "正在选择：本科专业" })).toBeVisible();
+    expect(screen.getByText("当前：语义补全")).toBeVisible();
+    expect(screen.getByText("尝试 1/2")).toBeVisible();
   });
 
   it("uses the persisted task name in the task header and retains the target page link", async () => {
@@ -173,6 +239,7 @@ describe("ApplicationTaskPage", () => {
   });
 
   it("shows field coverage inside the task workspace", async () => {
+    const user = userEvent.setup();
     const events = eventHarness();
     const coveredTask: ApplicationTask = {
       ...task,
@@ -181,6 +248,7 @@ describe("ApplicationTaskPage", () => {
         ready: 0,
         review: 1,
         missing: 0,
+        failed: 0,
         unsupported: 0,
         filled: 1,
         fields: [
@@ -191,7 +259,12 @@ describe("ApplicationTaskPage", () => {
     };
     render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(coveredTask), command: vi.fn() }} connectEvents={events.connect} />);
 
-    expect(await screen.findByRole("heading", { name: "字段匹配" })).toBeVisible();
+    const disclosure = await screen.findByLabelText("查看填写明细");
+    expect(disclosure).not.toHaveAttribute("open");
+
+    await user.click(screen.getByText("查看填写明细"));
+
+    expect(screen.getByRole("heading", { name: "字段填写明细" })).toBeVisible();
     expect(screen.getByText("已填写 1")).toBeVisible();
     expect(screen.getByText("待确认 1")).toBeVisible();
     expect(screen.queryByRole("button", { name: submissionActionName })).not.toBeInTheDocument();
@@ -199,7 +272,14 @@ describe("ApplicationTaskPage", () => {
 
   it("shows manual login and advances from task events without exposing submission", async () => {
     const events = eventHarness();
-    const get = vi.fn().mockResolvedValue(task);
+    const loginTask = { ...task, executionProgress: explicitProgress("请在受控浏览器中完成登录") };
+    const get = vi.fn()
+      .mockResolvedValueOnce(loginTask)
+      .mockResolvedValue({
+        ...task,
+        state: "observing_page",
+        executionProgress: explicitProgress("等待进入简历填写页面")
+      });
     render(<ApplicationTaskPage taskId={task.id} api={{ get, command: vi.fn() }} connectEvents={events.connect} />);
 
     expect(await screen.findByText("请在受控浏览器中完成登录")).toBeVisible();
@@ -211,7 +291,8 @@ describe("ApplicationTaskPage", () => {
 
   it("keeps the last known state visible while the event stream reconnects", async () => {
     const events = eventHarness();
-    render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(task), command: vi.fn() }} connectEvents={events.connect} />);
+    const loginTask = { ...task, executionProgress: explicitProgress("请在受控浏览器中完成登录") };
+    render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(loginTask), command: vi.fn() }} connectEvents={events.connect} />);
 
     expect(await screen.findByText("请在受控浏览器中完成登录")).toBeVisible();
     events.disconnect();
@@ -252,7 +333,12 @@ describe("ApplicationTaskPage", () => {
 
   it("uses the server projection after events instead of inventing commands", async () => {
     const events = eventHarness();
-    const get = vi.fn().mockResolvedValueOnce(task).mockResolvedValueOnce({ ...task, state: "needs_questions", commands: [] });
+    const get = vi.fn().mockResolvedValueOnce(task).mockResolvedValueOnce({
+      ...task,
+      state: "needs_questions",
+      commands: [],
+      executionProgress: explicitProgress("等待补充信息", "semantic_fill")
+    });
     render(<ApplicationTaskPage taskId={task.id} api={{ get, command: vi.fn() }} connectEvents={events.connect} />);
 
     expect(await screen.findByRole("button", { name: "我已完成登录，继续" })).toBeVisible();
@@ -267,10 +353,16 @@ describe("ApplicationTaskPage", () => {
   it("does not let an older refresh overwrite review_locked", async () => {
     const events = eventHarness();
     const stale = deferred<ApplicationTask>();
+    const loginTask = { ...task, executionProgress: explicitProgress("请在受控浏览器中完成登录") };
     const get = vi.fn()
-      .mockResolvedValueOnce(task)
+      .mockResolvedValueOnce(loginTask)
       .mockReturnValueOnce(stale.promise)
-      .mockResolvedValueOnce({ ...task, state: "review_locked", commands: [] });
+      .mockResolvedValueOnce({
+        ...task,
+        state: "review_locked",
+        commands: [],
+        executionProgress: explicitProgress("等待人工最终审核", "final_review")
+      });
     render(<ApplicationTaskPage taskId={task.id} api={{ get, command: vi.fn() }} connectEvents={events.connect} />);
     expect(await screen.findByText("请在受控浏览器中完成登录")).toBeVisible();
 
@@ -287,7 +379,12 @@ describe("ApplicationTaskPage", () => {
     const user = userEvent.setup();
     const events = eventHarness();
     const commandResponse = deferred<ApplicationTask>();
-    const get = vi.fn().mockResolvedValueOnce(task).mockResolvedValueOnce({ ...task, state: "review_locked", commands: [] });
+    const get = vi.fn().mockResolvedValueOnce(task).mockResolvedValueOnce({
+      ...task,
+      state: "review_locked",
+      commands: [],
+      executionProgress: explicitProgress("等待人工最终审核", "final_review")
+    });
     render(<ApplicationTaskPage taskId={task.id} api={{ get, command: vi.fn(() => commandResponse.promise) }} connectEvents={events.connect} />);
     await user.click(await screen.findByRole("button", { name: "我已完成登录，继续" }));
 
@@ -323,7 +420,12 @@ describe("ApplicationTaskPage", () => {
   it("cancels through the typed command and removes all task controls", async () => {
     const user = userEvent.setup();
     const events = eventHarness();
-    const command = vi.fn().mockResolvedValue({ ...task, state: "cancelled", commands: [] });
+    const command = vi.fn().mockResolvedValue({
+      ...task,
+      state: "cancelled",
+      commands: [],
+      executionProgress: explicitProgress("任务已取消", "final_review")
+    });
     render(<ApplicationTaskPage taskId={task.id} api={{ get: vi.fn().mockResolvedValue(task), command }} connectEvents={events.connect} />);
 
     await user.click(await screen.findByRole("button", { name: "取消任务" }));
@@ -433,6 +535,37 @@ describe("ApplicationTaskPage", () => {
     await user.click(screen.getByRole("button", { name: "采用最终稿" }));
 
     expect(command).toHaveBeenCalledWith(task.id, { type: "approve_content", reviewId: "review-1", editedValue: "用户确认稿" });
+  });
+
+  it.each(challengeLabels)("renders finite Challenge copy for %s and sends only explicit resume", async (kind, label) => {
+    const user = userEvent.setup();
+    const pausedTask: ApplicationTask = {
+      ...task,
+      state: "awaiting_challenge",
+      commands: ["cancel", "resume_after_challenge"],
+      challenge: {
+        kind,
+        detectedAt: "2026-08-15T00:00:00.000Z",
+        reasonCode: "private_reason_must_not_render"
+      }
+    };
+    const command = vi.fn().mockResolvedValue({
+      ...pausedTask,
+      state: "observing_page",
+      commands: ["cancel"]
+    });
+    render(<ApplicationTaskPage
+      taskId={task.id}
+      api={{ get: vi.fn().mockResolvedValue(pausedTask), command }}
+      connectEvents={eventHarness().connect}
+    />);
+
+    expect(await screen.findByRole("heading", { name: label })).toBeVisible();
+    expect(screen.getByText("请在受控浏览器中完成处理，然后点击继续填写。")).toBeVisible();
+    expect(screen.queryByText("private_reason_must_not_render")).not.toBeInTheDocument();
+    await user.click(screen.getByRole("button", { name: "继续填写" }));
+
+    expect(command).toHaveBeenCalledWith(task.id, { type: "resume_after_challenge" });
   });
 
   it("isolates old progress events after switching tasks", async () => {

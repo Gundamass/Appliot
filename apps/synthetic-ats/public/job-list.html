@@ -1,0 +1,43 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>合成岗位列表</title>
+</head>
+<body data-fixture="job-list">
+  <main>
+    <h1>招聘岗位</h1>
+    <form aria-label="岗位筛选">
+      <label data-filter-key="keyword">岗位关键词 <input name="keyword" value="Java"></label>
+      <label data-filter-key="location">工作地点 <select name="location"><option>深圳</option><option>杭州</option></select></label>
+      <button type="submit">筛选</button>
+    </form>
+    <section aria-label="岗位列表" id="job-list"></section>
+    <nav aria-label="岗位分页"><a id="previous-page">上一页</a><span id="page-number"></span><a id="next-page" rel="next">下一页</a></nav>
+  </main>
+  <output id="diagnostics" hidden>{"submissionCount":0}</output>
+  <script>
+    const params = new URLSearchParams(location.search);
+    const page = Math.max(1, Number(params.get("page") || "1"));
+    const taskId = params.get("taskId") || "default-task";
+    const contentVersion = params.get("contentVersion") || "1";
+    const jobs = page === 1
+      ? [
+          { id: "java-lead", title: contentVersion === "2" ? "Java 平台技术负责人" : "Java 技术负责人", location: "深圳", education: "本科", experience: "5年以上" },
+          { id: "platform-engineer", title: "平台后端工程师", location: "杭州", education: "本科", experience: "3年以上" }
+        ]
+      : [{ id: "backend-architect", title: "后端架构师", location: "深圳", education: "硕士", experience: "8年以上" }];
+    document.querySelector("#job-list").innerHTML = jobs.map((job) => `<article data-job-id="${job.id}"><h2><a href="/job-detail.html?job=${job.id}&taskId=${encodeURIComponent(taskId)}">${job.title}</a></h2><p>${job.location} · ${job.education} · ${job.experience}</p></article>`).join("");
+    document.querySelector("#page-number").textContent = `第 ${page} 页`;
+    const pageHref = (targetPage) => {
+      const next = new URLSearchParams(params);
+      next.set("page", String(targetPage));
+      next.set("taskId", taskId);
+      return `/job-list.html?${next.toString()}`;
+    };
+    document.querySelector("#previous-page").href = pageHref(Math.max(1, page - 1));
+    document.querySelector("#next-page").href = pageHref(page + 1);
+  </script>
+</body>
+</html>

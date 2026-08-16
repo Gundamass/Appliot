@@ -1,5 +1,6 @@
 import type { ApplicationTask } from "@resume/contracts";
 import { render, screen, within } from "@testing-library/react";
+import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "./router.js";
 
@@ -10,7 +11,19 @@ const task: ApplicationTask = {
   commands: ["cancel", "open_browser", "resume"],
   recoveryCommands: [],
   questions: [],
-  taskAnswers: []
+  taskAnswers: [],
+  executionProgress: {
+    currentPhase: "waiting_for_form",
+    phases: [
+      { phase: "waiting_for_form", status: "running" },
+      { phase: "deterministic_fill", status: "pending" },
+      { phase: "semantic_fill", status: "pending" },
+      { phase: "readback_validation", status: "pending" },
+      { phase: "final_review", status: "pending" }
+    ],
+    current: { action: "请在受控浏览器中完成登录", maxAttempts: 2 },
+    counts: { exact: 0, semantic: 0, user: 0, missing: 0, failed: 0 }
+  }
 };
 
 class SilentEventSource extends EventTarget {
@@ -23,6 +36,70 @@ afterEach(() => {
 });
 
 describe("AppRouter", () => {
+  it("injects the job matching API into the root workspace", async () => {
+    window.history.pushState({}, "", "/?view=apply");
+    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
+      const url = String(input);
+      const payload = url.endsWith("/api/profile/facts") ? [{
+        id: "role",
+        fieldPath: "preferences.targetRole",
+        value: "Java",
+        status: "user_confirmed",
+        confidence: 1,
+        scope: "profile",
+        evidence: [{ documentId: "fixture", page: 1, text: "Java", extraction: "user" }],
+        revision: 1
+      }] : { completed: 0, total: 1, sections: [] };
+      return new Response(JSON.stringify(payload), {
+        status: 200,
+        headers: { "Content-Type": "application/json" }
+      });
+    }));
+    const create = vi.fn().mockResolvedValue({
+      redirect: "application",
+      applicationUrl: "https://acme.mokahr.com/apply"
+    });
+    const applicationApi = {
+      list: vi.fn().mockResolvedValue([]), create: vi.fn(), get: vi.fn(), command: vi.fn(), recover: vi.fn()
+    };
+    const user = userEvent.setup();
+    render(<AppRouter applicationApi={applicationApi} jobMatchApi={{ create } as never} />);
+
+    await screen.findByDisplayValue("Java");
+    await user.type(screen.getByLabelText("招聘链接"), "https://acme.mokahr.com/jobs");
+    await user.click(screen.getByRole("button", { name: "确认岗位期望并开始匹配" }));
+
+    expect(create).toHaveBeenCalledWith("https://acme.mokahr.com/jobs");
+  });
+
+  it("renders a job matching session route", async () => {
+    window.history.pushState({}, "", "/job-match-sessions/session-1");
+    const expectation = {
+      revision: 2,
+      confirmedAt: "2026-08-16T00:00:00.000Z",
+      criteria: [{ kind: "location", values: ["深圳"], strength: "required" }]
+    } as const;
+    const jobMatchApi = {
+      get: vi.fn().mockResolvedValue({
+        id: "session-1",
+        version: 0,
+        state: "awaiting_filter_confirmation",
+        expectation,
+        postings: [],
+        results: []
+      }),
+      confirmFilters: vi.fn().mockResolvedValue(undefined)
+    };
+    render(<AppRouter applicationApi={{ list: vi.fn(), create: vi.fn(), get: vi.fn(), command: vi.fn(), recover: vi.fn() }} jobMatchApi={jobMatchApi as never} />);
+    expect(await screen.findByText("岗位匹配工作台")).toBeVisible();
+    await userEvent.setup().click(screen.getByRole("button", { name: /确认筛选/u }));
+    expect(jobMatchApi.confirmFilters).toHaveBeenCalledWith(
+      "session-1",
+      expectation,
+      expect.objectContaining({ sessionVersion: 0, idempotencyKey: expect.any(String) })
+    );
+  });
+
   it("renders the create route and a deep task route", async () => {
     vi.stubGlobal("EventSource", SilentEventSource);
     const api = { list: vi.fn().mockResolvedValue([]), create: vi.fn(), get: vi.fn().mockResolvedValue(task), command: vi.fn(), recover: vi.fn() };

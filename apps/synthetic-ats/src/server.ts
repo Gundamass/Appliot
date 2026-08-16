@@ -15,6 +15,21 @@ export interface SyntheticDraft {
   awardLevel?: string;
   unknownField?: string;
   majorDirection?: string;
+  major?: string;
+  preservedValue?: string;
+  formalWorkCompanies?: string[];
+  internshipCompanies?: string[];
+  internshipPositions?: string[];
+  projectNames?: string[];
+  projectDescriptions?: string[];
+  awardName?: string;
+  awardDate?: string;
+  startYear?: string;
+  startMonth?: string;
+  languageName?: string;
+  languageProficiency?: string;
+  languageSpeakingListening?: string;
+  languageReadingWriting?: string;
 }
 
 export interface SyntheticTaskState {
@@ -24,6 +39,26 @@ export interface SyntheticTaskState {
   selectedJob?: string;
   loginCount: number;
   uploadCount: number;
+  searches: { major: string[] };
+  workAddCount: number;
+  internshipAddCount: number;
+  projectAddCount: number;
+  runtime: SyntheticRuntimeState;
+  challenge?: SyntheticChallengeState;
+}
+
+export interface SyntheticRuntimeState {
+  scenario: string;
+  values: Record<string, string>;
+  writeCounts: Record<string, number>;
+  mutationCount: number;
+  auditCount: number;
+}
+
+export interface SyntheticChallengeState {
+  scenario: string;
+  kind: "captcha" | "access_denied" | "rate_limited" | "device_verification" | "risk_control" | "unsupported_iframe" | "unsupported_shadow_dom";
+  fillCount: number;
 }
 
 export interface SyntheticAtsServer {
@@ -34,17 +69,42 @@ export interface SyntheticAtsServer {
 
 const applicationTemplatePath = fileURLToPath(new URL("../public/application.html", import.meta.url));
 const reviewTemplatePath = fileURLToPath(new URL("../public/review.html", import.meta.url));
+const stabilityTemplatePath = fileURLToPath(new URL("../public/stability.html", import.meta.url));
+const runtimeP0TemplatePath = fileURLToPath(new URL("../public/runtime-p0.html", import.meta.url));
+const challengeP0TemplatePath = fileURLToPath(new URL("../public/challenge-p0.html", import.meta.url));
+const jobListTemplatePath = fileURLToPath(new URL("../public/job-list.html", import.meta.url));
 
 export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
-  const [applicationTemplate, reviewTemplate] = await Promise.all([
+  const [applicationTemplate, reviewTemplate, stabilityTemplate, runtimeP0Template, challengeP0Template, jobListTemplate] = await Promise.all([
     readFile(applicationTemplatePath, "utf8"),
-    readFile(reviewTemplatePath, "utf8")
+    readFile(reviewTemplatePath, "utf8"),
+    readFile(stabilityTemplatePath, "utf8"),
+    readFile(runtimeP0TemplatePath, "utf8"),
+    readFile(challengeP0TemplatePath, "utf8"),
+    readFile(jobListTemplatePath, "utf8")
   ]);
   const tasks = new Map<string, SyntheticTaskState>();
   const taskState = (taskId: string): SyntheticTaskState => {
     const existing = tasks.get(taskId);
     if (existing) return existing;
-    const created: SyntheticTaskState = { draft: {}, submissionCount: 0, modelCallCount: 0, loginCount: 0, uploadCount: 0 };
+    const created: SyntheticTaskState = {
+      draft: {},
+      submissionCount: 0,
+      modelCallCount: 0,
+      loginCount: 0,
+      uploadCount: 0,
+      searches: { major: [] },
+      workAddCount: 0,
+      internshipAddCount: 0,
+      projectAddCount: 0,
+      runtime: {
+        scenario: "",
+        values: {},
+        writeCounts: {},
+        mutationCount: 0,
+        auditCount: 0
+      }
+    };
     tasks.set(taskId, created);
     return created;
   };
@@ -55,6 +115,16 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
       const url = new URL(request.url ?? "/", origin);
       const taskId = url.searchParams.get("taskId") ?? "default-task";
       const scenario = url.searchParams.get("scenario") ?? "default";
+      if (request.method === "GET" && url.pathname === "/job-list.html") {
+        taskState(taskId);
+        sendHtml(response, jobListTemplate);
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/job-detail.html") {
+        taskState(taskId);
+        sendHtml(response, jobDetailPage(taskId, url.searchParams.get("job") ?? "java-lead"));
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/jobs") {
         sendHtml(response, jobsPage(taskId, scenario));
         return;
@@ -66,9 +136,10 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
       }
       if (request.method === "GET" && url.pathname === "/application") {
         if (url.searchParams.get("loggedIn") === "1") taskState(taskId).loginCount += 1;
-        sendHtml(response, scenario === "profile-retry"
+        const applicationPage = scenario === "profile-retry"
           ? profileRetryPage(taskId)
-          : render(applicationTemplate, taskId, scenario));
+          : render(applicationTemplate, taskId, scenario);
+        sendHtml(response, applicationPage.replace("<body", '<body data-resume-entry="application_form"'));
         return;
       }
       if (request.method === "GET" && url.pathname === "/mokahr") {
@@ -79,12 +150,68 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
         sendHtml(response, djiPage(taskId));
         return;
       }
+      if (request.method === "GET" && url.pathname === "/stability") {
+        sendHtml(response, render(stabilityTemplate, taskId, "stability"));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/runtime-p0") {
+        taskState(taskId).runtime.scenario = scenario;
+        sendHtml(response, render(runtimeP0Template, taskId, scenario));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/challenge-p0") {
+        const state = taskState(taskId);
+        state.challenge = {
+          scenario,
+          kind: challengeKindForScenario(scenario),
+          fillCount: 0
+        };
+        if (scenario === "access-denied") response.statusCode = 403;
+        if (scenario === "rate-limited") response.statusCode = 429;
+        sendHtml(response, render(challengeP0Template, taskId, scenario));
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/api/mokahr-state") {
         const body = JSON.parse(await readText(request)) as { draft?: SyntheticDraft; uploaded?: boolean };
         if (body.uploaded) taskState(taskId).uploadCount += 1;
         Object.assign(taskState(taskId).draft, body.draft ?? {});
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         response.end(JSON.stringify(taskState(taskId)));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/stability-state") {
+        const body = JSON.parse(await readText(request)) as Partial<Pick<
+          SyntheticTaskState,
+          "draft" | "searches" | "workAddCount" | "internshipAddCount" | "projectAddCount"
+        >>;
+        const state = taskState(taskId);
+        Object.assign(state.draft, body.draft ?? {});
+        if (body.searches?.major) state.searches.major = [...body.searches.major];
+        if (body.workAddCount !== undefined) state.workAddCount = body.workAddCount;
+        if (body.internshipAddCount !== undefined) state.internshipAddCount = body.internshipAddCount;
+        if (body.projectAddCount !== undefined) state.projectAddCount = body.projectAddCount;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.end(JSON.stringify(state));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/runtime-p0-state") {
+        const body = JSON.parse(await readText(request)) as Partial<SyntheticRuntimeState>;
+        const state = taskState(taskId);
+        if (body.scenario !== undefined) state.runtime.scenario = body.scenario;
+        if (body.values !== undefined) state.runtime.values = { ...body.values };
+        if (body.writeCounts !== undefined) state.runtime.writeCounts = { ...body.writeCounts };
+        if (body.mutationCount !== undefined) state.runtime.mutationCount = body.mutationCount;
+        if (body.auditCount !== undefined) state.runtime.auditCount = body.auditCount;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.end(JSON.stringify(state));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/challenge-p0-state") {
+        const body = JSON.parse(await readText(request)) as { fillCount?: number };
+        const state = taskState(taskId);
+        if (state.challenge && body.fillCount !== undefined) state.challenge.fillCount = body.fillCount;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.end(JSON.stringify(state));
         return;
       }
       if (request.method === "POST" && url.pathname === "/step2") {
@@ -153,6 +280,20 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
   };
 }
 
+function challengeKindForScenario(scenario: string): SyntheticChallengeState["kind"] {
+  switch (scenario) {
+    case "captcha": return "captcha";
+    case "access-denied": return "access_denied";
+    case "rate-limited": return "rate_limited";
+    case "device-verification": return "device_verification";
+    case "risk-control": return "risk_control";
+    case "interactive-iframe": return "unsupported_iframe";
+    case "open-shadow-input":
+    case "closed-shadow-host": return "unsupported_shadow_dom";
+    default: throw new Error(`unknown_challenge_scenario:${scenario}`);
+  }
+}
+
 function render(template: string, taskId: string, scenario: string): string {
   return template
     .replaceAll("{{TASK_ID}}", encodeURIComponent(taskId))
@@ -176,6 +317,17 @@ function jobsPage(taskId: string, scenario: string): string {
       <input type="hidden" name="scenario" value="${escapeHtml(scenario)}">
       <button type="submit" name="job" value="java-backend">Java 后端开发工程师</button>
     </form></main></body></html>`;
+}
+
+function jobDetailPage(taskId: string, jobId: string): string {
+  const title = jobId === "backend-architect" ? "后端架构师" : "Java 技术负责人";
+  return `<!doctype html><html lang="zh-CN"><head><meta charset="utf-8"><title>${title}</title></head>
+    <body data-resume-entry="job_detail"><main><article class="position-detail">
+      <h1>${title}</h1><p>示例公司 · 深圳</p>
+      <section data-job-description><h2>岗位职责</h2><p>负责平台服务设计、交付与技术治理。</p>
+        <h2>岗位要求</h2><ul><li>本科及以上学历</li><li>五年以上 Java 开发经验</li></ul></section>
+      <a href="/application?taskId=${encodeURIComponent(taskId)}">进入申请表</a>
+    </article></main></body></html>`;
 }
 
 function loginPage(taskId: string, scenario: string): string {

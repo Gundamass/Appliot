@@ -1,4 +1,25 @@
 import { z } from "zod";
+import {
+  ChallengeDiagnosticSchema,
+  ChallengeKindSchema,
+  DomBoundarySchema
+} from "./browser-diagnostics.js";
+import {
+  FilterPlanSchema,
+  JobFilterStateSchema,
+  JobPageSnapshotSchema
+} from "./job-matching.js";
+
+export {
+  ChallengeDiagnosticSchema,
+  ChallengeKindSchema,
+  DomBoundarySchema
+} from "./browser-diagnostics.js";
+export type {
+  ChallengeDiagnostic,
+  ChallengeKind,
+  DomBoundary
+} from "./browser-diagnostics.js";
 
 export const ActionClassSchema = z.enum([
   "safe_edit",
@@ -6,6 +27,41 @@ export const ActionClassSchema = z.enum([
   "intermediate_navigation",
   "unknown_side_effect",
   "terminal_submit"
+]);
+
+export const PageSectionHintSchema = z.enum([
+  "basics",
+  "preferences",
+  "education",
+  "work",
+  "internship",
+  "work_combined",
+  "projects",
+  "campus",
+  "awards",
+  "languages",
+  "publications",
+  "certificates",
+  "self"
+]);
+
+export const FrameRefSchema = z.object({
+  documentId: z.string().min(16).max(128),
+  kind: z.literal("main")
+}).strict();
+
+export const NodeRefSchema = z.object({
+  documentId: FrameRefSchema.shape.documentId,
+  nodeId: z.string().min(16).max(128),
+  observedAt: z.number().int().nonnegative()
+}).strict();
+
+export const StableExecutionErrorCodeSchema = z.enum([
+  "control_unstable",
+  "controlled_value_reverted",
+  "stale_node_ref",
+  "node_role_changed",
+  "execution_invalidated"
 ]);
 
 export const FormFieldSchema = z.object({
@@ -18,8 +74,10 @@ export const FormFieldSchema = z.object({
   currentValue: z.unknown(),
   controlKind: z.enum(["native", "custom"]).optional(),
   interactionMode: z.enum(["native", "search", "choice_group", "date_group", "file"]).optional(),
+  sectionHint: PageSectionHintSchema.optional(),
   semanticHint: z.string().optional(),
-  semanticSource: z.enum(["dji_catalog"]).optional()
+  semanticSource: z.enum(["dji_catalog"]).optional(),
+  nodeRef: NodeRefSchema
 }).strict().superRefine((field, context) => {
   if (!Object.prototype.hasOwnProperty.call(field, "currentValue")) {
     context.addIssue({
@@ -34,7 +92,8 @@ export const PageActionSchema = z.object({
   id: z.string(),
   text: z.string(),
   class: ActionClassSchema,
-  context: z.string().max(2000).optional()
+  context: z.string().max(2000).optional(),
+  nodeRef: NodeRefSchema
 }).strict();
 
 export const FormSnapshotSchema = z.object({
@@ -43,6 +102,10 @@ export const FormSnapshotSchema = z.object({
   url: z.string().url(),
   title: z.string(),
   stage: z.enum(["login", "application_form", "review", "success", "unknown"]),
+  frameRef: FrameRefSchema,
+  mutationEpoch: z.number().int().nonnegative(),
+  boundaries: z.array(DomBoundarySchema).max(50).optional(),
+  challenge: ChallengeDiagnosticSchema.optional(),
   fields: z.array(FormFieldSchema),
   actions: z.array(PageActionSchema),
   errors: z.array(z.string())
@@ -54,6 +117,8 @@ export const ExecutableCommandSchema = z.discriminatedUnion("type", [
     taskId: z.string(),
     snapshotId: z.string(),
     fieldId: z.string(),
+    nodeRef: NodeRefSchema,
+    executionEpoch: z.number().int().nonnegative(),
     value: z.unknown(),
     approval: z.string()
   }).strict(),
@@ -62,6 +127,8 @@ export const ExecutableCommandSchema = z.discriminatedUnion("type", [
     taskId: z.string(),
     snapshotId: z.string(),
     fieldId: z.string(),
+    nodeRef: NodeRefSchema,
+    executionEpoch: z.number().int().nonnegative(),
     value: z.string(),
     approval: z.string()
   }).strict(),
@@ -70,6 +137,8 @@ export const ExecutableCommandSchema = z.discriminatedUnion("type", [
     taskId: z.string(),
     snapshotId: z.string(),
     fieldId: z.string(),
+    nodeRef: NodeRefSchema,
+    executionEpoch: z.number().int().nonnegative(),
     fileId: z.string(),
     approval: z.string()
   }).strict(),
@@ -78,6 +147,8 @@ export const ExecutableCommandSchema = z.discriminatedUnion("type", [
     taskId: z.string(),
     snapshotId: z.string(),
     actionId: z.string(),
+    nodeRef: NodeRefSchema,
+    executionEpoch: z.number().int().nonnegative(),
     approval: z.string()
   }).strict()
 ]).superRefine((command, context) => {
@@ -103,6 +174,22 @@ export const WorkerRequestSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("capture_snapshot"),
     taskId: z.string()
+  }).strict(),
+  z.object({
+    type: z.literal("capture_job_snapshot"),
+    ownerId: z.string().min(1)
+  }).strict(),
+  z.object({
+    type: z.literal("apply_job_filters"),
+    ownerId: z.string().min(1),
+    plan: FilterPlanSchema,
+    executionEpoch: z.number().int().nonnegative()
+  }).strict(),
+  z.object({
+    type: z.literal("advance_job_page"),
+    ownerId: z.string().min(1),
+    cursor: z.string().min(1).max(1_024).optional(),
+    executionEpoch: z.number().int().nonnegative()
   }).strict(),
   z.object({
     type: z.literal("execute"),
@@ -187,6 +274,21 @@ export const WorkerResponseSchema = z.discriminatedUnion("type", [
     snapshot: FormSnapshotSchema
   }).strict(),
   z.object({
+    type: z.literal("job_snapshot"),
+    snapshot: JobPageSnapshotSchema
+  }).strict(),
+  z.object({
+    type: z.literal("job_filter_result"),
+    ownerId: z.string().min(1),
+    filterState: z.array(JobFilterStateSchema).max(100),
+    snapshot: JobPageSnapshotSchema
+  }).strict(),
+  z.object({
+    type: z.literal("job_page_advanced"),
+    ownerId: z.string().min(1),
+    snapshot: JobPageSnapshotSchema
+  }).strict(),
+  z.object({
     type: z.literal("execution_result"),
     taskId: z.string(),
     snapshotId: z.string(),
@@ -213,6 +315,10 @@ export const WorkerResponseSchema = z.discriminatedUnion("type", [
 });
 
 export type ActionClass = z.infer<typeof ActionClassSchema>;
+export type PageSectionHint = z.infer<typeof PageSectionHintSchema>;
+export type FrameRef = z.infer<typeof FrameRefSchema>;
+export type NodeRef = z.infer<typeof NodeRefSchema>;
+export type StableExecutionErrorCode = z.infer<typeof StableExecutionErrorCodeSchema>;
 export type FormField = z.infer<typeof FormFieldSchema>;
 export type PageAction = z.infer<typeof PageActionSchema>;
 export type FormSnapshot = z.infer<typeof FormSnapshotSchema>;

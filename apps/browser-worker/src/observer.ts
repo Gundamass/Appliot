@@ -2,7 +2,14 @@ import { normalizeForm, type RawFormObservation } from "@resume/form-semantics";
 import type { FormSnapshot } from "@resume/contracts";
 import type { Page } from "playwright-core";
 import type { PageStructure } from "./activity-monitor.js";
-import { DomRegistry } from "./dom-registry.js";
+import { ChallengeDetector, type ChallengeInspection } from "./challenge-detector.js";
+import { installDomRuntime } from "./dom-runtime.js";
+import {
+  ACTION_SELECTOR,
+  FIELD_SELECTOR,
+  NodeRegistry,
+  NodeRegistryError
+} from "./node-registry.js";
 import { opaqueId } from "./opaque-id.js";
 
 const EMPTY_PAGE_SAMPLE_MS = 100;
@@ -10,6 +17,8 @@ const EMPTY_PAGE_WAIT_CAP_MS = 5_000;
 const MAX_FIELD_OPTIONS = 100;
 
 const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
+  const runtime = window.__resumeDomRuntime;
+  if (!runtime) throw new Error("dom_runtime_missing");
   const normalized = (value) => (value ?? "").normalize("NFKC").replace(/\s+/g, " ").trim();
   const visible = (element) => {
     const style = getComputedStyle(element);
@@ -43,6 +52,18 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
     || /(?:^|\s)[*＊](?:\s|$)/u.test(labelText);
   const formItemLabel = (element) => normalized(formItem(element)
     ?.querySelector(":scope > .ant-form-item-label label, :scope > .form-item-label label, :scope > [class*='title-']")?.textContent);
+  const nearestSectionText = (element) => {
+    let ancestor = element.parentElement;
+    while (ancestor && ancestor !== document.body) {
+      const heading = ancestor.querySelector(
+        ":scope > h1, :scope > h2, :scope > h3, :scope > h4, :scope > legend, :scope > [role=heading], :scope > [class*='blockTitle']"
+      );
+      const text = normalized(heading?.textContent);
+      if (text) return text;
+      ancestor = ancestor.parentElement;
+    }
+    return "";
+  };
   const actionContext = (element) => {
     const actionText = normalized(element instanceof HTMLInputElement ? element.value : element.textContent);
     const explicitContainer = element.closest("[data-action-context]");
@@ -74,7 +95,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       || element.value
   );
   let fieldIndex = 0;
-  const fields = [...document.querySelectorAll("input:not([type=hidden]), textarea, select, [role=combobox], [role=radiogroup]")]
+  const fields = [...document.querySelectorAll("input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=reset]):not([type=image]), textarea, select, [role=combobox], [role=radiogroup]")]
     .flatMap((element, registryIndex) => {
     if (unavailable(element) || (!visible(element) && !resumableHiddenFile(element)) || internal(element)) return [];
     const index = fieldIndex++;
@@ -102,6 +123,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       if (!questionLabel || options.length === 0) return [];
       return [{
         path: "field:" + index,
+        nodeId: runtime.nodeId(element),
         registryIndex,
         tag: "input",
         inputType: "radio",
@@ -111,6 +133,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
         options,
         controlKind: "native",
         interactionMode: "choice_group",
+        sectionText: nearestSectionText(element),
         explicitLabel: legend,
         wrappingLabel: "",
         ariaLabel: normalized((fieldset ?? element).getAttribute("aria-label")),
@@ -128,6 +151,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       if (!questionLabel || options.length === 0) return [];
       return [{
         path: "field:" + index,
+        nodeId: runtime.nodeId(element),
         registryIndex,
         tag: "input",
         inputType: "radio",
@@ -137,6 +161,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
         options,
         controlKind: "custom",
         interactionMode: "choice_group",
+        sectionText: nearestSectionText(element),
         explicitLabel: "",
         wrappingLabel: "",
         ariaLabel: normalized(element.getAttribute("aria-label")),
@@ -194,6 +219,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       : [];
     return {
       path: "field:" + index,
+      nodeId: runtime.nodeId(element),
       registryIndex,
       tag: customSelect ? "select" : tag,
       inputType: customSelect ? "custom-select" : element instanceof HTMLInputElement ? element.type : tag,
@@ -210,6 +236,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
       optionsTruncated: allOptions.length > ${MAX_FIELD_OPTIONS} || undefined,
       controlKind: customSelect ? "custom" : "native",
       interactionMode: customSelect ? "search" : element instanceof HTMLInputElement && element.type === "file" ? "file" : "native",
+      sectionText: nearestSectionText(element),
       explicitLabel,
       wrappingLabel: itemLabel || wrappingLabel,
       ariaLabel: normalized(element.getAttribute("aria-label")),
@@ -223,6 +250,7 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
     if (unavailable(element) || !visible(element) || internal(element) || element.closest('[role="radiogroup"]')) return [];
     return [{
       path: "action:" + actionIndex++,
+      nodeId: runtime.nodeId(element),
       registryIndex,
       text: normalized(element instanceof HTMLInputElement ? element.value : element.textContent),
       ariaLabel: normalized(element.getAttribute("aria-label")),
@@ -233,7 +261,13 @@ const BROWSER_OBSERVATION_SCRIPT = String.raw`(() => {
     .filter((element) => element.getClientRects().length > 0)
     .map((element) => normalized(element.textContent))
     .filter(Boolean);
-  return { fields, actions, errors };
+  return {
+    documentId: runtime.documentId,
+    mutationEpoch: runtime.epoch,
+    fields,
+    actions,
+    errors
+  };
 })()`;
 
 const PAGE_STRUCTURE_SCRIPT = String.raw`(() => {
@@ -287,7 +321,7 @@ const PAGE_STRUCTURE_SCRIPT = String.raw`(() => {
     normalized(element.getAttribute("value")),
     normalized(element.getAttribute("title"))
   ].find(Boolean) ?? "";
-  const fields = [...document.querySelectorAll("input:not([type=hidden]), textarea, select, [role=combobox]")]
+  const fields = [...document.querySelectorAll("input:not([type=hidden]):not([type=button]):not([type=submit]):not([type=reset]):not([type=image]), textarea, select, [role=combobox]")]
     .filter((element) => !unavailable(element) && (visible(element) || resumableHiddenFile(element)) && !internal(element) && (fieldName(element) !== "" || resumableHiddenFile(element)))
     .map((element, index) => {
       const customSelect = element.getAttribute("role")?.toLocaleLowerCase() === "combobox"
@@ -320,41 +354,73 @@ interface BrowserRawFormObservation extends RawFormObservation {
 
 export interface BrowserObservation {
   snapshot: FormSnapshot;
-  registry: DomRegistry;
+  registry: NodeRegistry;
 }
 
 export class BrowserObserver {
-  constructor(private readonly page: Page) {}
+  private readonly challengeDetector: ChallengeDetector;
 
-  async observe(taskId: string): Promise<BrowserObservation> {
-    const raw = await this.waitForObservablePage();
-    const snapshot = normalizeForm(raw, {
-      taskId,
-      url: this.page.url(),
-      title: await this.page.title(),
-      stage: await this.detectStage(raw)
-    });
-    return {
-      snapshot,
-      registry: new DomRegistry(snapshot, this.page, {
-        fields: raw.fields.map((field) => field.registryIndex),
-        actions: raw.actions.map((action) => action.registryIndex)
-      })
-    };
+  constructor(
+    private readonly page: Page,
+    challengeDetector?: ChallengeDetector
+  ) {
+    this.challengeDetector = challengeDetector ?? new ChallengeDetector();
+    if (!challengeDetector) this.challengeDetector.start(page);
   }
 
-  private async waitForObservablePage(): Promise<BrowserRawFormObservation> {
+  async observe(taskId: string): Promise<BrowserObservation> {
+    await installDomRuntime(this.page);
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      const { raw, inspection } = await this.waitForObservablePage();
+      const observedRaw = inspection.challenge ? { ...raw, fields: [], actions: [] } : raw;
+      const normalized = normalizeForm(observedRaw, {
+        taskId,
+        url: this.page.url(),
+        title: await this.page.title(),
+        stage: await this.detectStage(observedRaw)
+      });
+      const snapshot: FormSnapshot = {
+        ...normalized,
+        boundaries: inspection.boundaries,
+        ...(inspection.challenge ? { challenge: inspection.challenge } : {})
+      };
+      try {
+        const fieldLocators = this.page.locator(FIELD_SELECTOR);
+        const actionLocators = this.page.locator(ACTION_SELECTOR);
+        return {
+          snapshot,
+          registry: await NodeRegistry.capture(snapshot, this.page, {
+            fields: observedRaw.fields.map((field) => fieldLocators.nth(field.registryIndex)),
+            actions: observedRaw.actions.map((action) => actionLocators.nth(action.registryIndex))
+          })
+        };
+      } catch (error) {
+        if (!(error instanceof NodeRegistryError)
+          || error.code !== "observation_changed"
+          || attempt === 2) throw error;
+      }
+    }
+    throw new NodeRegistryError("observation_changed");
+  }
+
+  private async waitForObservablePage(): Promise<{
+    raw: BrowserRawFormObservation;
+    inspection: ChallengeInspection;
+  }> {
     let raw = await this.page.evaluate<BrowserRawFormObservation>(BROWSER_OBSERVATION_SCRIPT);
+    let inspection = await this.challengeDetector.inspect();
     const deadline = Date.now() + EMPTY_PAGE_WAIT_CAP_MS;
     const isFormRoute = /\/(?:apply|application|login)(?:[/?#]|$)/u.test(this.page.url().toLocaleLowerCase());
-    while (raw.errors.length === 0
+    while (!inspection.challenge
+      && raw.errors.length === 0
       && raw.fields.length === 0
       && (isFormRoute || raw.actions.length === 0)
       && Date.now() < deadline) {
       await delay(EMPTY_PAGE_SAMPLE_MS);
       raw = await this.page.evaluate<BrowserRawFormObservation>(BROWSER_OBSERVATION_SCRIPT);
+      inspection = await this.challengeDetector.inspect();
     }
-    return raw;
+    return { raw, inspection };
   }
 
   async observeStructure(): Promise<PageStructure> {

@@ -81,7 +81,7 @@ export function validateFieldValue(request: FieldRequest, plan: RetrievalPlan, v
     return "value is not one of the field options";
   }
   if (request.type === "date") {
-    const dateFailure = validateDate(value as string, plan.requiredRange);
+    const dateFailure = validateDate(value as string, plan.requiredRange, request.semantic);
     if (dateFailure) return dateFailure;
   }
 
@@ -117,7 +117,18 @@ function validateType(request: FieldRequest, value: JsonValue): string | undefin
   return "unsupported field type";
 }
 
-function validateDate(value: string, range: RetrievalPlan["requiredRange"]): string | undefined {
+function validateDate(
+  value: string,
+  range: RetrievalPlan["requiredRange"],
+  semantic: string
+): string | undefined {
+  if (allowsMonthPrecision(semantic) && /^\d{4}-\d{2}$/.test(value)) {
+    const [year, month] = value.split("-").map(Number) as [number, number];
+    if (year < 1 || month < 1 || month > 12) return "date is not a valid calendar month";
+    if (range?.min && value < range.min) return "date is before the required range";
+    if (range?.max && value > range.max) return "date is after the required range";
+    return undefined;
+  }
   if (!/^\d{4}-\d{2}-\d{2}$/.test(value)) return "date must use YYYY-MM-DD";
   const [year, month, day] = value.split("-").map(Number) as [number, number, number];
   const date = new Date(Date.UTC(year, month - 1, day));
@@ -127,6 +138,11 @@ function validateDate(value: string, range: RetrievalPlan["requiredRange"]): str
   if (range?.min && value < range.min) return "date is before the required range";
   if (range?.max && value > range.max) return "date is after the required range";
   return undefined;
+}
+
+function allowsMonthPrecision(semantic: string): boolean {
+  return /^(?:education|projects|work|campus)\[\d+\]\.(?:startDate|endDate)$/u.test(semantic)
+    || /^awards\[\d+\]\.date$/u.test(semantic);
 }
 
 function validateRules(value: JsonValue, validators: string[]): string | undefined {

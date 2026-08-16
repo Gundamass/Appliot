@@ -7,6 +7,8 @@ import {
   WorkerResponseSchema,
   WorkerActivitySchema,
   type ExecutableCommand,
+  type FilterPlan,
+  type JobPageSnapshot,
   type WorkerActivity,
   type WorkerRequest,
   type WorkerResponse
@@ -137,6 +139,48 @@ export class BrowserWorkerClient {
     return response;
   }
 
+  async observeJob(ownerId: string): Promise<JobPageSnapshot> {
+    const response = await this.request({ type: "capture_job_snapshot", ownerId });
+    if (response.type !== "job_snapshot") {
+      throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+    }
+    return response.snapshot;
+  }
+
+  async applyJobFilters(
+    ownerId: string,
+    plan: FilterPlan,
+    executionEpoch: number
+  ): Promise<JobPageSnapshot> {
+    const response = await this.request({
+      type: "apply_job_filters",
+      ownerId,
+      plan,
+      executionEpoch
+    });
+    if (response.type !== "job_filter_result") {
+      throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+    }
+    return response.snapshot;
+  }
+
+  async advanceJobPage(
+    ownerId: string,
+    cursor: string | undefined,
+    executionEpoch: number
+  ): Promise<JobPageSnapshot> {
+    const response = await this.request({
+      type: "advance_job_page",
+      ownerId,
+      ...(cursor === undefined ? {} : { cursor }),
+      executionEpoch
+    });
+    if (response.type !== "job_page_advanced") {
+      throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+    }
+    return response.snapshot;
+  }
+
   async execute(command: ExecutableCommand, executionEpoch = 0): Promise<Extract<WorkerResponse, { type: "execution_result" }>> {
     const response = await this.request({ type: "execute", command, executionEpoch });
     if (response.type !== "execution_result") {
@@ -184,6 +228,12 @@ export class BrowserWorkerClient {
     const request = WorkerRequestSchema.parse(rawRequest);
     if (request.type === "open" || request.type === "capture_snapshot") {
       this.lastTaskId = request.taskId;
+    } else if (
+      request.type === "capture_job_snapshot"
+      || request.type === "apply_job_filters"
+      || request.type === "advance_job_page"
+    ) {
+      this.lastTaskId = request.ownerId;
     } else if (request.type === "execute") {
       this.lastTaskId = request.command.taskId;
     } else if (request.type === "invalidate_execution") {

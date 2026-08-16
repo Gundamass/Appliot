@@ -5,6 +5,7 @@ import { opaqueActionIdForIndex, opaqueFieldIdForIndex } from "./opaque-id.js";
 const DEFAULT_SETTLE_MS = 750;
 const DEFAULT_SAMPLE_MS = 500;
 const DEFAULT_STABLE_WAIT_CAP_MS = 5_000;
+const DEFAULT_AUTOMATION_EVENT_DRAIN_MS = 150;
 
 function activityObserverScript(bindingName: string, automationGuardName: string): string {
   return String.raw`(() => {
@@ -30,7 +31,7 @@ function activityObserverScript(bindingName: string, automationGuardName: string
   new MutationObserver(() => emit({ kind: "mutation" })).observe(document, { childList: true, subtree: true, attributes: true });
   for (const type of ["input", "change", "click"]) {
     document.addEventListener(type, (event) => {
-      if (window[${JSON.stringify(automationGuardName)}] > 0) return;
+      if (!event.isTrusted || window[${JSON.stringify(automationGuardName)}] > 0) return;
       const target = event.target instanceof Element ? event.target : null;
       if (type === "click") {
         const actionIndex = actions().indexOf(target?.closest(actionSelector) ?? null);
@@ -67,6 +68,7 @@ export interface ActivityMonitorOptions {
   settleMs?: number;
   sampleMs?: number;
   stableWaitCapMs?: number;
+  automationEventDrainMs?: number;
   readStructure?: () => Promise<PageStructure>;
 }
 
@@ -91,6 +93,7 @@ export class ActivityMonitor {
   private readonly settleMs: number;
   private readonly sampleMs: number;
   private readonly stableWaitCapMs: number;
+  private readonly automationEventDrainMs: number;
   private readonly readStructure: () => Promise<PageStructure>;
   private taskId: string | undefined;
   private changeTimer: NodeJS.Timeout | undefined;
@@ -137,6 +140,7 @@ export class ActivityMonitor {
     this.settleMs = options.settleMs ?? DEFAULT_SETTLE_MS;
     this.sampleMs = options.sampleMs ?? DEFAULT_SAMPLE_MS;
     this.stableWaitCapMs = options.stableWaitCapMs ?? DEFAULT_STABLE_WAIT_CAP_MS;
+    this.automationEventDrainMs = options.automationEventDrainMs ?? DEFAULT_AUTOMATION_EVENT_DRAIN_MS;
     if (!options.readStructure) throw new Error("ActivityMonitor requires a read-only page structure reader");
     this.readStructure = options.readStructure;
   }
@@ -167,6 +171,7 @@ export class ActivityMonitor {
     try {
       return await operation();
     } finally {
+      await delay(this.automationEventDrainMs);
       await this.setPageAutomationDepth(-1);
       this.automationDepth = Math.max(0, this.automationDepth - 1);
     }

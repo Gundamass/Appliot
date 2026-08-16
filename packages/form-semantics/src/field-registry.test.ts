@@ -29,6 +29,9 @@ describe("字段注册表确定性映射", () => {
     expect(definition("work[].employmentType")?.profileOptions).toContain("实习");
     expect(definition("work[].description")?.profileControl).toBe("textarea");
     expect(definition("awards[].level")?.profileOptions).toContain("国家级");
+    expect(definition("campus[].startDate")?.profileControl).toBe("date");
+    expect(definition("campus[].endDate")?.profileControl).toBe("date");
+    expect(definition("campus[].highlights[0]")?.profileRequired).toBe(false);
   });
 
   it("注册国内 ATS 通用补充字段并使用正确档案控件", () => {
@@ -122,8 +125,43 @@ describe("字段注册表确定性映射", () => {
       "campus",
       "awards",
       "publications",
+      "languages",
       "certificates",
       "self"
+    ]);
+  });
+
+  it("注册可重复的语言能力档案字段", () => {
+    expect(PROFILE_SECTION_DEFINITIONS).toContainEqual({ id: "languages", label: "语言能力", repeatable: true });
+    expect(FIELD_DEFINITIONS
+      .filter((field) => field.sections.includes("languages"))
+      .map((field) => field.semantic)).toEqual([
+      "languages[].name",
+      "languages[].proficiency",
+      "languages[].speakingListening",
+      "languages[].readingWriting"
+    ]);
+    expect(definition("languages[].name")?.profileControl).toBe("suggestion");
+    expect(definition("languages[].readingWriting")?.profileControl).toBe("suggestion");
+    expect(profileSectionFor("languages[0].proficiency")).toBe("languages");
+  });
+
+  it("注册全部岗位期望字段并保留旧地点路径读取兼容", () => {
+    const expected = [
+      "preferences.targetRole",
+      "preferences.targetCity",
+      "preferences.employmentType",
+      "preferences.industry",
+      "preferences.workMode",
+      "preferences.salary"
+    ];
+
+    for (const semantic of expected) {
+      expect(definition(semantic)).toMatchObject({ sections: ["preferences"] });
+    }
+    expect(semanticLookupPaths("preferences.targetCity")).toEqual([
+      "preferences.targetCity",
+      "preferences.location"
     ]);
   });
 

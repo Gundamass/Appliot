@@ -29,6 +29,7 @@ export const connectTaskEvents: TaskEventConnection = (taskId, handlers) => {
   };
   source.addEventListener("open", handlers.onOpen);
   source.addEventListener("state_changed", taskEvent);
+  source.addEventListener("execution_progress_changed", taskEvent);
   source.addEventListener("browser_activity", taskEvent);
   source.addEventListener("operation_started", taskEvent);
   source.addEventListener("operation_completed", taskEvent);

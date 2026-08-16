@@ -32,12 +32,27 @@ function api(): Pick<ApplicationApi, "create"> {
 }
 
 describe("ApplicationStartPanel", () => {
+  it("prefills a redirected application URL without creating a task", () => {
+    const create = vi.fn();
+
+    render(<ApplicationStartPanel
+      profileCompleteness={complete}
+      applicationApi={{ create }}
+      initialApplicationUrl="https://jobs.example/apply"
+      onTaskCreated={vi.fn()}
+    />);
+
+    expect(screen.getByLabelText("投递官网链接")).toHaveValue("https://jobs.example/apply");
+    expect(create).not.toHaveBeenCalled();
+  });
+
   it("shows relevant missing profile fields before creating a task", async () => {
     const user = userEvent.setup();
     const onViewChange = vi.fn();
     render(<ApplicationStartPanel profileCompleteness={missingPreferences} applicationApi={api()} onTaskCreated={vi.fn()} onViewChange={onViewChange} />);
 
     expect(screen.getByText("期望工作地点")).toBeVisible();
+    expect(screen.queryByText(/自动申请|最终提交/u)).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: "补全档案" }));
     expect(onViewChange).toHaveBeenCalledWith("profile");
   });

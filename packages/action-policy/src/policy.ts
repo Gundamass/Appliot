@@ -1,5 +1,5 @@
 import { createHmac, randomUUID, timingSafeEqual } from "node:crypto";
-import type { ExecutableCommand, FormSnapshot } from "@resume/contracts";
+import { NodeRefSchema, type ExecutableCommand, type FormSnapshot, type NodeRef } from "@resume/contracts";
 import type { ApprovalStore } from "./approval-store.js";
 
 export type ApprovalOperation = ExecutableCommand["type"];
@@ -9,6 +9,8 @@ export interface ApprovalRequest {
   snapshotId: string;
   targetId: string;
   operation: ApprovalOperation;
+  nodeRef: NodeRef;
+  executionEpoch: number;
 }
 
 export interface ActionApproval extends ApprovalRequest {
@@ -57,6 +59,8 @@ export class ActionPolicy {
       snapshotId: request.snapshotId,
       targetId: request.targetId,
       operation: request.operation,
+      nodeRef: request.nodeRef,
+      executionEpoch: request.executionEpoch,
       expiresAt: this.now() + this.ttlMs
     };
     return {
@@ -80,6 +84,14 @@ export function verifyAndConsumeApproval(
   if (payload.snapshotId !== command.snapshotId) throw new PolicyDeniedError("approval_snapshot_mismatch");
   if (payload.targetId !== expected.targetId) throw new PolicyDeniedError("approval_target_mismatch");
   if (payload.operation !== expected.operation) throw new PolicyDeniedError("approval_operation_mismatch");
+  if (payload.nodeRef.documentId !== command.nodeRef.documentId
+    || payload.nodeRef.nodeId !== command.nodeRef.nodeId
+    || payload.nodeRef.observedAt !== command.nodeRef.observedAt) {
+    throw new PolicyDeniedError("approval_node_mismatch");
+  }
+  if (payload.executionEpoch !== command.executionEpoch) {
+    throw new PolicyDeniedError("approval_execution_epoch_mismatch");
+  }
   if (payload.expiresAt < (options.now ?? Date.now)()) throw new PolicyDeniedError("approval_expired");
   if (!store.consume(payload.id)) throw new PolicyDeniedError("approval_replayed");
   return payload;
@@ -146,9 +158,13 @@ function decodeAndVerifyToken(token: string, key: Uint8Array): ApprovalPayload {
       || typeof payload.snapshotId !== "string"
       || typeof payload.targetId !== "string"
       || !["fill", "select", "upload", "click_intermediate"].includes(payload.operation ?? "")
+      || !Number.isInteger(payload.executionEpoch) || (payload.executionEpoch ?? -1) < 0
       || typeof payload.expiresAt !== "number"
     ) throw new Error("invalid payload");
-    return payload as ApprovalPayload;
+    return {
+      ...payload,
+      nodeRef: NodeRefSchema.parse(payload.nodeRef)
+    } as ApprovalPayload;
   } catch {
     throw new PolicyDeniedError("approval_malformed");
   }

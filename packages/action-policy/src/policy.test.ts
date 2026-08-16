@@ -4,6 +4,16 @@ import { ApprovalStore } from "./approval-store.js";
 import { ActionPolicy, PolicyDeniedError, verifyAndConsumeApproval } from "./policy.js";
 
 const key = Buffer.alloc(32, 7);
+const fieldNodeRef = {
+  documentId: "document-00000001",
+  nodeId: "node-000000000001",
+  observedAt: 7
+};
+const actionNodeRef = {
+  documentId: "document-00000001",
+  nodeId: "node-000000000002",
+  observedAt: 7
+};
 
 function snapshot(actionClass: FormSnapshot["actions"][number]["class"] = "intermediate_navigation"): FormSnapshot {
   return {
@@ -12,15 +22,18 @@ function snapshot(actionClass: FormSnapshot["actions"][number]["class"] = "inter
     url: "https://ats.example.test/application",
     title: "招聘申请",
     stage: actionClass === "terminal_submit" ? "review" : "application_form",
+    frameRef: { documentId: fieldNodeRef.documentId, kind: "main" },
+    mutationEpoch: fieldNodeRef.observedAt,
     fields: [{
       id: "field-email",
       label: "邮箱",
       type: "text",
       required: true,
       options: [],
-      currentValue: ""
+      currentValue: "",
+      nodeRef: fieldNodeRef
     }],
-    actions: [{ id: "action-next", text: "下一步", class: actionClass }],
+    actions: [{ id: "action-next", text: "下一步", class: actionClass, nodeRef: actionNodeRef }],
     errors: []
   };
 }
@@ -33,7 +46,9 @@ describe("action policy", () => {
         taskId: "task-1",
         snapshotId: "snapshot-1",
         targetId: "action-next",
-        operation: "click_intermediate"
+        operation: "click_intermediate",
+        nodeRef: actionNodeRef,
+        executionEpoch: 11
       }, snapshot(actionClass), { valid: true })).toThrow(PolicyDeniedError);
     }
   });
@@ -44,7 +59,9 @@ describe("action policy", () => {
       taskId: "task-1",
       snapshotId: "snapshot-1",
       targetId: "action-next",
-      operation: "click_intermediate" as const
+      operation: "click_intermediate" as const,
+      nodeRef: actionNodeRef,
+      executionEpoch: 11
     };
 
     expect(() => policy.approve(request, snapshot(), { valid: false })).toThrow("page_not_valid");
@@ -64,13 +81,17 @@ describe("action policy", () => {
       taskId: "task-1",
       snapshotId: "snapshot-1",
       targetId: "field-email",
-      operation: "fill"
+      operation: "fill",
+      nodeRef: fieldNodeRef,
+      executionEpoch: 11
     }, snapshot());
     const command: ExecutableCommand = {
       type: "fill",
       taskId: "task-1",
       snapshotId: "snapshot-1",
       fieldId: "field-email",
+      nodeRef: fieldNodeRef,
+      executionEpoch: 11,
       value: "me@example.com",
       approval: approval.token
     };
@@ -85,19 +106,63 @@ describe("action policy", () => {
     expect(() => verifyAndConsumeApproval(command, key, new ApprovalStore(), { now: () => now })).toThrow("approval_expired");
   });
 
-  it("rejects a tampered approval signature", () => {
+  it("rejects approvals rebound to another node or execution epoch without consuming the original", () => {
     const policy = new ActionPolicy(key);
     const approval = policy.approve({
       taskId: "task-1",
       snapshotId: "snapshot-1",
       targetId: "field-email",
-      operation: "fill"
+      operation: "fill",
+      nodeRef: fieldNodeRef,
+      executionEpoch: 11
     }, snapshot());
     const command: ExecutableCommand = {
       type: "fill",
       taskId: "task-1",
       snapshotId: "snapshot-1",
       fieldId: "field-email",
+      nodeRef: fieldNodeRef,
+      executionEpoch: 11,
+      value: "me@example.com",
+      approval: approval.token
+    };
+    const store = new ApprovalStore();
+
+    expect(() => verifyAndConsumeApproval({
+      ...command,
+      nodeRef: { ...fieldNodeRef, nodeId: "node-000000000099" }
+    }, key, store)).toThrow("approval_node_mismatch");
+    expect(() => verifyAndConsumeApproval({
+      ...command,
+      nodeRef: { ...fieldNodeRef, observedAt: fieldNodeRef.observedAt + 1 }
+    }, key, store)).toThrow("approval_node_mismatch");
+    expect(() => verifyAndConsumeApproval({
+      ...command,
+      executionEpoch: command.executionEpoch + 1
+    }, key, store)).toThrow("approval_execution_epoch_mismatch");
+    expect(verifyAndConsumeApproval(command, key, store)).toMatchObject({
+      nodeRef: fieldNodeRef,
+      executionEpoch: 11
+    });
+  });
+
+  it("rejects a tampered approval signature", () => {
+    const policy = new ActionPolicy(key);
+    const approval = policy.approve({
+      taskId: "task-1",
+      snapshotId: "snapshot-1",
+      targetId: "field-email",
+      operation: "fill",
+      nodeRef: fieldNodeRef,
+      executionEpoch: 11
+    }, snapshot());
+    const command: ExecutableCommand = {
+      type: "fill",
+      taskId: "task-1",
+      snapshotId: "snapshot-1",
+      fieldId: "field-email",
+      nodeRef: fieldNodeRef,
+      executionEpoch: 11,
       value: "me@example.com",
       approval: (() => {
         const separator = approval.token.indexOf(".");

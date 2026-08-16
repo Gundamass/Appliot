@@ -9,7 +9,7 @@ const viewports = [
   { name: "mobile", width: 320, height: 800 }
 ] as const;
 
-const stages = ["确定性填写", "语义补全", "动态校验", "等待审核"] as const;
+const stages = ["等待表单", "确定性填写", "语义补全", "回读校验", "最终审核"] as const;
 const terminalButtonName = /^(?:提交(?:申请|简历)?|投递(?:申请|简历)?|发送(?:申请|简历)?|确认(?:申请|投递)|确认并(?:提交|投递)|完成申请|立即申请|预览并提交)$/u;
 
 let server: ViteDevServer;
@@ -80,6 +80,14 @@ for (const viewport of viewports) {
     for (const stage of stages) {
       await expect(page.getByText(stage, { exact: true })).toBeVisible();
     }
+    await expect(page.getByText("尝试 1/2", { exact: true })).toBeVisible();
+    await expect(page.getByLabel("填写统计")).toContainText("精确 5");
+    await expect(page.getByLabel("填写统计")).toContainText("语义 2");
+    const fieldDetails = page.getByLabel("查看填写明细");
+    await expect(fieldDetails).toBeVisible();
+    await expect(fieldDetails).not.toHaveAttribute("open");
+    await fieldDetails.locator("summary").click();
+    await expect(page.getByRole("heading", { name: "字段填写明细" })).toBeVisible();
     await expect(page.getByText("风险聚焦", { exact: true })).toBeVisible();
     await expect(page.getByRole("heading", { name: "需要你处理" })).toBeVisible();
     await expect(page.locator(".task-attention-list").getByRole("button", { name: /可入职时间/u })).toBeVisible();
@@ -107,6 +115,49 @@ async function mockTask(page: Page): Promise<void> {
       id: taskId,
       applicationUrl: "https://career.example.com/jobs/42",
       state: "needs_questions",
+      executionProgress: {
+        currentPhase: "semantic_fill",
+        phases: [
+          { phase: "waiting_for_form", status: "completed" },
+          { phase: "deterministic_fill", status: "completed" },
+          { phase: "semantic_fill", status: "running" },
+          { phase: "readback_validation", status: "pending" },
+          { phase: "final_review", status: "pending" }
+        ],
+        current: { action: "正在选择：本科专业", fieldId: "major", attempt: 1, maxAttempts: 2 },
+        counts: { exact: 5, semantic: 2, user: 1, missing: 1, failed: 0 }
+      },
+      fieldCoverage: {
+        total: 2,
+        ready: 0,
+        review: 1,
+        missing: 0,
+        failed: 0,
+        unsupported: 0,
+        filled: 1,
+        fields: [
+          {
+            fieldId: "name",
+            label: "姓名",
+            semantic: "basics.name",
+            status: "filled",
+            source: "exact",
+            confidence: 1,
+            reason: "页面回读确认填写成功",
+            evidence: []
+          },
+          {
+            fieldId: "major",
+            label: "本科专业",
+            semantic: "education[0].major",
+            status: "review",
+            source: "semantic",
+            confidence: 0.86,
+            reason: "语义匹配后等待最终审核",
+            evidence: []
+          }
+        ]
+      },
       commands: ["cancel", "open_browser", "answer_questions"],
       questions: [
         {

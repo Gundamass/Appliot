@@ -1,10 +1,17 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
-import type { FormField, FormSnapshot, ProfileFact, WorkerActivity } from "@resume/contracts";
+import type { FormField, FormSnapshot, JobPageSnapshot, ProfileFact, WorkerActivity } from "@resume/contracts";
 import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
 import type { FieldSemanticResolver } from "./applications/field-semantic-resolver.js";
 import { loadConfig } from "./config.js";
 import { createApp } from "./app.js";
+const fixtureNodeRef = {
+  documentId: "document-fixture-00000001",
+  nodeId: "node-fixture-000000000001",
+  observedAt: 7
+};
+
+
 
 const fakes = vi.hoisted(() => ({
   databases: [] as Array<{ closeCalls: number }>,
@@ -62,6 +69,64 @@ function fullConfig() {
 }
 
 describe("production dependency composition", () => {
+  it("composes job matching from confirmed knowledge-base expectations with the shared browser lease", async () => {
+    const browserClient = productionBrowserClient();
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient
+    });
+    const preferences = [
+      confirmedProfileFact("preferences.targetRole", "Java Tech Lead"),
+      confirmedProfileFact("preferences.location", "Legacy City"),
+      confirmedProfileFact("preferences.targetCity", "Shanghai"),
+      confirmedProfileFact("preferences.employmentType", "Full-time"),
+      confirmedProfileFact("preferences.industry", "Software"),
+      confirmedProfileFact("preferences.workMode", "Hybrid"),
+      confirmedProfileFact("preferences.salary", "30k-40k")
+    ];
+    for (const preference of preferences) {
+      dependencies.profileRepository.createExtracted({ ...preference, status: "extracted" });
+      dependencies.profileRepository.confirm(preference.id);
+    }
+
+    const created = await dependencies.jobMatchService.create({ url: "https://acme.mokahr.com/jobs" });
+    expect(created).toMatchObject({
+      version: 0,
+      state: "awaiting_filter_confirmation",
+      expectation: {
+        criteria: [
+          { kind: "target_role", values: ["Java Tech Lead"], strength: "required" },
+          { kind: "location", values: ["Shanghai"], strength: "required" },
+          { kind: "employment_type", values: ["Full-time"], strength: "required" },
+          { kind: "industry", values: ["Software"], strength: "required" },
+          { kind: "work_mode", values: ["Hybrid"], strength: "required" },
+          { kind: "salary", values: ["30k-40k"], strength: "required" }
+        ]
+      }
+    });
+    expect(dependencies.jobMatchRepository).toBeDefined();
+    expect(dependencies.jobMatchTrace.snapshot()).toEqual(expect.any(Array));
+
+    const taskId = "53288af7-7fcc-4624-861e-aa764ef65ec8";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+    await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("browser_task_in_use");
+    expect(browserClient.execute).not.toHaveBeenCalled();
+    await dependencies.close?.();
+  });
+
+  it("shares one browser ownership lease with the application service", async () => {
+    const browserClient = productionBrowserClient();
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient
+    });
+    dependencies.browserOwnershipLease.acquire({ ownerKind: "job_match", ownerId: "jm-1" });
+    const taskId = "53288af7-7fcc-4624-861e-aa764ef65ec8";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+
+    await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("browser_task_in_use");
+    expect(browserClient.open).not.toHaveBeenCalled();
+    await dependencies.close?.();
+  });
+
   beforeEach(() => {
     vi.clearAllMocks();
     fakes.databases.splice(0);
@@ -79,6 +144,99 @@ describe("production dependency composition", () => {
     expect(dependencies.adapterHealth).toBeDefined();
     expect(fetch).not.toHaveBeenCalled();
     dependencies.close?.();
+  });
+
+  it("shares one scheduled embedding provider across ontology resolution and Fact synchronization", async () => {
+    let releaseFirstRequest!: () => void;
+    const firstRequest = new Promise<void>((resolve) => {
+      releaseFirstRequest = resolve;
+    });
+    const requestSizes: number[] = [];
+    let activeRequests = 0;
+    let maximumActiveRequests = 0;
+    const unitVector = [1, ...Array.from({ length: 4_095 }, () => 0)];
+    const fetch = vi.fn(async (_url: string | URL | Request, init?: RequestInit) => {
+      activeRequests += 1;
+      maximumActiveRequests = Math.max(maximumActiveRequests, activeRequests);
+      try {
+        const body = JSON.parse(String(init?.body)) as { input: string[] };
+        requestSizes.push(body.input.length);
+        if (requestSizes.length === 1) await firstRequest;
+        return new Response(JSON.stringify({
+          model: "Qwen/Qwen3-Embedding-8B",
+          modelRevision: QWEN_REVISION,
+          dimensions: 4_096,
+          data: body.input.map((_text, index) => ({ index, embedding: unitVector }))
+        }), { status: 200, headers: { "Content-Type": "application/json" } });
+      } finally {
+        activeRequests -= 1;
+      }
+    });
+    const dependencies = createProductionDependencies(loadConfig({
+      DATABASE_FILE: ":memory:",
+      EMBEDDING_BASE_URL: "http://127.0.0.1:18080",
+      EMBEDDING_API_TOKEN: "embedding-test-token",
+      EMBEDDING_MODEL: "Qwen/Qwen3-Embedding-8B",
+      EMBEDDING_MODEL_REVISION: QWEN_REVISION,
+      EMBEDDING_DIMENSIONS: "4096"
+    }), { fetch: fetch as typeof globalThis.fetch, browserClient: productionBrowserClient() });
+    const profileFact = confirmedProfileFact("basics.name", "候选人事实文本");
+    dependencies.profileRepository.createExtracted({ ...profileFact, status: "extracted" });
+    dependencies.profileRepository.confirm(profileFact.id);
+    const taskId = "7b12f6d4-2935-46d3-ae66-2b75e75a9514";
+    dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+    const form: FormSnapshot = {
+      frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" },
+      mutationEpoch: fixtureNodeRef.observedAt,
+      id: "snapshot-embedding",
+      taskId,
+      url: "https://jobs.example.test/apply",
+      title: "Application",
+      stage: "application_form",
+      fields: ["赛事字段甲", "赛事字段乙"].map((label, index) => ({
+        nodeRef: { ...fixtureNodeRef, nodeId: `${fixtureNodeRef.nodeId}-${index}` },
+        id: `field-${index}`,
+        label,
+        type: "text" as const,
+        required: true,
+        options: [],
+        currentValue: "",
+        sectionHint: "awards" as const,
+        semanticHint: "awards[0]"
+      })),
+      actions: [],
+      errors: []
+    };
+
+    const applicationRun = dependencies.applicationService!.runUntilPause(taskId, form);
+    await vi.waitFor(() => expect(fetch).toHaveBeenCalledTimes(1));
+    const factSearch = dependencies.embeddingSearch!.search({
+      query: "事实查询文本",
+      taskId,
+      limit: 5
+    });
+    releaseFirstRequest();
+
+    await expect(Promise.all([applicationRun, factSearch])).resolves.toBeDefined();
+    expect(requestSizes.slice(0, 3)).toEqual([32, 32, 22]);
+    expect(maximumActiveRequests).toBe(1);
+    const trace = dependencies.embeddingTrace.snapshot();
+    expect(trace).toEqual(expect.arrayContaining([
+      expect.objectContaining({ operation: "ontology_build", cacheKeyHash: expect.stringMatching(/^[a-f0-9]{64}$/u) }),
+      expect.objectContaining({ operation: "fact_build", cacheKeyHash: expect.stringMatching(/^[a-f0-9]{64}$/u) }),
+      expect.objectContaining({ operation: "semantic_resolution", deepSeekUsed: false })
+    ]));
+    const serializedTrace = JSON.stringify(trace);
+    for (const sensitive of [
+      "赛事字段甲",
+      "赛事字段乙",
+      "候选人事实文本",
+      "事实查询文本",
+      "embedding-test-token"
+    ]) {
+      expect(serializedTrace).not.toContain(sensitive);
+    }
+    await dependencies.close?.();
   });
 
   it("composes an unconfigured degraded app instead of throwing", () => {
@@ -111,6 +269,69 @@ describe("production dependency composition", () => {
     expect(ragService.resolveField).not.toHaveBeenCalled();
   });
 
+  it.each([
+    ["languages", "languages[0]", "languages"],
+    ["internship", "work[2]", "work"],
+    ["work_combined", "work[1]", "work"]
+  ] as const)("maps page section %s into profile semantic context", async (sectionHint, semanticHint, section) => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({ status: "unresolved" as const, reason: "exact_match_not_found" as const }))
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService: { resolveField: vi.fn() },
+      profileRepository: { resolveForTask: vi.fn() }
+    });
+
+    await resolveField("task-1", applicationField("待识别字段", {
+      sectionHint,
+      semanticHint
+    }), "deterministic");
+
+    expect(semanticResolver.resolve).toHaveBeenCalledWith(
+      expect.anything(),
+      { section, entryContext: semanticHint },
+      "deterministic"
+    );
+  });
+
+  it("keeps a missing project highlight empty instead of asking RAG to invent it", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "projects[0].highlights[0]",
+        source: "exact_alias" as const,
+        confidence: 1
+      }))
+    };
+    const ragService = {
+      resolveField: vi.fn(async () => ({
+        fieldId: "field-1",
+        status: "verified_auto" as const,
+        value: "模型生成的项目亮点",
+        evidence: [],
+        confidence: 1,
+        validators: []
+      }))
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService,
+      profileRepository: { resolveForTask: vi.fn(() => undefined) }
+    });
+
+    await expect(resolveField("task-1", applicationField("项目亮点", {
+      semanticHint: "projects[0].highlights[0]",
+      sectionHint: "projects",
+      required: false
+    }), "deterministic")).resolves.toMatchObject({
+      status: "needs_question",
+      fieldPath: "projects[0].highlights[0]",
+      assessment: { status: "missing", source: "none" }
+    });
+    expect(ragService.resolveField).not.toHaveBeenCalled();
+  });
+
   it("passes a semantic match into profile RAG using its canonical path", async () => {
     const semanticResolver: FieldSemanticResolver = {
       resolve: vi.fn(async () => ({
@@ -133,7 +354,9 @@ describe("production dependency composition", () => {
     const resolveField = createProductionFieldResolver({
       semanticResolver,
       ragService,
-      profileRepository: { resolveForTask: vi.fn() }
+      profileRepository: {
+        resolveForTask: vi.fn(() => confirmedProfileFact("education[0].enrollmentType", "统招"))
+      }
     });
     const field = applicationField("培养方式", {
       type: "select",
@@ -208,7 +431,12 @@ describe("production dependency composition", () => {
     const resolveField = createProductionFieldResolver({
       semanticResolver,
       ragService,
-      profileRepository: { resolveForTask: vi.fn() }
+      profileRepository: {
+        resolveForTask: vi.fn(() => confirmedProfileFact(
+          "education[0].institution",
+          "Hefei University of Technology"
+        ))
+      }
     });
     const field = applicationField("Which university did you attend?", {
       type: "select",
@@ -227,6 +455,128 @@ describe("production dependency composition", () => {
       semantic: "education[0].institution"
     }));
     expect(ragService.resolveField.mock.calls[0]?.[0]).not.toHaveProperty("options");
+  });
+
+  it("validates an empty-option custom search select as profile text", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "awards[0].name",
+        source: "embedding" as const,
+        confidence: 0.96
+      }))
+    };
+    const ragService = {
+      resolveField: vi.fn(async (_input: { fieldId: string }) => ({
+        fieldId: "field-1",
+        status: "verified_auto" as const,
+        value: "ACM Competition",
+        evidence: [],
+        confidence: 1,
+        validators: []
+      }))
+    };
+    const resolveField = createProductionFieldResolver({
+      semanticResolver,
+      ragService,
+      profileRepository: {
+        resolveForTask: vi.fn(() => confirmedProfileFact("awards[0].name", "ACM Competition"))
+      }
+    });
+
+    await expect(resolveField("task-1", applicationField("Competition name", {
+      type: "select",
+      options: [],
+      controlKind: "custom",
+      interactionMode: "search",
+      semanticHint: "awards[0]"
+    }), "semantic")).resolves.toMatchObject({
+      status: "verified",
+      value: "ACM Competition",
+      fieldPath: "awards[0].name"
+    });
+    expect(ragService.resolveField).toHaveBeenCalledWith(expect.objectContaining({
+      type: "text",
+      semantic: "awards[0].name"
+    }));
+    expect(ragService.resolveField.mock.calls[0]?.[0]).not.toHaveProperty("options");
+  });
+
+  it("derives a positive laboratory answer from a confirmed laboratory name", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "education[0].hasLaboratory",
+        source: "exact_alias" as const,
+        confidence: 1
+      }))
+    };
+    const laboratoryFact: ProfileFact = {
+      id: "laboratory-fact",
+      fieldPath: "education[0].laboratory",
+      value: "Robotics Laboratory",
+      status: "user_confirmed",
+      confidence: 1,
+      scope: "profile",
+      evidence: [{ documentId: "user", page: 1, text: "Robotics Laboratory", extraction: "user" }],
+      revision: 1
+    };
+    const profileRepository = {
+      resolveForTask: vi.fn((_taskId: string, semantic: string) =>
+        semantic === "education[0].laboratory" ? laboratoryFact : undefined)
+    };
+    const ragService = { resolveField: vi.fn() };
+    const resolveField = createProductionFieldResolver({ semanticResolver, ragService, profileRepository });
+
+    await expect(resolveField("task-1", applicationField("Has laboratory experience", {
+      type: "select",
+      options: ["Yes", "No"],
+      semanticHint: "education[0].hasLaboratory"
+    }), "deterministic")).resolves.toMatchObject({
+      status: "verified",
+      value: "Yes",
+      fieldPath: "education[0].hasLaboratory",
+      assessment: { status: "ready", source: "exact" }
+    });
+    expect(ragService.resolveField).not.toHaveBeenCalled();
+  });
+
+  it("derives a negative laboratory answer from an explicit negative profile value", async () => {
+    const semanticResolver: FieldSemanticResolver = {
+      resolve: vi.fn(async () => ({
+        status: "mapped" as const,
+        semantic: "education[1].hasLaboratory",
+        source: "exact_alias" as const,
+        confidence: 1
+      }))
+    };
+    const laboratoryFact: ProfileFact = {
+      id: "negative-laboratory-fact",
+      fieldPath: "education[1].laboratory",
+      value: "无",
+      status: "user_corrected",
+      confidence: 1,
+      scope: "profile",
+      evidence: [{ documentId: "user", page: 1, text: "无", extraction: "user" }],
+      revision: 1
+    };
+    const profileRepository = {
+      resolveForTask: vi.fn((_taskId: string, semantic: string) =>
+        semantic === "education[1].laboratory" ? laboratoryFact : undefined)
+    };
+    const ragService = { resolveField: vi.fn() };
+    const resolveField = createProductionFieldResolver({ semanticResolver, ragService, profileRepository });
+
+    await expect(resolveField("task-1", applicationField("是否有实验室经历", {
+      type: "select",
+      options: ["Yes", "No"],
+      semanticHint: "education[1].hasLaboratory"
+    }), "deterministic")).resolves.toMatchObject({
+      status: "verified",
+      value: "No",
+      fieldPath: "education[1].hasLaboratory"
+    });
+    expect(ragService.resolveField).not.toHaveBeenCalled();
   });
 
   it("projects canonical profile dates into explicit year and month controls", async () => {
@@ -251,7 +601,9 @@ describe("production dependency composition", () => {
     const resolveField = createProductionFieldResolver({
       semanticResolver,
       ragService,
-      profileRepository: { resolveForTask: vi.fn() }
+      profileRepository: {
+        resolveForTask: vi.fn((_taskId, fieldPath) => confirmedProfileFact(fieldPath, "2026-04-12"))
+      }
     });
 
     await expect(resolveField("task-1", applicationField("开始时间 年", { id: "year" })))
@@ -304,7 +656,9 @@ describe("production dependency composition", () => {
     const resolveField = createProductionFieldResolver({
       semanticResolver,
       ragService,
-      profileRepository: { resolveForTask: vi.fn() }
+      profileRepository: {
+        resolveForTask: vi.fn(() => confirmedProfileFact("awards[0].date", "2026-04-12"))
+      }
     });
     const field = applicationField("起止时间 月", {
       id: "award-month",
@@ -432,7 +786,9 @@ describe("production dependency composition", () => {
     const resolveField = createProductionFieldResolver({
       semanticResolver,
       ragService,
-      profileRepository: { resolveForTask: vi.fn() }
+      profileRepository: {
+        resolveForTask: vi.fn(() => confirmedProfileFact("education[0].institution", "Test University"))
+      }
     });
     const field = applicationField("School", {
       semanticHint: "education[0].institution",
@@ -612,7 +968,9 @@ describe("production dependency composition", () => {
           validators: []
         }))
       },
-      profileRepository: { resolveForTask: vi.fn() }
+      profileRepository: {
+        resolveForTask: vi.fn(() => confirmedProfileFact("basics.phone", "13800000000"))
+      }
     });
     await expect(reviewResolver("task-1", applicationField("Phone"), "deterministic")).resolves.toMatchObject({
       assessment: { status: "review", confidence: 0.89 }
@@ -674,7 +1032,7 @@ describe("production dependency composition", () => {
     }));
     const observe = vi.fn(async (taskId: string) => ({
       type: "snapshot" as const,
-      snapshot: {
+      snapshot: {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
         id: "snapshot-login",
         taskId,
         url: "https://jobs.example.test/apply",
@@ -712,7 +1070,7 @@ describe("production dependency composition", () => {
       })),
       observe: vi.fn(async (taskId: string) => ({
         type: "snapshot" as const,
-        snapshot: {
+        snapshot: {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
           id: "snapshot-login", taskId, url: "https://jobs.example.test/apply",
           title: "Login", stage: "login" as const, fields: [], actions: [], errors: []
         }
@@ -841,7 +1199,7 @@ describe("production dependency composition", () => {
     await dependencies.close?.();
   });
 
-  it("does not restore the first-open retry after a failed task release", async () => {
+  it("does not restore the first-open retry when failed task cleanup is isolated", async () => {
     const first = productionBrowserClient({
       releaseTask: vi.fn(async () => { throw new Error("release failure"); }),
       stop: vi.fn(async () => { throw new Error("stop failure"); })
@@ -861,7 +1219,7 @@ describe("production dependency composition", () => {
     const taskId = "ade7d2bd-0b36-4678-b06b-775595c2485a";
     dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
     await dependencies.applicationService!.openBrowser(taskId);
-    await expect(dependencies.applicationService!.cancel(taskId)).rejects.toThrow("stop failure");
+    await expect(dependencies.applicationService!.cancel(taskId)).resolves.toBeUndefined();
 
     await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("later open failure");
 
@@ -991,13 +1349,13 @@ describe("production dependency composition", () => {
     dependencies.profileRepository.confirm("self-evaluation");
     const taskId = "ac278692-dcf5-4682-8581-50d344023f5a";
     dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
-    const form: FormSnapshot = {
+    const form: FormSnapshot = {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
       id: "snapshot-form",
       taskId,
       url: "https://jobs.example.test/apply",
       title: "Application",
       stage: "application_form",
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "self",
         label: "自我评价",
         type: "textarea",
@@ -1025,13 +1383,13 @@ describe("production dependency composition", () => {
 
   it("reviews a profile self-evaluation once and fills the approved task value", async () => {
     const executedValues: unknown[] = [];
-    const formFor = (taskId: string, id: string, value = ""): FormSnapshot => ({
+    const formFor = (taskId: string, id: string, value = ""): FormSnapshot => ({frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
       id,
       taskId,
       url: "https://jobs.example.test/apply",
       title: "Application",
       stage: "application_form" as const,
-      fields: [{
+      fields: [{ nodeRef: fixtureNodeRef, 
         id: "self",
         label: "自我评价",
         type: "textarea" as const,
@@ -1040,7 +1398,7 @@ describe("production dependency composition", () => {
         currentValue: value,
         semanticHint: "selfEvaluation"
       }],
-      actions: [{ id: "next", text: "下一步", class: "intermediate_navigation" as const }],
+      actions: [{ nodeRef: fixtureNodeRef, id: "next", text: "下一步", class: "intermediate_navigation" as const }],
       errors: []
     });
     let taskId = "";
@@ -1061,7 +1419,7 @@ describe("production dependency composition", () => {
             ...formFor(command.taskId, "review"),
             stage: "review" as const,
             fields: [],
-            actions: [{ id: "submit", text: "提交申请", class: "terminal_submit" as const }]
+            actions: [{ nodeRef: fixtureNodeRef, id: "submit", text: "提交申请", class: "terminal_submit" as const }]
           };
         }
         return {
@@ -1151,7 +1509,7 @@ function applicationField(
   label: string,
   overrides: Partial<FormField> = {}
 ): FormField {
-  return {
+  return {nodeRef: fixtureNodeRef, 
     id: "field-1",
     label,
     type: "text",
@@ -1162,12 +1520,43 @@ function applicationField(
   };
 }
 
+function confirmedProfileFact(fieldPath: string, value: ProfileFact["value"]): ProfileFact {
+  return {
+    id: `fact-${fieldPath}`,
+    fieldPath,
+    value,
+    status: "user_confirmed",
+    confidence: 1,
+    scope: "profile",
+    evidence: [{
+      documentId: "user",
+      page: 1,
+      text: typeof value === "string" ? value : JSON.stringify(value),
+      extraction: "user"
+    }],
+    revision: 1
+  };
+}
+
 function productionBrowserClient(overrides: Record<string, unknown> = {}) {
+  const jobSnapshot = (ownerId: string): JobPageSnapshot => ({
+    id: `job-snapshot-${ownerId}`,
+    ownerId,
+    url: "https://acme.mokahr.com/jobs",
+    title: "Jobs",
+    capturedAt: "2026-08-16T00:00:00.000Z",
+    entryHint: "job_list",
+    visibleText: [],
+    jobCards: [],
+    filterState: [],
+    pagination: { kind: "none", hasNext: false },
+    boundaries: []
+  });
   return {
     open: vi.fn(async (taskId: string, url: string) => ({ type: "opened" as const, taskId, url, title: "Jobs" })),
     observe: vi.fn(async (taskId: string) => ({
       type: "snapshot" as const,
-      snapshot: {
+      snapshot: {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
         id: `snapshot-${taskId}`,
         taskId,
         url: "https://jobs.example.test/apply",
@@ -1177,6 +1566,9 @@ function productionBrowserClient(overrides: Record<string, unknown> = {}) {
       }
     })),
     execute: vi.fn(),
+    observeJob: vi.fn(async (ownerId: string) => jobSnapshot(ownerId)),
+    applyJobFilters: vi.fn(async (ownerId: string) => jobSnapshot(ownerId)),
+    advanceJobPage: vi.fn(async (ownerId: string) => jobSnapshot(ownerId)),
     invalidateExecution: vi.fn(async () => undefined),
     releaseTask: vi.fn(async () => undefined),
     onActivity: vi.fn(() => vi.fn()),

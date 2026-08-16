@@ -16,6 +16,7 @@
     "@resume/action-policy": "workspace:*",
     "@resume/contracts": "workspace:*",
     "@resume/form-semantics": "workspace:*",
+    "@resume/job-matching": "workspace:*",
     "@resume/model-provider": "workspace:*",
     "@resume/profile-domain": "workspace:*",
     "@resume/rag": "workspace:*",

@@ -164,6 +164,53 @@ describe("ActivityMonitor", () => {
     monitor.stop();
   });
 
+  it("suppresses framework input events dispatched just after the automation callback returns", async () => {
+    const page = new FakePage();
+    const monitor = createActivityMonitor(page, {
+      automationEventDrainMs: 20,
+      readStructure: async () => structure()
+    });
+    const events: WorkerActivity[] = [];
+    monitor.subscribe((event) => events.push(event));
+
+    await monitor.start("task-1");
+    await monitor.runAutomation(async () => {
+      setTimeout(() => page.emitUserInput(0, "framework-value"), 5);
+    });
+    await waitFor(30);
+    page.emitUserInput(0, "manual-value");
+
+    expect(events.filter((event) => event.type === "user_activity")).toEqual([{
+      type: "user_activity",
+      taskId: "task-1",
+      fieldId: opaqueFieldIdForIndex(0),
+      activity: "input"
+    }]);
+    monitor.stop();
+  });
+
+  it("suppresses delayed browser binding callbacks from an automatic control click", async () => {
+    const page = new FakePage();
+    const monitor = createActivityMonitor(page, { readStructure: async () => structure() });
+    const events: WorkerActivity[] = [];
+    monitor.subscribe((event) => events.push(event));
+
+    await monitor.start("task-1");
+    await monitor.runAutomation(async () => {
+      setTimeout(() => page.emitUserInput(0, "delayed-worker-value"), 80);
+    });
+    page.emitUserInput(0, "manual-value");
+    await waitFor(50);
+
+    expect(events.filter((event) => event.type === "user_activity")).toEqual([{
+      type: "user_activity",
+      taskId: "task-1",
+      fieldId: opaqueFieldIdForIndex(0),
+      activity: "input"
+    }]);
+    monitor.stop();
+  });
+
   it("reports ordinary button and link clicks with opaque action IDs", async () => {
     const page = new FakePage();
     const monitor = createActivityMonitor(page, { readStructure: async () => structure() });

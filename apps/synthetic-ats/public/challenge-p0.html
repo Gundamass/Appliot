@@ -1,0 +1,59 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>招聘申请</title>
+  <style>
+    body { color: #17211e; font: 14px/1.5 system-ui, sans-serif; margin: 0; }
+    main { margin: 0 auto; max-width: 720px; padding: 32px 20px; }
+    iframe { border: 1px solid #ccd4d0; height: 160px; width: 100%; }
+    challenge-closed { border: 1px solid #ccd4d0; display: block; padding: 16px; }
+  </style>
+</head>
+<body data-fixture="challenge-p0">
+<main id="challenge-root"></main>
+<script>
+  const taskId = "{{TASK_ID}}";
+  const scenario = {{SCENARIO_JSON}};
+  const root = document.querySelector("#challenge-root");
+
+  const fixtures = {
+    captcha: '<h1 aria-label="验证码">请完成人机验证</h1>',
+    "access-denied": '<h1>当前页面不可用</h1>',
+    "rate-limited": '<h1>请稍后重试</h1>',
+    "device-verification": '<h1 aria-label="设备验证">请验证当前设备</h1>',
+    "risk-control": '<h1 aria-label="安全验证">请完成安全检查</h1>',
+    "interactive-iframe": '<h1>填写申请</h1><iframe title="附加问题" srcdoc="<label>附加问题<input></label>"></iframe>',
+    "open-shadow-input": '<h1>填写申请</h1><challenge-open></challenge-open>',
+    "closed-shadow-host": '<h1>填写申请</h1><challenge-closed role="button" tabindex="0">附加验证</challenge-closed>'
+  };
+
+  if (scenario === "open-shadow-input") {
+    customElements.define("challenge-open", class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: "open" }).innerHTML = '<label>附加问题<input></label>';
+      }
+    });
+  }
+  if (scenario === "closed-shadow-host") {
+    customElements.define("challenge-closed", class extends HTMLElement {
+      constructor() {
+        super();
+        this.attachShadow({ mode: "closed" }).innerHTML = '<button type="button">验证</button>';
+      }
+    });
+  }
+  root.innerHTML = fixtures[scenario] || '<h1>未知场景</h1>';
+
+  window.challengeP0 = {
+    clear() {
+      document.title = "申请最终审核";
+      history.replaceState({}, "", `/review?taskId=${encodeURIComponent(taskId)}`);
+      root.innerHTML = '<h1>申请最终审核</h1><button type="button">提交申请</button>';
+    }
+  };
+</script>
+</body>
+</html>

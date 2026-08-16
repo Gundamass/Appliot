@@ -36,7 +36,7 @@ describe("production server composition", () => {
   });
 
   it("binds configured dependencies to the validated loopback address and port", async () => {
-    const dependencies = {} as AppDependencies;
+    const dependencies = { jobMatchService: { get: vi.fn() } } as unknown as AppDependencies;
     await server.startServer(dependencies, { databaseFile: ":memory:", host: "127.0.0.1", port: 43120 });
 
     expect(fakes.createApp).toHaveBeenCalledWith(dependencies);

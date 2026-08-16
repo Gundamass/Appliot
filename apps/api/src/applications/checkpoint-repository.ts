@@ -1,6 +1,7 @@
 import {
   ApplicationQuestionSchema,
   ApplicationFieldCoverageSchema,
+  FormSnapshotSchema,
   type ApplicationContentReview,
   type ApplicationFieldCoverage,
   type ApplicationQuestion,
@@ -153,7 +154,7 @@ function fromRow(row: CheckpointRow): ApplicationCheckpoint {
     snapshotId: row.snapshot_id,
     fieldIds: JSON.parse(row.field_ids_json) as string[],
     questions: z.array(ApplicationQuestionSchema).parse(JSON.parse(row.questions_json)),
-    ...(row.snapshot_json === null ? {} : { snapshot: JSON.parse(row.snapshot_json) as FormSnapshot }),
+    ...(row.snapshot_json === null ? {} : { snapshot: FormSnapshotSchema.parse(JSON.parse(row.snapshot_json)) }),
       ...(row.content_review_json === null
         ? {}
         : { contentReview: JSON.parse(row.content_review_json) as StoredContentReview }),

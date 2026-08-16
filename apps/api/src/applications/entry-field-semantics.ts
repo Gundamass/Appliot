@@ -1,12 +1,20 @@
 import type { FormField } from "@resume/contracts";
 
 type EntryKind = "awards" | "education" | "projects" | "work";
+type ExperienceSection = "work" | "internship" | "work_combined";
+
+export interface EntrySemanticOptions {
+  experienceIndexesBySection?: Partial<Record<ExperienceSection, readonly number[]>>;
+}
 
 interface EntryState {
   awards: number;
   education: number;
   projects: number;
   work: number;
+  genericDateComponents: Record<EntryKind, number>;
+  experiencePageIndexes: Record<ExperienceSection, number>;
+  experienceProfileIndexes: Partial<Record<ExperienceSection, number>>;
   active: EntryKind | undefined;
 }
 
@@ -30,6 +38,7 @@ const WORK_FIELDS: Array<[RegExp, string]> = [
 
 const EDUCATION_FIELDS: Array<[RegExp, string]> = [
   [/学校|院校|毕业院校|institution|school/i, "institution"],
+  [/是否有实验室经历|有无实验室经历|laboratory\s*experience/i, "hasLaboratory"],
   [/专业|major/i, "major"],
   [/学历|学位|degree/i, "degree"],
   [/教育描述|教育经历描述|education\s*details/i, "description"],
@@ -51,16 +60,60 @@ const CONTEXT_ONLY_FIELDS: Record<EntryKind, RegExp> = {
   work: /工作地点|实习地点/i
 };
 
-export function deriveEntrySemanticHints(fields: FormField[]): FormField[] {
-  const state: EntryState = { awards: -1, education: -1, projects: -1, work: -1, active: undefined };
+export function deriveEntrySemanticHints(fields: FormField[], options: EntrySemanticOptions = {}): FormField[] {
+  const state: EntryState = {
+    awards: -1,
+    education: -1,
+    projects: -1,
+    work: -1,
+    genericDateComponents: { awards: 0, education: 0, projects: 0, work: 0 },
+    experiencePageIndexes: { work: -1, internship: -1, work_combined: -1 },
+    experienceProfileIndexes: {},
+    active: undefined
+  };
   return fields.map((field) => {
-    const semanticHint = entrySemanticHint(field.label, state);
+    const existingContext = entryContext(field.semanticHint);
+    if (existingContext !== undefined) {
+      const cataloguedEntryStart = field.semanticSource === "dji_catalog"
+        && fieldFor(existingContext.kind, field.label.trim()) === entryStartField(existingContext.kind);
+      const index = cataloguedEntryStart
+        ? Math.max(existingContext.index, state[existingContext.kind] + 1)
+        : existingContext.index;
+      state[existingContext.kind] = index;
+      state.active = existingContext.kind;
+      if (cataloguedEntryStart) state.genericDateComponents[existingContext.kind] = 0;
+      if (field.semanticHint !== existingContext.path && !cataloguedEntryStart) return field;
+      const semanticHint = semanticWithinEntry(existingContext.kind, index, field.label);
+      return { ...field, ...(semanticHint === undefined ? {} : { semanticHint }) };
+    }
+    const semanticHint = entrySemanticHint(field, state, options);
     return { ...field, ...(semanticHint === undefined ? {} : { semanticHint }) };
   });
 }
 
-function entrySemanticHint(label: string, state: EntryState): string | undefined {
+function entryStartField(kind: EntryKind): string {
+  return kind === "education" ? "institution"
+    : kind === "work" ? "company"
+      : "name";
+}
+
+function entryContext(hint: string | undefined): { kind: EntryKind; index: number; path: string } | undefined {
+  const match = hint?.match(/^(awards|education|projects|work)\[(\d+)\]/u);
+  if (!match) return undefined;
+  return { kind: match[1] as EntryKind, index: Number(match[2]), path: match[0] };
+}
+
+function semanticWithinEntry(kind: EntryKind, index: number, label: string): string | undefined {
   const normalized = label.trim();
+  const field = fieldFor(kind, normalized);
+  if (field === undefined) return undefined;
+  if (kind !== "awards" || field !== "date") return `${kind}[${index}].${field}`;
+  const component = dateComponentForLabel(normalized);
+  return `awards[${index}].date${component === undefined ? "" : `.${component}`}`;
+}
+
+function entrySemanticHint(fieldCandidate: FormField, state: EntryState, options: EntrySemanticOptions): string | undefined {
+  const normalized = fieldCandidate.label.trim();
   const projectStart = matches(PROJECT_FIELDS[0]![0], normalized);
   const workStart = matches(WORK_FIELDS[0]![0], normalized);
   const educationStart = matches(EDUCATION_FIELDS[0]![0], normalized);
@@ -69,15 +122,36 @@ function entrySemanticHint(label: string, state: EntryState): string | undefined
   if (awardStart) {
     state.awards += 1;
     state.active = "awards";
+    state.genericDateComponents.awards = 0;
   } else if (projectStart) {
     state.projects += 1;
     state.active = "projects";
+    state.genericDateComponents.projects = 0;
   } else if (workStart) {
-    state.work += 1;
+    const section = experienceSectionFor(fieldCandidate);
+    if (section === undefined) {
+      state.work += 1;
+    } else {
+      const pageIndex = state.experiencePageIndexes[section] + 1;
+      state.experiencePageIndexes[section] = pageIndex;
+      const configuredProfileIndexes = options.experienceIndexesBySection?.[section];
+      const profileIndex = configuredProfileIndexes === undefined
+        ? pageIndex
+        : configuredProfileIndexes[pageIndex];
+      if (profileIndex === undefined) {
+        delete state.experienceProfileIndexes[section];
+        state.work = -1;
+      } else {
+        state.experienceProfileIndexes[section] = profileIndex;
+        state.work = profileIndex;
+      }
+    }
     state.active = "work";
+    state.genericDateComponents.work = 0;
   } else if (educationStart) {
     state.education += 1;
     state.active = "education";
+    state.genericDateComponents.education = 0;
   }
 
   const active = state.active;
@@ -96,12 +170,33 @@ function entrySemanticHint(label: string, state: EntryState): string | undefined
       ? `awards[${state.awards}].date.${component}`
       : `awards[${state.awards}]`;
   }
+
+  const experienceSection = experienceSectionFor(fieldCandidate);
+  if (experienceSection !== undefined && state.experienceProfileIndexes[experienceSection] !== undefined) {
+    state.work = state.experienceProfileIndexes[experienceSection]!;
+    state.active = "work";
+  }
+  if (/起止时间/u.test(normalized)) {
+    const component = dateComponentForLabel(normalized);
+    if (component === "year" || component === "month") {
+      const position = state.genericDateComponents[active];
+      state.genericDateComponents[active] += 1;
+      const dateField = position < 2 ? "startDate" : "endDate";
+      return `${active}[${state[active]}].${dateField}.${component}`;
+    }
+  }
   if (field === undefined) {
     return matches(CONTEXT_ONLY_FIELDS[active], normalized)
       ? `${active}[${state[active]}]`
       : undefined;
   }
   return `${active}[${state[active]}].${field}`;
+}
+
+function experienceSectionFor(field: FormField): ExperienceSection | undefined {
+  return field.sectionHint === "work" || field.sectionHint === "internship" || field.sectionHint === "work_combined"
+    ? field.sectionHint
+    : undefined;
 }
 
 function dateComponentForLabel(label: string): "year" | "month" | "day" | undefined {

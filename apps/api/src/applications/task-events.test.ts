@@ -69,4 +69,30 @@ describe("task event bus", () => {
     });
     database.close();
   });
+
+  it("persists and replays explicit execution progress after reconnect", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const bus = createTaskEventBus(database);
+    const taskId = "91dc4bd6-425a-4cab-a38d-d13e33cda771";
+    const executionProgress = {
+      currentPhase: "semantic_fill" as const,
+      phases: [
+        { phase: "waiting_for_form" as const, status: "completed" as const },
+        { phase: "deterministic_fill" as const, status: "completed" as const },
+        { phase: "semantic_fill" as const, status: "running" as const },
+        { phase: "readback_validation" as const, status: "pending" as const },
+        { phase: "final_review" as const, status: "pending" as const }
+      ],
+      current: { action: "正在补全：赛事名称", attempt: 1 as const, maxAttempts: 2 as const },
+      counts: { exact: 8, semantic: 1, user: 3, missing: 2, failed: 0 }
+    };
+    const event = bus.emitProgress(taskId, {
+      type: "execution_progress_changed",
+      executionProgress
+    });
+
+    expect(createTaskEventBus(database).replayAll(taskId).events).toContainEqual(event);
+    database.close();
+  });
 });

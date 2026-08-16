@@ -1,6 +1,13 @@
 import { describe, expect, it } from "vitest";
 import type { FormSnapshot } from "@resume/contracts";
 import { annotateDjiFields } from "./dji-field-catalog.js";
+const fixtureNodeRef = {
+  documentId: "document-fixture-00000001",
+  nodeId: "node-fixture-000000000001",
+  observedAt: 7
+};
+
+
 
 const taskId = "3ed8b553-6fd4-4b42-90ba-0a40fcdc9632";
 
@@ -43,7 +50,7 @@ describe("DJI field catalog", () => {
 });
 
 function makeSnapshot(url: string, fields: FormSnapshot["fields"]): FormSnapshot {
-  return {
+  return {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 
     id: "snapshot-dji-catalog",
     taskId,
     url,
@@ -56,9 +63,9 @@ function makeSnapshot(url: string, fields: FormSnapshot["fields"]): FormSnapshot
 }
 
 function textField(label: string): FormSnapshot["fields"][number] {
-  return { id: `field-${label}`, label, type: "text", required: false, options: [], currentValue: "" };
+  return { nodeRef: fixtureNodeRef, id: `field-${label}`, label, type: "text", required: false, options: [], currentValue: "" };
 }
 
 function selectField(label: string, options: string[]): FormSnapshot["fields"][number] {
-  return { id: `field-${label}`, label, type: "select", required: false, options, currentValue: "" };
+  return { nodeRef: fixtureNodeRef, id: `field-${label}`, label, type: "select", required: false, options, currentValue: "" };
 }

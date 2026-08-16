@@ -329,7 +329,7 @@ function ProfileSection({
       <header>
         <div>
           <h3 id={`profile-section-title-${section}`}>{label}</h3>
-          <p>{!completenessAvailable ? "完整度暂不可用" : missing.length > 0 ? `${missing.length} 个字段建议补全` : `${filledCount} 项资料`}</p>
+          <p>{!completenessAvailable ? "完整度暂不可用" : missing.length > 0 ? missingSummary(missing) : `${filledCount} 项资料`}</p>
         </div>
         {!completenessAvailable || missing.length > 0 ? <CircleAlert aria-hidden="true" size={18} /> : <CheckCircle2 aria-hidden="true" size={18} />}
       </header>
@@ -362,6 +362,11 @@ function ScalarField({ field, value, missing, disabled, onChange, onFile, onCont
       <ProfileFieldControl field={field} value={value} disabled={disabled} onChange={onChange} onFile={onFile} onControl={onControl} />
     </label>
   );
+}
+
+function missingSummary(missing: string[]): string {
+  const onlyDates = missing.every((path) => /\.(?:startDate|endDate)$/u.test(path));
+  return onlyDates ? `${missing.length} 项时间信息待补全` : `${missing.length} 个字段建议补全`;
 }
 
 function activeFactValues(facts: ProfileFact[]): Record<string, string> {

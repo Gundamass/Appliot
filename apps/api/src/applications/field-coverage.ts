@@ -20,6 +20,7 @@ export function summarizeFieldCoverage(fields: ApplicationFieldAssessment[]): Ap
     missing: count(ordered, "missing"),
     unsupported: count(ordered, "unsupported"),
     filled: count(ordered, "filled"),
+    failed: count(ordered, "failed"),
     fields: ordered
   };
 }
@@ -52,13 +53,17 @@ export function createFieldCoverageStore(): FieldCoverageStore {
       const current = tasks.get(taskId)?.get(fieldId);
       if (current) requireTask(taskId).set(fieldId, {
         ...current,
-        status: "missing",
+        status: "failed",
         reason: reason || "field_execution_failed"
       });
     },
     markUserFilled(taskId, field) {
       const current = tasks.get(taskId)?.get(field.fieldId);
-      if (current?.status === "filled" || current?.status === "review") return;
+      if ((current?.status === "filled"
+          || current?.status === "review"
+          || (current?.status === "failed" && current.reason === "controlled_value_reverted"))
+        && current.label === field.label
+        && (field.semantic === undefined || current.semantic === field.semantic)) return;
       requireTask(taskId).set(field.fieldId, {
         fieldId: field.fieldId,
         label: field.label,

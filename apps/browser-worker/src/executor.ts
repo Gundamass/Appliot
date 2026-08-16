@@ -1,40 +1,70 @@
 import { ApprovalStore, PolicyDeniedError, verifyAndConsumeApproval } from "@resume/action-policy";
 import type { ExecutableCommand, WorkerResponse } from "@resume/contracts";
-import type { Locator, Route } from "playwright-core";
+import type { Route } from "playwright-core";
 import { basename } from "node:path";
 import { BrowserObserver, type BrowserObservation } from "./observer.js";
 import type { ActivityMonitor } from "./activity-monitor.js";
-import { selectChoiceGroup, selectCustomControl } from "./control-adapters.js";
+import { selectChoiceGroup, selectCustomControl, type ControlTarget } from "./control-adapters.js";
+import {
+  runtimeTraceHash,
+  type RuntimeTracePhase,
+  type RuntimeTraceSink
+} from "./runtime-trace.js";
 
 type ExecutionResponse = Extract<WorkerResponse, { type: "execution_result" }>;
 
 const UPLOAD_PARSE_SAMPLE_MS = 100;
 const UPLOAD_PARSE_WAIT_CAP_MS = 8_000;
+const FIELD_STABLE_WINDOW_MS = 300;
+const FIELD_STABLE_WAIT_CAP_MS = 2_000;
 
 export class ControlledExecutor {
   private readonly approvals = new ApprovalStore();
-  private current?: BrowserObservation;
+  private current: BrowserObservation | undefined;
+  private readonly invalidatedSnapshots = new Map<string, BrowserObservation["snapshot"]>();
 
   constructor(
     private readonly observer: BrowserObserver,
     private readonly approvalKey: Uint8Array,
     private readonly fileResolver?: (fileId: string) => Promise<string | undefined>,
-    private readonly activityMonitor?: Pick<ActivityMonitor, "runAutomation">
+    private readonly activityMonitor?: Pick<ActivityMonitor, "runAutomation">,
+    private readonly trace?: RuntimeTraceSink
   ) {}
 
   async observe(taskId: string) {
-    this.current = await this.observer.observe(taskId);
-    return this.current.snapshot;
+    const observed = await this.observer.observe(taskId);
+    await this.replaceCurrent(observed);
+    this.invalidatedSnapshots.delete(taskId);
+    return observed.snapshot;
+  }
+
+  async invalidate(taskId: string): Promise<void> {
+    const current = this.current;
+    if (current?.snapshot.taskId !== taskId) return;
+    this.current = undefined;
+    this.invalidatedSnapshots.set(taskId, current.snapshot);
+    await current.registry.release();
+  }
+
+  async release(): Promise<void> {
+    const current = this.current;
+    this.current = undefined;
+    this.invalidatedSnapshots.clear();
+    await current?.registry.release();
   }
 
   async execute(command: ExecutableCommand, isCurrent: () => boolean = () => true): Promise<ExecutionResponse> {
     const current = this.current;
+    if (!isCurrent()) {
+      return this.blocked(
+        command,
+        "execution_invalidated",
+        current?.snapshot ?? this.invalidatedSnapshots.get(command.taskId)
+      );
+    }
     if (!current || current.snapshot.taskId !== command.taskId || current.snapshot.id !== command.snapshotId) {
       return this.blocked(command, "stale_snapshot", current?.snapshot);
     }
-    let expectedReadback: unknown;
-    const warnings: string[] = [];
-
     try {
       verifyAndConsumeApproval(command, this.approvalKey, this.approvals);
     } catch (error) {
@@ -45,134 +75,233 @@ export class ControlledExecutor {
       );
     }
 
+    const startedAt = Date.now();
+    let activePhase: RuntimeTracePhase | undefined;
+    let expectedReadback: unknown;
+    const warnings: string[] = [];
+
     try {
       if (!isCurrent()) return this.blocked(command, "execution_invalidated", current.snapshot);
+      const targetField = command.type === "click_intermediate"
+        ? undefined
+        : current.snapshot.fields.find((field) => field.id === command.fieldId);
+      const targetAction = command.type === "click_intermediate"
+        ? current.snapshot.actions.find((action) => action.id === command.actionId)
+        : undefined;
+      if (command.type === "click_intermediate" && targetAction === undefined) {
+        return this.blocked(command, "action_not_found", current.snapshot);
+      }
+      if (command.type !== "click_intermediate" && targetField === undefined) {
+        return this.blocked(command, "field_not_found", current.snapshot);
+      }
+      if (command.type === "click_intermediate" && current.snapshot.errors.length > 0) {
+        return this.blocked(command, "page_not_valid", current.snapshot);
+      }
+
+      activePhase = "prepare";
+      const prepared = await current.registry.prepare(
+        command.nodeRef,
+        command.nodeRef.observedAt,
+        command.type === "click_intermediate" ? "action" : "field"
+      );
+      this.recordTrace(command, activePhase, startedAt, "ok");
+      activePhase = "apply";
+
       if (command.type === "fill") {
         expectedReadback = command.value;
-        const locator = current.registry.field(command.fieldId);
-        if (!locator) return this.blocked(command, "field_not_found", current.snapshot);
-        const field = current.snapshot.fields.find((candidate) => candidate.id === command.fieldId);
-        if (!isCurrent()) return this.blocked(command, "execution_invalidated", current.snapshot);
         await this.runAutomation(async () => {
-          if (!isCurrent()) return;
-          if (field?.type === "checkbox") {
-            await locator.setChecked(Boolean(command.value));
+          requireCurrent(isCurrent);
+          if (targetField?.type === "checkbox") {
+            await prepared.setChecked(Boolean(command.value));
           } else {
-            await locator.fill(String(command.value ?? ""));
+            await prepared.fill(String(command.value ?? ""));
           }
-          await locator.blur();
+          await prepared.blur();
         });
       } else if (command.type === "select") {
-        const locator = current.registry.field(command.fieldId);
-        if (!locator) return this.blocked(command, "field_not_found", current.snapshot);
-        const field = current.snapshot.fields.find((candidate) => candidate.id === command.fieldId);
-        if (!isCurrent()) return this.blocked(command, "execution_invalidated", current.snapshot);
         await this.runAutomation(async () => {
-          if (!isCurrent()) return;
-          if (field?.type === "radio" && field.interactionMode === "choice_group") {
-            expectedReadback = await selectChoiceGroup(locator, command.value);
-          } else if (field?.type === "radio") {
-            await locator.check();
+          requireCurrent(isCurrent);
+          if (targetField?.type === "radio" && targetField.interactionMode === "choice_group") {
+            expectedReadback = await selectChoiceGroup(prepared, command.value);
+          } else if (targetField?.type === "radio") {
+            await prepared.check();
             expectedReadback = true;
-          } else if (field?.controlKind === "custom") {
-            const selected = await selectCustomControl(locator, command.value);
+          } else if (targetField?.controlKind === "custom") {
+            const selected = await selectCustomControl(prepared, command.value);
             expectedReadback = selected.selectedValue;
             if (selected.recovered) warnings.push("control_recovered_after_readback_mismatch");
           } else {
-            expectedReadback = (await locator.selectOption({ label: command.value }))[0];
+            expectedReadback = (await prepared.selectOption({ label: command.value }))[0];
           }
         });
       } else if (command.type === "click_intermediate") {
-        if (current.snapshot.errors.length > 0) {
-          return this.blocked(command, "page_not_valid", current.snapshot);
-        }
-        const locator = current.registry.action(command.actionId);
-        if (!locator) return this.blocked(command, "action_not_found", current.snapshot);
-        if (!await isObjectivelySafeIntermediate(locator)) {
+        if (!await isObjectivelySafeIntermediate(prepared)) {
           return this.blocked(command, "unsafe_intermediate_action", current.snapshot);
         }
-        if (!isCurrent()) return this.blocked(command, "execution_invalidated", current.snapshot);
-        const violation = await this.runAutomation(() => isCurrent()
-          ? guardedIntermediateClick(locator)
-          : Promise.resolve("execution_invalidated"));
+        const violation = await this.runAutomation(() => {
+          requireCurrent(isCurrent);
+          return guardedIntermediateClick(prepared);
+        });
         if (violation) return this.blocked(command, violation, current.snapshot);
       } else if (command.type === "upload") {
-        const locator = current.registry.field(command.fieldId);
-        if (!locator) return this.blocked(command, "field_not_found", current.snapshot);
         const filePath = await this.fileResolver?.(command.fileId);
         if (!filePath) return this.blocked(command, "file_not_registered", current.snapshot);
-        if (!isCurrent()) return this.blocked(command, "execution_invalidated", current.snapshot);
-        await this.runAutomation(() => isCurrent() ? locator.setInputFiles(filePath) : Promise.resolve());
+        if (!isCurrent()) {
+          this.recordTrace(command, activePhase, startedAt, "execution_invalidated");
+          activePhase = undefined;
+          return this.blocked(command, "execution_invalidated", current.snapshot);
+        }
+        await this.runAutomation(async () => {
+          requireCurrent(isCurrent);
+          await prepared.setInputFiles(filePath);
+        });
         expectedReadback = basename(filePath);
-        if (!isCurrent()) return this.blocked(command, "execution_invalidated", current.snapshot);
+        requireCurrent(isCurrent);
       } else {
         return this.blocked(command, "operation_not_supported", current.snapshot);
       }
+      this.recordTrace(command, activePhase, startedAt, "ok");
+      activePhase = undefined;
 
-      this.current = await this.observer.observe(command.taskId);
+      if (command.type === "fill" || command.type === "select") {
+        activePhase = "settle-1";
+        await prepared.waitForStableWindow(FIELD_STABLE_WINDOW_MS, FIELD_STABLE_WAIT_CAP_MS, isCurrent);
+        this.recordTrace(command, activePhase, startedAt, "ok");
+        activePhase = "readback-1";
+        const first = await prepared.readValue();
+        const firstMatches = fieldReadbackMatches(targetField, first, expectedReadback);
+        this.recordTrace(command, activePhase, startedAt, firstMatches ? "match" : "mismatch");
+
+        activePhase = "settle-2";
+        await prepared.waitForStableWindow(FIELD_STABLE_WINDOW_MS, FIELD_STABLE_WAIT_CAP_MS, isCurrent);
+        this.recordTrace(command, activePhase, startedAt, "ok");
+        activePhase = "readback-2";
+        const second = await prepared.readValue();
+        const secondMatches = fieldReadbackMatches(targetField, second, expectedReadback);
+        const resultCode = firstMatches && !secondMatches
+          ? "controlled_value_reverted"
+          : secondMatches ? "match" : "mismatch";
+        this.recordTrace(command, activePhase, startedAt, resultCode);
+        activePhase = undefined;
+
+        const observed = await this.observer.observe(command.taskId);
+        await this.replaceCurrent(observed);
+        const mismatch = isDateComponentField(targetField)
+          ? "date_component_readback_mismatch"
+          : "readback_mismatch";
+        const error = !firstMatches
+          ? mismatch
+          : !secondMatches ? "controlled_value_reverted" : undefined;
+        return {
+          type: "execution_result",
+          taskId: command.taskId,
+          snapshotId: observed.snapshot.id,
+          commandType: command.type,
+          status: error === undefined ? "applied" : "failed",
+          actualValue: second,
+          snapshot: observed.snapshot,
+          errors: error === undefined ? observed.snapshot.errors : [error],
+          ...(warnings.length === 0 ? {} : { warnings })
+        };
+      }
+
+      let observed = await this.observer.observe(command.taskId);
+      await this.replaceCurrent(observed);
       if (command.type === "upload"
         && isResumeUploadField(current.snapshot.fields.find((field) => field.id === command.fieldId))) {
         const parsed = await this.waitForUploadParsing(current, command.taskId, command.fieldId, isCurrent);
         if (parsed.status === "execution_invalidated") {
           return this.blocked(command, "execution_invalidated", this.current?.snapshot ?? current.snapshot);
         }
-        this.current = parsed.observation;
+        await this.replaceCurrent(parsed.observation);
+        observed = parsed.observation;
         if (parsed.status === "timeout") {
           return {
             type: "execution_result",
             taskId: command.taskId,
-            snapshotId: this.current.snapshot.id,
+            snapshotId: observed.snapshot.id,
             commandType: command.type,
             status: "failed",
-            actualValue: this.current.snapshot.fields.find((field) => field.id === command.fieldId)?.currentValue ?? null,
-            snapshot: this.current.snapshot,
+            actualValue: observed.snapshot.fields.find((field) => field.id === command.fieldId)?.currentValue ?? null,
+            snapshot: observed.snapshot,
             errors: ["upload_parse_timeout"]
           };
         }
       }
       const intermediateProgressed = command.type !== "click_intermediate"
-        || hasObservablePageProgress(current.snapshot, this.current.snapshot);
+        || hasObservablePageProgress(current.snapshot, observed.snapshot);
       const actualValue = command.type === "click_intermediate"
-        ? this.current.snapshot.url
-        : this.current.snapshot.fields.find((field) => field.id === command.fieldId)?.currentValue;
+        ? observed.snapshot.url
+        : observed.snapshot.fields.find((field) => field.id === command.fieldId)?.currentValue;
       const uploadProgressed = command.type === "upload"
-        && hasParsedUploadReplacement(current.snapshot, this.current.snapshot, command.fieldId);
+        && hasParsedUploadReplacement(current.snapshot, observed.snapshot, command.fieldId);
+      const dateComponent = isDateComponentField(targetField);
       const readbackMatches = (command.type === "click_intermediate"
         ? true
         : command.type === "upload"
           ? (typeof actualValue === "string" && actualValue.includes(String(expectedReadback ?? ""))) || uploadProgressed
-          : actualValue === expectedReadback)
+          : dateComponent
+            ? normalizedDateComponent(actualValue) === normalizedDateComponent(expectedReadback)
+            : actualValue === expectedReadback)
         && intermediateProgressed;
       return {
         type: "execution_result",
         taskId: command.taskId,
-        snapshotId: this.current.snapshot.id,
+        snapshotId: observed.snapshot.id,
         commandType: command.type,
         status: readbackMatches ? "applied" : "failed",
         actualValue,
-        snapshot: this.current.snapshot,
+        snapshot: observed.snapshot,
         errors: readbackMatches
-          ? this.current.snapshot.errors
-          : [command.type === "click_intermediate" ? "intermediate_no_progress" : "readback_mismatch"],
+          ? observed.snapshot.errors
+          : [command.type === "click_intermediate"
+              ? "intermediate_no_progress"
+              : dateComponent ? "date_component_readback_mismatch" : "readback_mismatch"],
         ...(warnings.length === 0 ? {} : { warnings })
       };
     } catch (error) {
-      this.current = await this.observer.observe(command.taskId);
+      const code = executionErrorCode(error);
+      if (activePhase !== undefined) this.recordTrace(command, activePhase, startedAt, code);
+      const snapshot = this.current?.snapshot ?? current.snapshot;
       return {
         type: "execution_result",
         taskId: command.taskId,
-        snapshotId: this.current.snapshot.id,
+        snapshotId: snapshot.id,
         commandType: command.type,
         status: "failed",
         actualValue: null,
-        snapshot: this.current.snapshot,
-        errors: [error instanceof Error ? error.message : String(error)]
+        snapshot,
+        errors: [code]
       };
     }
   }
 
   private runAutomation<T>(operation: () => Promise<T>): Promise<T> {
     return this.activityMonitor?.runAutomation(operation) ?? operation();
+  }
+
+  private recordTrace(
+    command: ExecutableCommand,
+    phase: RuntimeTracePhase,
+    startedAt: number,
+    resultCode: string
+  ): void {
+    this.trace?.record({
+      taskIdHash: runtimeTraceHash(command.taskId),
+      snapshotId: command.snapshotId,
+      documentId: command.nodeRef.documentId,
+      mutationEpoch: command.nodeRef.observedAt,
+      nodeRefHash: runtimeTraceHash(`${command.nodeRef.documentId}\u0000${command.nodeRef.nodeId}`),
+      phase,
+      elapsedMs: Math.max(0, Date.now() - startedAt),
+      resultCode
+    });
+  }
+
+  private async replaceCurrent(next: BrowserObservation): Promise<void> {
+    const previous = this.current;
+    this.current = next;
+    if (previous !== undefined && previous !== next) await previous.registry.release();
   }
 
   private async waitForUploadParsing(
@@ -228,9 +357,48 @@ export class ControlledExecutor {
   }
 }
 
+function isDateComponentField(field: BrowserObservation["snapshot"]["fields"][number] | undefined): boolean {
+  if (field === undefined) return false;
+  if (/(?:date|startDate|endDate|birthDate)\.(?:year|month|day)$/iu.test(field.semanticHint ?? "")) {
+    return true;
+  }
+  const label = field.label.normalize("NFKC");
+  return /(?:日期|时间|date|time)/iu.test(label)
+    && /(?:年|月|日|号|year|month|day)/iu.test(label);
+}
+
+function normalizedDateComponent(value: unknown): string {
+  const normalized = String(value ?? "").normalize("NFKC").trim().replace(/[年月日号]$/u, "");
+  return /^\d{1,4}$/u.test(normalized) ? String(Number(normalized)) : normalized;
+}
+
+function fieldReadbackMatches(
+  field: BrowserObservation["snapshot"]["fields"][number] | undefined,
+  actual: unknown,
+  expected: unknown
+): boolean {
+  return isDateComponentField(field)
+    ? normalizedDateComponent(actual) === normalizedDateComponent(expected)
+    : actual === expected;
+}
+
+function requireCurrent(isCurrent: () => boolean): void {
+  if (!isCurrent()) throw Object.assign(new Error("execution_invalidated"), {
+    code: "execution_invalidated"
+  });
+}
+
+function executionErrorCode(error: unknown): string {
+  if (typeof error === "object" && error !== null && "code" in error
+    && typeof (error as { code?: unknown }).code === "string") {
+    return (error as { code: string }).code;
+  }
+  return error instanceof Error ? error.message : String(error);
+}
+
 type IntermediateViolation = "terminal_submission_blocked" | "unsafe_intermediate_navigation" | "execution_invalidated";
 
-async function isObjectivelySafeIntermediate(locator: Locator): Promise<boolean> {
+async function isObjectivelySafeIntermediate(locator: ControlTarget): Promise<boolean> {
   return locator.evaluate((element) => {
     if (element instanceof HTMLAnchorElement) {
       if (element.hasAttribute("download")) return false;
@@ -251,8 +419,8 @@ async function isObjectivelySafeIntermediate(locator: Locator): Promise<boolean>
   });
 }
 
-async function guardedIntermediateClick(locator: Locator): Promise<IntermediateViolation | undefined> {
-  const page = locator.page();
+async function guardedIntermediateClick(locator: ControlTarget): Promise<IntermediateViolation | undefined> {
+  const page = locator.page;
   const context = page.context();
   const allowedOrigin = new URL(page.url()).origin;
   let violation: IntermediateViolation | undefined;
@@ -345,7 +513,7 @@ function hasParsedUploadReplacement(
   return after.fields.some((field) => {
     if (field.type === "file") return false;
     const previous = previousFields.get(fieldStructure(field));
-    if (!previous) return true;
+    if (!previous) return hasUploadValue(field.currentValue);
     return JSON.stringify(previous.currentValue) !== JSON.stringify(field.currentValue)
       && hasUploadValue(field.currentValue);
   });

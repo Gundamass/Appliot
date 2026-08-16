@@ -2,6 +2,7 @@ import { describe, expect, it } from "vitest";
 import {
   classifyMokahrAddActions,
   isMokahrPage,
+  sectionHintForText,
   sortMokahrEntryFields,
   type MokahrObservedAction,
   type MokahrObservedField
@@ -27,7 +28,7 @@ describe("Mokahr 动态区块适配", () => {
   it("将添加动作归属到教育、工作和项目区块", () => {
     expect(classifyMokahrAddActions(actions)).toEqual([
       { actionId: "add-education", section: "education" },
-      { actionId: "add-work", section: "work" },
+      { actionId: "add-work", section: "work_combined" },
       { actionId: "add-project", section: "projects" }
     ]);
   });
@@ -60,5 +61,14 @@ describe("Mokahr 动态区块适配", () => {
       "project-stack",
       "project-highlights"
     ]);
+  });
+});
+
+describe("Mokahr section hints", () => {
+  it("separates work, internship, combined work, and language sections", () => {
+    expect(sectionHintForText("\u5b9e\u4e60\u7ecf\u5386")).toBe("internship");
+    expect(sectionHintForText("\u6b63\u5f0f\u5de5\u4f5c\u7ecf\u5386")).toBe("work");
+    expect(sectionHintForText("\u5de5\u4f5c/\u5b9e\u4e60\u7ecf\u5386")).toBe("work_combined");
+    expect(sectionHintForText("\u8bed\u8a00\u80fd\u529b")).toBe("languages");
   });
 });

@@ -51,6 +51,48 @@ describe("RepeatedEntryEditor", () => {
     ]);
   });
 
+  it("shows campus dates separately and marks practice outcomes as optional", () => {
+    render(<RepeatedEntryEditor
+      section="campus"
+      entries={[{ index: 0, values: { "campus[0].description": "2022-10\n至\n2022-11 手写描述" } }]}
+      onAdd={vi.fn()}
+      onChange={vi.fn()}
+      onRemove={vi.fn()}
+    />);
+
+    const campus = screen.getByRole("article", { name: "在校实践 1" });
+    expect([...campus.querySelectorAll("input, textarea, select")].map((control) => control.getAttribute("aria-label"))).toEqual([
+      "实践名称", "实践角色", "实践开始时间", "实践结束时间", "实践描述", "实践成果"
+    ]);
+    expect(within(campus).getByLabelText("实践描述")).toHaveValue("2022-10\n至\n2022-11 手写描述");
+    expect(within(campus).getByLabelText("实践成果").closest("label")).toHaveTextContent("选填");
+  });
+
+  it("按固定顺序编辑语言能力记录", () => {
+    render(<RepeatedEntryEditor
+      section="languages"
+      entries={[{
+        index: 0,
+        values: {
+          "languages[0].name": "英语",
+          "languages[0].proficiency": "熟练",
+          "languages[0].speakingListening": "熟练",
+          "languages[0].readingWriting": "熟练"
+        }
+      }]}
+      onAdd={vi.fn()}
+      onChange={vi.fn()}
+      onRemove={vi.fn()}
+    />);
+
+    const language = screen.getByRole("article", { name: "英语" });
+    expect([...language.querySelectorAll("input, textarea, select")].map((control) => control.getAttribute("aria-label"))).toEqual([
+      "语言名称", "掌握程度", "听说能力", "读写能力"
+    ]);
+    expect(within(language).getByLabelText("语言名称")).toHaveValue("英语");
+    expect(within(language).getByLabelText("听说能力")).toHaveValue("熟练");
+  });
+
   it("按项目时间倒序展示且保持原始持久化索引", async () => {
     const user = userEvent.setup();
     const onChange = vi.fn();

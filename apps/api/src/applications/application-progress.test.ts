@@ -187,6 +187,31 @@ describe("application progress coordinator", () => {
     await expect(pending).rejects.toThrow("operation_cancelled");
   });
 
+  it("调用方接管失败时不会把不可重试的编辑升级为用户暂停", async () => {
+    const events: ProgressEventInput[] = [];
+    const coordinator = createApplicationProgressCoordinator({
+      emit: (_taskId, event) => events.push(event)
+    });
+
+    await expect(coordinator.runWithPolicy({
+      taskId, kind: "select", fieldId: "field-award", displayCategory: "当前字段",
+      current: 1, total: 1, timeoutMs: 100
+    }, async () => {
+      throw new Error("custom_option_ambiguous");
+    }, {
+      canRetry: async () => false,
+      finalFailureMode: "defer"
+    })).rejects.toThrow("custom_option_ambiguous");
+
+    expect(coordinator.snapshot(taskId)).toMatchObject({
+      status: "idle",
+      busy: false,
+      recovery: []
+    });
+    expect(coordinator.snapshot(taskId)).not.toHaveProperty("stalledFieldId");
+    expect(events.map((event) => event.type)).toEqual(["operation_started"]);
+  });
+
   it("每个新字段分别拥有一次安全重试机会", async () => {
     const coordinator = createApplicationProgressCoordinator({ now: () => Date.now() });
     const firstOperation = vi.fn()
@@ -207,6 +232,80 @@ describe("application progress coordinator", () => {
 
     expect(firstOperation).toHaveBeenCalledTimes(2);
     expect(secondOperation).toHaveBeenCalledTimes(2);
+  });
+
+  it("同一语义字段在重渲染和恢复后总共最多执行两次", async () => {
+    const retryKey = "field-operation:education-major";
+    const firstCoordinator = createApplicationProgressCoordinator();
+    const attempts: number[] = [];
+
+    await expect(firstCoordinator.runWithPolicy({
+      taskId, kind: "select", fieldId: "field-major-before", retryKey, displayCategory: "教育经历",
+      current: 1, total: 1, timeoutMs: 100
+    }, async (attempt) => {
+      attempts.push(attempt);
+      throw new Error("没有匹配项");
+    }, { canRetry: () => false, finalFailureMode: "defer" })).rejects.toThrow("没有匹配项");
+
+    await expect(firstCoordinator.runWithPolicy({
+      taskId, kind: "select", fieldId: "field-major-after", retryKey, displayCategory: "教育经历",
+      current: 1, total: 1, timeoutMs: 100
+    }, async (attempt) => {
+      attempts.push(attempt);
+      throw new Error("没有匹配项");
+    }, { canRetry: () => false, finalFailureMode: "defer" })).rejects.toThrow("没有匹配项");
+
+    const persisted = firstCoordinator.snapshot(taskId);
+    expect(persisted.attemptCountsByKey).toEqual({ [retryKey]: 2 });
+
+    const restoredCoordinator = createApplicationProgressCoordinator();
+    restoredCoordinator.restore(taskId, persisted);
+    const forbiddenThirdOperation = vi.fn(async (_attempt: 1 | 2) => "不应执行");
+    await expect(restoredCoordinator.runWithPolicy({
+      taskId, kind: "select", fieldId: "field-major-third", retryKey, displayCategory: "教育经历",
+      current: 1, total: 1, timeoutMs: 100
+    }, forbiddenThirdOperation, { finalFailureMode: "defer" }))
+      .rejects.toThrow("automatic_attempt_limit_reached");
+
+    expect(attempts).toEqual([1, 2]);
+    expect(forbiddenThirdOperation).not.toHaveBeenCalled();
+  });
+
+  it("在浏览器操作开始前持久化当前尝试次数", async () => {
+    const retryKey = "field-operation:education-school";
+    const persisted: import("./application-progress.js").ApplicationProgressSnapshot[] = [];
+    const coordinator = createApplicationProgressCoordinator({
+      persist: (_taskId, snapshot) => persisted.push(snapshot)
+    });
+
+    await expect(coordinator.runWithPolicy({
+      taskId, kind: "select", fieldId: "field-school", retryKey, displayCategory: "教育经历",
+      current: 1, total: 1, timeoutMs: 100
+    }, async (attempt) => {
+      expect(attempt).toBe(1);
+      expect(persisted.at(-1)?.attemptCountsByKey).toEqual({ [retryKey]: 1 });
+      return "已选择";
+    })).resolves.toBe("已选择");
+  });
+
+  it("从旧版字段重试检查点恢复已消耗的两次尝试", async () => {
+    const fieldId = "field-major";
+    const coordinator = createApplicationProgressCoordinator();
+    coordinator.restore(taskId, {
+      status: "idle",
+      busy: false,
+      generation: 2,
+      retryCount: 1,
+      retryCountsByField: { [fieldId]: 1 },
+      recovery: []
+    });
+    const operation = vi.fn(async (_attempt: 1 | 2) => "不应执行");
+
+    await expect(coordinator.runWithPolicy({
+      taskId, kind: "select", fieldId, displayCategory: "教育经历",
+      current: 1, total: 1, timeoutMs: 100
+    }, operation)).rejects.toThrow("automatic_attempt_limit_reached");
+    expect(operation).not.toHaveBeenCalled();
   });
 
   it("持久化进度事件并在事件总线重启后重放", () => {
@@ -260,6 +359,72 @@ describe("application progress coordinator", () => {
     ]);
   });
 
+  it("持久化并发布真实执行阶段、当前动作和覆盖统计", () => {
+    const events: ProgressEventInput[] = [];
+    const persisted: import("./application-progress.js").ApplicationProgressSnapshot[] = [];
+    const coordinator = createApplicationProgressCoordinator({
+      emit: (_taskId, event) => events.push(event),
+      persist: (_taskId, snapshot) => persisted.push(snapshot)
+    });
+
+    coordinator.setPhase(taskId, "deterministic_fill", "running");
+    coordinator.setCurrentAction(taskId, {
+      action: "正在选择：本科专业",
+      fieldId: "field-major",
+      attempt: 1,
+      maxAttempts: 2
+    });
+    coordinator.setCounts(taskId, { exact: 5, semantic: 1, user: 2, missing: 1, failed: 0 });
+
+    expect(coordinator.snapshot(taskId).executionProgress).toMatchObject({
+      currentPhase: "deterministic_fill",
+      phases: expect.arrayContaining([
+        { phase: "deterministic_fill", status: "running" }
+      ]),
+      current: {
+        action: "正在选择：本科专业",
+        fieldId: "field-major",
+        attempt: 1,
+        maxAttempts: 2
+      },
+      counts: { exact: 5, semantic: 1, user: 2, missing: 1, failed: 0 }
+    });
+    expect(events.filter((event) => event.type === "execution_progress_changed")).toHaveLength(3);
+    expect(persisted.at(-1)?.executionProgress).toEqual(coordinator.snapshot(taskId).executionProgress);
+  });
+
+  it("恢复显式进度并为旧检查点推导兼容阶段", () => {
+    const current = createApplicationProgressCoordinator();
+    current.setPhase(taskId, "semantic_fill", "running");
+    current.setCurrentAction(taskId, { action: "正在补全：赛事名称", maxAttempts: 2 });
+    const persisted = current.snapshot(taskId);
+
+    const restored = createApplicationProgressCoordinator();
+    restored.restore(taskId, persisted);
+    expect(restored.snapshot(taskId).executionProgress).toEqual(persisted.executionProgress);
+
+    const legacy = createApplicationProgressCoordinator();
+    legacy.restore("legacy-task", {
+      status: "idle",
+      busy: false,
+      generation: 1,
+      retryCount: 0,
+      lastResult: {
+        current: 1,
+        total: 1,
+        phase: "validating",
+        fieldId: "page",
+        displayCategory: "页面状态",
+        operation: { kind: "validate", status: "succeeded", elapsedMs: 10, timeoutMs: 1_000 }
+      },
+      recovery: []
+    });
+    expect(legacy.snapshot("legacy-task").executionProgress).toMatchObject({
+      currentPhase: "readback_validation",
+      current: { action: "正在校验页面填写结果", maxAttempts: 2 }
+    });
+  });
+
   it("持久化可恢复进度并在检查点仓库重启后恢复", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
@@ -269,6 +434,10 @@ describe("application progress coordinator", () => {
       busy: false,
       generation: 2,
       retryCount: 1,
+      attemptCountsByKey: {
+        "field-operation:education-major": 2,
+        "field-operation:project-start-year": 1
+      },
       stalledFieldId: "field-phone",
       recovery: ["retry_current", "manual_done", "cancel"]
     };

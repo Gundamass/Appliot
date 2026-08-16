@@ -1,8 +1,12 @@
 import type {
   ApplicationActivity,
+  ApplicationAutofillPhase,
   ApplicationDisplayPhase,
   ApplicationDisplayCategory,
+  ApplicationExecutionCounts,
+  ApplicationExecutionProgress,
   ApplicationOperationErrorCode,
+  ApplicationPhaseStatus,
   ApplicationTaskOperation,
   ApplicationTaskProgress,
   ApplicationTaskProgressEvent,
@@ -17,17 +21,20 @@ export interface ApplicationProgressSnapshot {
   busy: boolean;
   generation: number;
   retryCount: number;
+  attemptCountsByKey?: Record<string, number>;
   retryCountsByField?: Record<string, number>;
   active?: ApplicationTaskProgress & { operation: ApplicationTaskOperation };
   lastResult?: ApplicationTaskProgress & { operation: ApplicationTaskOperation };
   stalledFieldId?: string;
   recovery: ApplicationRecoveryCommand[];
+  executionProgress?: ApplicationExecutionProgress;
 }
 
 export interface StartOperationInput {
   taskId: string;
   kind: OperationKind;
   fieldId: string;
+  retryKey?: string;
   displayCategory: ApplicationDisplayCategory;
   current: number;
   total: number;
@@ -54,11 +61,12 @@ interface MutableTaskProgress {
   status: ApplicationProgressStatus;
   generation: number;
   retryCount: number;
-  retryCountsByField: Map<string, number>;
+  attemptCountsByKey: Map<string, number>;
   active: ActiveOperation | undefined;
   lastResult: ApplicationProgressSnapshot["lastResult"] | undefined;
   stalledFieldId: string | undefined;
   recovery: ApplicationRecoveryCommand[];
+  executionProgress: ApplicationExecutionProgress;
 }
 
 export interface ApplicationProgressCoordinatorOptions {
@@ -69,11 +77,15 @@ export interface ApplicationProgressCoordinatorOptions {
 
 export interface RunPolicyOptions {
   canRetry?: () => Promise<boolean> | boolean;
+  finalFailureMode?: "pause" | "defer";
 }
 
 export interface ApplicationProgressCoordinator {
   snapshot(taskId: string): ApplicationProgressSnapshot;
   restore(taskId: string, snapshot: ApplicationProgressSnapshot): void;
+  setPhase(taskId: string, phase: ApplicationAutofillPhase, status: ApplicationPhaseStatus): void;
+  setCurrentAction(taskId: string, input: ApplicationExecutionProgress["current"]): void;
+  setCounts(taskId: string, counts: ApplicationExecutionCounts): void;
   startOperation(input: StartOperationInput): { generation: number };
   completeOperation(taskId: string, generation: number): void;
   failOperation(taskId: string, generation: number, errorCode: ApplicationOperationErrorCode): void;
@@ -88,7 +100,11 @@ export interface ApplicationProgressCoordinator {
     operation: () => Promise<T>,
     failureMode?: "pause" | "defer"
   ): Promise<T>;
-  runWithPolicy<T>(input: StartOperationInput, operation: () => Promise<T>, options?: RunPolicyOptions): Promise<T>;
+  runWithPolicy<T>(
+    input: StartOperationInput,
+    operation: (attempt: 1 | 2) => Promise<T>,
+    options?: RunPolicyOptions
+  ): Promise<T>;
 }
 
 const EMPTY_SNAPSHOT: ApplicationProgressSnapshot = {
@@ -109,8 +125,9 @@ export function createApplicationProgressCoordinator(
     const current = tasks.get(taskId);
     if (current) return current;
     const created: MutableTaskProgress = {
-      status: "idle", generation: 0, retryCount: 0, retryCountsByField: new Map(), active: undefined,
-      lastResult: undefined, stalledFieldId: undefined, recovery: []
+      status: "idle", generation: 0, retryCount: 0, attemptCountsByKey: new Map(), active: undefined,
+      lastResult: undefined, stalledFieldId: undefined, recovery: [],
+      executionProgress: defaultExecutionProgress("waiting_for_form")
     };
     tasks.set(taskId, created);
     return created;
@@ -121,9 +138,9 @@ export function createApplicationProgressCoordinator(
     busy: task.active !== undefined,
     generation: task.generation,
     retryCount: task.retryCount,
-    ...(task.retryCountsByField.size === 0
+    ...(task.attemptCountsByKey.size === 0
       ? {}
-      : { retryCountsByField: Object.fromEntries(task.retryCountsByField) }),
+      : { attemptCountsByKey: Object.fromEntries(task.attemptCountsByKey) }),
     ...(task.active === undefined ? {} : {
       active: {
         ...task.active.progress,
@@ -132,7 +149,8 @@ export function createApplicationProgressCoordinator(
     }),
     ...(task.lastResult === undefined ? {} : { lastResult: task.lastResult }),
     ...(task.stalledFieldId === undefined ? {} : { stalledFieldId: task.stalledFieldId }),
-    recovery: [...task.recovery]
+    recovery: [...task.recovery],
+    executionProgress: cloneExecutionProgress(task.executionProgress)
   });
 
   const persist = (taskId: string, task: MutableTaskProgress): void => {
@@ -141,6 +159,14 @@ export function createApplicationProgressCoordinator(
 
   const emit = (taskId: string, event: ProgressEventInput): void => {
     options.emit?.(taskId, event);
+  };
+
+  const publishExecutionProgress = (taskId: string, task: MutableTaskProgress): void => {
+    persist(taskId, task);
+    emit(taskId, {
+      type: "execution_progress_changed",
+      executionProgress: cloneExecutionProgress(task.executionProgress)
+    });
   };
 
   const settle = (
@@ -205,23 +231,61 @@ export function createApplicationProgressCoordinator(
     },
 
     restore(taskId, snapshot) {
-      const restoredRetryCounts = new Map(Object.entries(snapshot.retryCountsByField ?? {}));
-      const restoredFieldId = snapshot.active?.fieldId ?? snapshot.stalledFieldId ?? snapshot.lastResult?.fieldId;
-      if (restoredRetryCounts.size === 0 && restoredFieldId !== undefined && snapshot.retryCount > 0) {
-        restoredRetryCounts.set(restoredFieldId, snapshot.retryCount);
+      const restoredAttemptCounts = new Map(Object.entries(snapshot.attemptCountsByKey ?? {}));
+      if (restoredAttemptCounts.size === 0) {
+        for (const [fieldId, retryCount] of Object.entries(snapshot.retryCountsByField ?? {})) {
+          restoredAttemptCounts.set(fieldId, Math.min(2, retryCount + 1));
+        }
+      }
+      const restoredFieldId = snapshot.active?.fieldId ?? snapshot.lastResult?.fieldId;
+      if (restoredAttemptCounts.size === 0 && restoredFieldId !== undefined) {
+        restoredAttemptCounts.set(restoredFieldId, Math.min(2, snapshot.retryCount + 1));
       }
       tasks.set(taskId, {
         status: snapshot.busy ? "paused" : snapshot.status,
         generation: snapshot.generation,
         retryCount: snapshot.retryCount,
-        retryCountsByField: restoredRetryCounts,
+        attemptCountsByKey: restoredAttemptCounts,
         active: undefined,
         lastResult: snapshot.lastResult,
         stalledFieldId: snapshot.active?.fieldId ?? snapshot.stalledFieldId,
         recovery: snapshot.busy
           ? ["retry_current", "manual_done", "cancel"]
-          : [...snapshot.recovery]
+          : [...snapshot.recovery],
+        executionProgress: snapshot.executionProgress === undefined
+          ? executionProgressFromLegacySnapshot(snapshot)
+          : cloneExecutionProgress(snapshot.executionProgress)
       });
+    },
+
+    setPhase(taskId, phase, status) {
+      const task = requireTask(taskId);
+      task.executionProgress = {
+        ...task.executionProgress,
+        currentPhase: phase,
+        phases: task.executionProgress.phases.map((entry) =>
+          entry.phase === phase ? { ...entry, status } : entry),
+        current: { action: phaseAction(phase), maxAttempts: 2 }
+      };
+      publishExecutionProgress(taskId, task);
+    },
+
+    setCurrentAction(taskId, input) {
+      const task = requireTask(taskId);
+      task.executionProgress = {
+        ...task.executionProgress,
+        current: { ...input }
+      };
+      publishExecutionProgress(taskId, task);
+    },
+
+    setCounts(taskId, counts) {
+      const task = requireTask(taskId);
+      task.executionProgress = {
+        ...task.executionProgress,
+        counts: { ...counts }
+      };
+      publishExecutionProgress(taskId, task);
     },
 
     startOperation(input) {
@@ -229,7 +293,8 @@ export function createApplicationProgressCoordinator(
       if (task.active) throw new Error("operation_already_active");
       if (task.status === "paused") throw new Error("task_paused");
       const generation = ++task.generation;
-      task.retryCount = task.retryCountsByField.get(input.fieldId) ?? 0;
+      const attempts = task.attemptCountsByKey.get(input.retryKey ?? input.fieldId) ?? 0;
+      task.retryCount = Math.max(0, attempts - 1);
       const progress: ApplicationTaskProgress = {
         current: input.current,
         total: input.total,
@@ -314,9 +379,11 @@ export function createApplicationProgressCoordinator(
     dispose(taskId) {
       const task = tasks.get(taskId);
       if (!task) return;
-      if (task.active?.timeout) clearTimeout(task.active.timeout);
-      task.active?.rejectCancellation?.(new Error("operation_cancelled"));
+      const active = task.active;
+      if (active?.timeout) clearTimeout(active.timeout);
+      task.active = undefined;
       tasks.delete(taskId);
+      active?.rejectCancellation?.(new Error("operation_cancelled"));
     },
 
     pause(taskId, reason) {
@@ -391,15 +458,30 @@ export function createApplicationProgressCoordinator(
 
     async runWithPolicy<T>(
       input: StartOperationInput,
-      operation: () => Promise<T>,
+      operation: (attempt: 1 | 2) => Promise<T>,
       policy: RunPolicyOptions = {}
     ): Promise<T> {
       const task = requireTask(input.taskId);
+      const retryKey = input.retryKey ?? input.fieldId;
+      const reserveAttempt = (): 1 | 2 => {
+        const attempts = task.attemptCountsByKey.get(retryKey) ?? 0;
+        if (attempts >= 2) throw new Error("automatic_attempt_limit_reached");
+        const nextAttempt = (attempts + 1) as 1 | 2;
+        task.attemptCountsByKey.set(retryKey, nextAttempt);
+        task.retryCount = nextAttempt - 1;
+        persist(input.taskId, task);
+        return nextAttempt;
+      };
+      const firstAttempt = reserveAttempt();
       const safeEdit = input.kind === "fill" || input.kind === "select";
-      const fieldRetryCount = task.retryCountsByField.get(input.fieldId) ?? 0;
-      const canAttemptAutomaticRetry = safeEdit && fieldRetryCount < 1 && policy.canRetry !== undefined;
+      const canAttemptAutomaticRetry = safeEdit && firstAttempt < 2 && policy.canRetry !== undefined;
+      const finalFailureMode = policy.finalFailureMode ?? "pause";
       try {
-        return await coordinator.runOperation(input, operation, canAttemptAutomaticRetry ? "defer" : "pause");
+        return await coordinator.runOperation(
+          input,
+          () => operation(firstAttempt),
+          canAttemptAutomaticRetry ? "defer" : finalFailureMode
+        );
       } catch (error) {
         if (error instanceof Error && error.message.startsWith("operation_cancelled")) throw error;
         if (!canAttemptAutomaticRetry) throw error;
@@ -407,16 +489,15 @@ export function createApplicationProgressCoordinator(
         try {
           canRetry = await policy.canRetry!();
         } catch {
-          publishDeferredFailure(input.taskId);
+          if (finalFailureMode === "pause") publishDeferredFailure(input.taskId);
           throw error;
         }
         if (!canRetry) {
-          publishDeferredFailure(input.taskId);
+          if (finalFailureMode === "pause") publishDeferredFailure(input.taskId);
           throw error;
         }
-        task.retryCount = fieldRetryCount + 1;
-        task.retryCountsByField.set(input.fieldId, task.retryCount);
-        return coordinator.runOperation(input, operation);
+        const secondAttempt = reserveAttempt();
+        return coordinator.runOperation(input, () => operation(secondAttempt), finalFailureMode);
       }
     }
   };
@@ -437,6 +518,57 @@ function operationAt(
     timeoutMs: active.operation.timeoutMs,
     ...(errorCode === undefined ? {} : { errorCode })
   };
+}
+
+const AUTOFILL_PHASES: readonly ApplicationAutofillPhase[] = [
+  "waiting_for_form",
+  "deterministic_fill",
+  "semantic_fill",
+  "readback_validation",
+  "final_review"
+];
+
+function defaultExecutionProgress(currentPhase: ApplicationAutofillPhase): ApplicationExecutionProgress {
+  const currentIndex = AUTOFILL_PHASES.indexOf(currentPhase);
+  return {
+    currentPhase,
+    phases: AUTOFILL_PHASES.map((phase, index) => ({
+      phase,
+      status: index < currentIndex ? "completed" : index === currentIndex ? "running" : "pending"
+    })),
+    current: { action: phaseAction(currentPhase), maxAttempts: 2 },
+    counts: { exact: 0, semantic: 0, user: 0, missing: 0, failed: 0 }
+  };
+}
+
+function cloneExecutionProgress(progress: ApplicationExecutionProgress): ApplicationExecutionProgress {
+  return {
+    currentPhase: progress.currentPhase,
+    phases: progress.phases.map((phase) => ({ ...phase })),
+    current: { ...progress.current },
+    counts: { ...progress.counts }
+  };
+}
+
+function executionProgressFromLegacySnapshot(snapshot: ApplicationProgressSnapshot): ApplicationExecutionProgress {
+  const operation = snapshot.active ?? snapshot.lastResult;
+  if (operation === undefined) return defaultExecutionProgress("waiting_for_form");
+  if (operation.displayPhase === "semantic_fill") return defaultExecutionProgress("semantic_fill");
+  if (operation.displayPhase === "review_handoff") return defaultExecutionProgress("final_review");
+  if (operation.displayPhase === "dynamic_validation" || operation.operation.kind === "validate") {
+    return defaultExecutionProgress("readback_validation");
+  }
+  return defaultExecutionProgress("deterministic_fill");
+}
+
+function phaseAction(phase: ApplicationAutofillPhase): string {
+  switch (phase) {
+    case "waiting_for_form": return "等待进入简历填写页";
+    case "deterministic_fill": return "正在进行精确字段填写";
+    case "semantic_fill": return "正在进行语义补全";
+    case "readback_validation": return "正在校验页面填写结果";
+    case "final_review": return "等待用户最终审核";
+  }
 }
 
 function phaseFor(kind: OperationKind): ApplicationTaskProgress["phase"] {

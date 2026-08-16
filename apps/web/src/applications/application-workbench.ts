@@ -1,12 +1,14 @@
 import type {
-  ApplicationDisplayPhase,
+  ApplicationAutofillPhase,
+  ApplicationExecutionProgress,
   ApplicationTask,
-  ApplicationTaskProgressEvent
+  ApplicationTaskProgressEvent,
+  ChallengeKind
 } from "@resume/contracts";
 
 export interface AttentionItem {
   id: string;
-  kind: "content_review" | "question" | "failed" | "paused";
+  kind: "challenge" | "content_review" | "question" | "failed" | "paused";
   label: string;
   summary: string;
   severity: "high" | "medium";
@@ -14,25 +16,34 @@ export interface AttentionItem {
 
 export function deriveDisplayPhase(
   task: ApplicationTask,
-  activities: ApplicationTaskProgressEvent[]
-): ApplicationDisplayPhase {
-  if (["needs_questions", "awaiting_content_review", "review_locked", "failed", "cancelled"].includes(task.state)) {
-    return "review_handoff";
-  }
-  if (["validating", "navigating"].includes(task.state)) return "dynamic_validation";
+  _activities: ApplicationTaskProgressEvent[]
+): ApplicationAutofillPhase {
+  return executionProgressForTask(task).currentPhase;
+}
 
-  const latestOperation = [...activities].reverse().find((event) =>
-    event.type === "operation_started"
-    || event.type === "operation_completed"
-    || event.type === "operation_failed"
-  );
-  if (latestOperation) {
-    if (latestOperation.progress.displayPhase !== undefined) return latestOperation.progress.displayPhase;
-    if (latestOperation.progress.phase === "validating" || latestOperation.progress.phase === "navigating") {
-      return "dynamic_validation";
-    }
-  }
-  return "deterministic_fill";
+export const CHALLENGE_LABELS: Record<ChallengeKind, string> = {
+  captcha: "需要完成验证码",
+  access_denied: "页面拒绝了当前访问",
+  rate_limited: "页面请求过于频繁",
+  device_verification: "需要完成设备验证",
+  risk_control: "需要完成安全验证",
+  unsupported_iframe: "表单包含暂不支持的嵌入区域",
+  unsupported_shadow_dom: "表单包含暂不支持的交互区域"
+};
+
+export function executionProgressForTask(task: ApplicationTask): ApplicationExecutionProgress {
+  return task.executionProgress ?? {
+    currentPhase: "waiting_for_form",
+    phases: [
+      { phase: "waiting_for_form", status: "running" },
+      { phase: "deterministic_fill", status: "pending" },
+      { phase: "semantic_fill", status: "pending" },
+      { phase: "readback_validation", status: "pending" },
+      { phase: "final_review", status: "pending" }
+    ],
+    current: { action: "等待进入简历填写页面", maxAttempts: 2 },
+    counts: { exact: 0, semantic: 0, user: 0, missing: 0, failed: 0 }
+  };
 }
 
 export function deriveAttentionItems(
@@ -40,6 +51,15 @@ export function deriveAttentionItems(
   activities: ApplicationTaskProgressEvent[]
 ): AttentionItem[] {
   const items: AttentionItem[] = [];
+  if (task.state === "awaiting_challenge" && task.challenge) {
+    items.push({
+      id: `challenge-${task.challenge.detectedAt}`,
+      kind: "challenge",
+      label: CHALLENGE_LABELS[task.challenge.kind],
+      summary: "请在受控浏览器中完成处理",
+      severity: "high"
+    });
+  }
   if (task.contentReview) {
     items.push({
       id: task.contentReview.id,
@@ -79,10 +99,11 @@ export function deriveAttentionItems(
     });
   }
   const priority: Record<AttentionItem["kind"], number> = {
-    content_review: 0,
-    question: 1,
-    failed: 2,
-    paused: 3
+    challenge: 0,
+    content_review: 1,
+    question: 2,
+    failed: 3,
+    paused: 4
   };
   return items.sort((left, right) => priority[left.kind] - priority[right.kind]);
 }

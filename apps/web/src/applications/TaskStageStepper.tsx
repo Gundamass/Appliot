@@ -1,32 +1,34 @@
 import { Check } from "lucide-react";
-import type { ApplicationDisplayPhase } from "@resume/contracts";
+import type { ApplicationAutofillPhase, ApplicationExecutionProgress } from "@resume/contracts";
 
 interface TaskStageStepperProps {
-  phase: ApplicationDisplayPhase;
-  counts: { completed: number; attention: number };
+  progress: ApplicationExecutionProgress;
 }
 
-const STAGES: Array<{ key: ApplicationDisplayPhase; label: string }> = [
+const STAGES: Array<{ key: ApplicationAutofillPhase; label: string }> = [
+  { key: "waiting_for_form", label: "等待表单" },
   { key: "deterministic_fill", label: "确定性填写" },
   { key: "semantic_fill", label: "语义补全" },
-  { key: "dynamic_validation", label: "动态校验" },
-  { key: "review_handoff", label: "等待审核" }
+  { key: "readback_validation", label: "回读校验" },
+  { key: "final_review", label: "最终审核" }
 ];
 
-export function TaskStageStepper({ phase, counts }: TaskStageStepperProps) {
-  const activeIndex = STAGES.findIndex((stage) => stage.key === phase);
+export function TaskStageStepper({ progress }: TaskStageStepperProps) {
+  const statuses = new Map(progress.phases.map((entry) => [entry.phase, entry.status]));
   return <section className="task-stage-stepper" aria-label="任务阶段">
-    <div className="stage-summary"><span>任务进度</span><strong>{counts.completed} 项已完成</strong>{counts.attention > 0 && <em>{counts.attention} 项待处理</em>}</div>
     <ol>
-      {STAGES.map((stage, index) => <li
+      {STAGES.map((stage, index) => {
+        const status = statuses.get(stage.key) ?? "pending";
+        const current = stage.key === progress.currentPhase;
+        return <li
         key={stage.key}
-        className={index < activeIndex ? "complete" : index === activeIndex ? "current" : "pending"}
+        className={status === "completed" ? "complete" : current ? "current" : status}
         aria-label={`${stage.label}阶段`}
-        aria-current={index === activeIndex ? "step" : undefined}
+        aria-current={current ? "step" : undefined}
       >
-        <span>{index < activeIndex ? <Check aria-hidden="true" size={13} /> : index + 1}</span>
+        <span>{status === "completed" ? <Check aria-hidden="true" size={13} /> : index + 1}</span>
         <strong>{stage.label}</strong>
-      </li>)}
+      </li>})}
     </ol>
   </section>;
 }
