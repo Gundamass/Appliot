@@ -64,6 +64,13 @@ export const StableExecutionErrorCodeSchema = z.enum([
   "execution_invalidated"
 ]);
 
+export const CertifiedHintProvenanceSchema = z.object({
+  packId: z.string().min(1).max(64),
+  packVersion: z.string().min(1).max(32),
+  confidence: z.number().min(0).max(1),
+  certification: z.literal("certified")
+}).strict();
+
 export const FormFieldSchema = z.object({
   id: z.string(),
   label: z.string(),
@@ -76,7 +83,8 @@ export const FormFieldSchema = z.object({
   interactionMode: z.enum(["native", "search", "choice_group", "date_group", "file"]).optional(),
   sectionHint: PageSectionHintSchema.optional(),
   semanticHint: z.string().optional(),
-  semanticSource: z.enum(["dji_catalog"]).optional(),
+  semanticSource: z.enum(["dji_catalog", "certified_hint"]).optional(),
+  semanticProvenance: CertifiedHintProvenanceSchema.optional(),
   nodeRef: NodeRefSchema
 }).strict().superRefine((field, context) => {
   if (!Object.prototype.hasOwnProperty.call(field, "currentValue")) {
@@ -84,6 +92,20 @@ export const FormFieldSchema = z.object({
       code: z.ZodIssueCode.custom,
       path: ["currentValue"],
       message: "Required"
+    });
+  }
+  if (field.semanticSource === "certified_hint" && field.semanticProvenance === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["semanticProvenance"],
+      message: "certified hints require certified provenance"
+    });
+  }
+  if (field.semanticSource !== "certified_hint" && field.semanticProvenance !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["semanticProvenance"],
+      message: "semantic provenance is only valid for certified hints"
     });
   }
 });
@@ -319,6 +341,7 @@ export type PageSectionHint = z.infer<typeof PageSectionHintSchema>;
 export type FrameRef = z.infer<typeof FrameRefSchema>;
 export type NodeRef = z.infer<typeof NodeRefSchema>;
 export type StableExecutionErrorCode = z.infer<typeof StableExecutionErrorCodeSchema>;
+export type CertifiedHintProvenance = z.infer<typeof CertifiedHintProvenanceSchema>;
 export type FormField = z.infer<typeof FormFieldSchema>;
 export type PageAction = z.infer<typeof PageActionSchema>;
 export type FormSnapshot = z.infer<typeof FormSnapshotSchema>;

@@ -1,7 +1,8 @@
 import { z } from "zod";
 import { EvidenceSchema, JsonValueSchema } from "./profile.js";
 import { ApplicationTaskNameSchema } from "./application-name.js";
-import { ChallengeDiagnosticSchema } from "./browser.js";
+import { CertifiedHintProvenanceSchema, ChallengeDiagnosticSchema } from "./browser.js";
+import { AdapterReviewSummarySchema } from "./ats-adapter.js";
 
 export const ApplicationTaskStateSchema = z.enum([
   "created",
@@ -10,6 +11,7 @@ export const ApplicationTaskStateSchema = z.enum([
   "needs_questions",
   "awaiting_content_review",
   "awaiting_challenge",
+  "awaiting_adapter_review",
   "filling",
   "validating",
   "navigating",
@@ -99,6 +101,7 @@ export const ApplicationCommandSchema = z.discriminatedUnion("type", [
   z.object({ type: z.literal("open_browser") }).strict(),
   z.object({ type: z.literal("resume") }).strict(),
   z.object({ type: z.literal("resume_after_challenge") }).strict(),
+  z.object({ type: z.literal("resume_after_adapter_certification") }).strict(),
   z.object({ type: z.literal("resume_with_profile") }).strict(),
   z.object({ type: z.literal("sync_profile") }).strict(),
   z.object({ type: z.literal("answer_questions"), answers: z.array(ApplicationAnswerSchema).min(1).max(100) }).strict(),
@@ -112,6 +115,7 @@ export const ApplicationCommandTypeSchema = z.enum([
   "open_browser",
   "resume",
   "resume_after_challenge",
+  "resume_after_adapter_certification",
   "resume_with_profile",
   "sync_profile",
   "answer_questions",
@@ -157,11 +161,27 @@ export const ApplicationFieldAssessmentSchema = z.object({
   label: z.string().min(1).max(500),
   semantic: z.string().min(1).max(512).optional(),
   status: z.enum(["ready", "review", "missing", "unsupported", "filled", "failed"]),
-  source: z.enum(["dji_catalog", "exact", "semantic", "user", "none"]),
+  source: z.enum(["dji_catalog", "certified_hint", "exact", "semantic", "user", "none"]),
   confidence: z.number().min(0).max(1),
   reason: z.string().min(1).max(2_000),
-  evidence: z.array(EvidenceSchema).max(50)
-}).strict();
+  evidence: z.array(EvidenceSchema).max(50),
+  semanticProvenance: CertifiedHintProvenanceSchema.optional()
+}).strict().superRefine((assessment, context) => {
+  if (assessment.source === "certified_hint" && assessment.semanticProvenance === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["semanticProvenance"],
+      message: "certified hints require certified provenance"
+    });
+  }
+  if (assessment.source !== "certified_hint" && assessment.semanticProvenance !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["semanticProvenance"],
+      message: "semantic provenance is only valid for certified hints"
+    });
+  }
+});
 
 export const ApplicationFieldCoverageSchema = z.object({
   total: z.number().int().nonnegative(),
@@ -189,7 +209,8 @@ export const ApplicationTaskSchema = z.object({
   fieldCoverage: ApplicationFieldCoverageSchema.optional(),
   executionProgress: ApplicationExecutionProgressSchema.optional(),
   contentReview: ApplicationContentReviewSchema.optional(),
-  challenge: ChallengeDiagnosticSchema.optional()
+  challenge: ChallengeDiagnosticSchema.optional(),
+  adapterReview: AdapterReviewSummarySchema.optional()
 }).strict();
 
 export const ApplicationActivityKindSchema = z.enum([

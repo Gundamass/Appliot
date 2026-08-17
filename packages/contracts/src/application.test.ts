@@ -4,6 +4,7 @@ import {
   ApplicationCommandSchema,
   ApplicationContentReviewSchema,
   ApplicationExecutionProgressSchema,
+  ApplicationFieldAssessmentSchema,
   ApplicationTaskEventSchema,
   ApplicationTaskHistoryResetSchema,
   ApplicationTaskSchema,
@@ -13,6 +14,37 @@ import {
 const taskId = "91dc4bd6-425a-4cab-a38d-d13e33cda771";
 
 describe("application contracts", () => {
+  it("projects adapter review pauses, certified field provenance, and explicit resumption", () => {
+    expect(ApplicationTaskStateSchema.parse("awaiting_adapter_review")).toBe("awaiting_adapter_review");
+    expect(ApplicationCommandSchema.parse({ type: "resume_after_adapter_certification" }))
+      .toEqual({ type: "resume_after_adapter_certification" });
+    expect(ApplicationFieldAssessmentSchema.parse({
+      fieldId: "field-school",
+      label: "School",
+      semantic: "education[0].institution",
+      status: "ready",
+      source: "certified_hint",
+      confidence: 1,
+      reason: "Certified adapter mapping.",
+      evidence: [],
+      semanticProvenance: {
+        packId: "dji-campus",
+        packVersion: "1.0.0",
+        confidence: 1,
+        certification: "certified"
+      }
+    }).source).toBe("certified_hint");
+    expect(ApplicationFieldAssessmentSchema.safeParse({
+      fieldId: "field-school",
+      label: "School",
+      status: "ready",
+      source: "certified_hint",
+      confidence: 1,
+      reason: "Missing certified provenance.",
+      evidence: []
+    }).success).toBe(false);
+  });
+
   it("parses the persistent challenge pause and explicit resume command", () => {
     expect(ApplicationTaskStateSchema.parse("awaiting_challenge")).toBe("awaiting_challenge");
     expect(ApplicationCommandSchema.parse({ type: "resume_after_challenge" }))

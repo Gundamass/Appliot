@@ -384,7 +384,7 @@ describe("browser command contracts", () => {
     }).success).toBe(true);
   });
 
-  it("accepts only the closed DJI semantic source marker", () => {
+  it("keeps the legacy DJI marker compatible and requires certified hint provenance", () => {
     expect(FormFieldSchema.safeParse({
       id: "field-school",
       label: "School",
@@ -406,6 +406,50 @@ describe("browser command contracts", () => {
       nodeRef,
       semanticHint: "education[0].institution",
       semanticSource: "other_catalog"
+    }).success).toBe(false);
+    expect(FormFieldSchema.safeParse({
+      id: "field-school",
+      label: "School",
+      type: "text",
+      required: true,
+      options: [],
+      currentValue: "",
+      nodeRef,
+      semanticHint: "education[0].institution",
+      semanticSource: "certified_hint",
+      semanticProvenance: {
+        packId: "dji-campus",
+        packVersion: "1.0.0",
+        confidence: 1,
+        certification: "certified"
+      }
+    }).success).toBe(true);
+    expect(FormFieldSchema.safeParse({
+      id: "field-school",
+      label: "School",
+      type: "text",
+      required: true,
+      options: [],
+      currentValue: "",
+      nodeRef,
+      semanticHint: "education[0].institution",
+      semanticSource: "certified_hint"
+    }).success).toBe(false);
+    expect(FormFieldSchema.safeParse({
+      id: "field-school",
+      label: "School",
+      type: "text",
+      required: true,
+      options: [],
+      currentValue: "",
+      nodeRef,
+      semanticSource: "dji_catalog",
+      semanticProvenance: {
+        packId: "dji-campus",
+        packVersion: "1.0.0",
+        confidence: 1,
+        certification: "certified"
+      }
     }).success).toBe(false);
   });
 
