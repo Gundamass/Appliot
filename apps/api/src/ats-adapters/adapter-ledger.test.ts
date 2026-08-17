@@ -200,6 +200,59 @@ describe("createAdapterLedger", () => {
     expect(() => ledger.certify("proposal-1")).toThrowError("adapter_transition_denied");
   });
 
+  it("rejects PII in candidate labels before proposal persistence", () => {
+    const ledger = createAdapterLedger(database);
+    const candidate = proposal();
+
+    expect(() => ledger.createProposal({
+      ...candidate,
+      definition: {
+        ...candidate.definition,
+        fieldRules: [{
+          ...candidate.definition.fieldRules[0]!,
+          labelAliases: ["联系 13800138000"]
+        }]
+      }
+    })).toThrowError("adapter_sensitive_payload_rejected");
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_proposals").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects sensitive replay details before report persistence", () => {
+    const ledger = createAdapterLedger(database);
+    ledger.createProposal(proposal());
+
+    expect(() => ledger.recordReplay([replay("fixture-one", {
+      assertions: [{ code: "zero_submit", passed: true, detail: "Cookie: session=secret" }]
+    })])).toThrowError("adapter_sensitive_payload_rejected");
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_replay_reports").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects sensitive AI findings before review persistence", () => {
+    const ledger = createAdapterLedger(database);
+    ledger.createProposal(proposal());
+    ledger.recordReplay([replay("fixture-one"), replay("fixture-two")]);
+
+    expect(() => ledger.recordAiReview(aiReview({
+      findings: [{ code: "unsafe", severity: "error", explanation: "联系 user@example.com" }]
+    }))).toThrowError("adapter_sensitive_payload_rejected");
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_ai_reviews").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects sensitive human notes before decision persistence", () => {
+    const ledger = createAdapterLedger(database);
+    ledger.createProposal(proposal());
+    ledger.recordReplay([replay("fixture-one"), replay("fixture-two")]);
+    ledger.recordAiReview(aiReview());
+
+    expect(() => ledger.recordHumanDecision(humanDecision({ notes: "Bearer production-secret" })))
+      .toThrowError("adapter_sensitive_payload_rejected");
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_human_reviews").get()).toEqual({ count: 0 });
+  });
+
   it("records immutable retirement tombstones for local and built-in packs", () => {
     const ledger = createAdapterLedger(database);
     ledger.retire("built-in-pack", "2.0.0", "unsafe mapping");

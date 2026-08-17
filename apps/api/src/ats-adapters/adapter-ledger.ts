@@ -41,6 +41,32 @@ function transitionDenied(): never {
   throw new Error("adapter_transition_denied");
 }
 
+const sensitivePayloadPatterns = [
+  /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u,
+  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
+  /\b(?:cookie\s*:|authorization\s*:\s*(?:basic|bearer)\s+|bearer\s+\S+)/iu,
+  /\b(?:currentValue|nodeRef|approval(?:Id|Key|Token|Signature|Payload|Command)?)\b["']?\s*[:=]/iu,
+  /<!doctype\s+html|<(?:html|body|form|input|script)(?:\s|>)/iu
+];
+const sha256Pattern = /^[a-f0-9]{64}$/u;
+
+function assertSanitizedPayload(value: unknown): void {
+  if (containsSensitivePayload(value)) {
+    throw new Error("adapter_sensitive_payload_rejected");
+  }
+}
+
+function containsSensitivePayload(value: unknown): boolean {
+  if (typeof value === "string") {
+    return !sha256Pattern.test(value) && sensitivePayloadPatterns.some((pattern) => pattern.test(value));
+  }
+  if (Array.isArray(value)) return value.some(containsSensitivePayload);
+  if (typeof value === "object" && value !== null) {
+    return Object.values(value).some(containsSensitivePayload);
+  }
+  return false;
+}
+
 export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
   const findProposalRow = database.prepare(`
     SELECT proposal_id, lifecycle_status, payload_json
@@ -90,6 +116,7 @@ export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
   return {
     createProposal(input) {
       const proposal = AiHintPackProposalSchema.parse(input);
+      assertSanitizedPayload(proposal);
       database.prepare(`
         INSERT INTO ats_adapter_proposals (
           proposal_id, task_id, parent_proposal_id, pack_id, version, lifecycle_status,
@@ -127,6 +154,7 @@ export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
     recordReplay(inputs) {
       if (inputs.length === 0) return;
       const reports = inputs.map((report) => ReplayReportSchema.parse(report));
+      reports.forEach(assertSanitizedPayload);
       database.transaction(() => {
         const row = findProposalRow.get(reports[0]!.proposalId) as ProposalRow | undefined;
         if (!row || row.lifecycle_status !== "candidate") transitionDenied();
@@ -157,6 +185,7 @@ export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
     },
     recordAiReview(input) {
       const review = AiReplayReviewSchema.parse(input);
+      assertSanitizedPayload(review);
       database.transaction(() => {
         const row = findProposalRow.get(review.proposalId) as ProposalRow | undefined;
         if (!row || row.lifecycle_status !== "replay_verified") transitionDenied();
@@ -176,6 +205,7 @@ export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
     },
     recordHumanDecision(input) {
       const decision = HumanCertificationDecisionSchema.parse(input);
+      assertSanitizedPayload(decision);
       database.transaction(() => {
         const row = findProposalRow.get(decision.proposalId) as ProposalRow | undefined;
         if (!row) transitionDenied();
