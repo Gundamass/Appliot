@@ -41,30 +41,58 @@ function transitionDenied(): never {
   throw new Error("adapter_transition_denied");
 }
 
-const sensitivePayloadPatterns = [
-  /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u,
-  /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/iu,
-  /\b(?:cookie\s*:|authorization\s*:\s*(?:basic|bearer)\s+|bearer\s+\S+)/iu,
-  /\b(?:currentValue|nodeRef|approval(?:Id|Key|Token|Signature|Payload|Command)?)\b["']?\s*[:=]/iu,
-  /<!doctype\s+html|<(?:html|body|form|input|script)(?:\s|>)/iu
-];
-const sha256Pattern = /^[a-f0-9]{64}$/u;
+const schemaConstrainedStringKeys = new Set([
+  "lifecycleStatus", "promptVersion", "inputHash", "outputHash", "version",
+  "stages", "pageFingerprintHashes", "section", "sections", "profilePath", "controlTypes",
+  "kind", "fixtureId", "rejectedActions", "createdAt", "status", "recommendation",
+  "severity", "decision"
+]);
+const identifierStringKeys = new Set([
+  "proposalId", "taskId", "parentProposalId", "packId", "provider", "model",
+  "ruleId", "reportId", "reviewId", "code", "reviewer"
+]);
+const metadataStringKeys = new Set([
+  "requiredTextSignals", "headingAliases", "fieldOrderAliases", "labelAliases",
+  "verbs", "unsupportedBoundaries", "detail", "explanation", "notes"
+]);
+const prohibitedMetadataWords = new Set([
+  "authorization", "bearer", "cookie", "session", "password", "client_secret",
+  "api_key", "access_token", "refresh_token", "currentvalue", "noderef", "approval",
+  "approvaltoken", "approvalkey", "screenshot"
+]);
+const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const modelIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$/u;
+const hostSuffixPattern = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u;
+const pathPrefixPattern = /^\/[A-Za-z0-9._~/-]*$/u;
+const semanticPathPattern = /^[a-z][a-zA-Z0-9]*(?:\[\d+\])?(?:\.[a-z][a-zA-Z0-9]*)*$/u;
+const metadataPattern = /^[\p{L}\p{M}\p{N}\p{Zs}.,;:!?"'()_/-]+$/u;
 
 function assertSanitizedPayload(value: unknown): void {
-  if (containsSensitivePayload(value)) {
-    throw new Error("adapter_sensitive_payload_rejected");
-  }
+  if (!isSanitizedPersistenceValue(value)) throw new Error("adapter_sensitive_payload_rejected");
 }
 
-function containsSensitivePayload(value: unknown): boolean {
-  if (typeof value === "string") {
-    return !sha256Pattern.test(value) && sensitivePayloadPatterns.some((pattern) => pattern.test(value));
-  }
-  if (Array.isArray(value)) return value.some(containsSensitivePayload);
+function isSanitizedPersistenceValue(value: unknown, key?: string): boolean {
+  if (typeof value === "string") return key !== undefined && isAllowedString(key, value);
+  if (Array.isArray(value)) return value.every((item) => isSanitizedPersistenceValue(item, key));
   if (typeof value === "object" && value !== null) {
-    return Object.values(value).some(containsSensitivePayload);
+    return Object.entries(value).every(([childKey, child]) => isSanitizedPersistenceValue(child, childKey));
   }
-  return false;
+  return value === undefined || value === null || typeof value === "boolean" || typeof value === "number";
+}
+
+function isAllowedString(key: string, value: string): boolean {
+  if (schemaConstrainedStringKeys.has(key)) return true;
+  if (key === "model") return modelIdentifierPattern.test(value);
+  if (identifierStringKeys.has(key)) return identifierPattern.test(value);
+  if (key === "hostSuffix") return hostSuffixPattern.test(value);
+  if (key === "pathPrefixes") return pathPrefixPattern.test(value);
+  if (key === "expectedProfilePaths") return semanticPathPattern.test(value);
+  if (!metadataStringKeys.has(key) || !metadataPattern.test(value)) return false;
+  const digits = value.match(/\p{N}/gu)?.length ?? 0;
+  const tokens = value.match(/[\p{L}\p{N}_]+/gu) ?? [];
+  if (digits > 4 || tokens.some((token) => /^[A-Za-z0-9_-]{32,}$/u.test(token))) return false;
+  return tokens.every((token) => !prohibitedMetadataWords.has(token.toLowerCase()))
+    && !tokens.some((token) => /^(?:sk_live_|sk_test_|ghp_|akia|eyj)[A-Za-z0-9_-]+$/iu.test(token));
 }
 
 export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {

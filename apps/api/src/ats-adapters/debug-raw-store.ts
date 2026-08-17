@@ -75,10 +75,10 @@ export function createDebugRawStore(database: SqliteDatabase, config: DebugRawSt
       return id;
     },
     read(id, actor) {
-      const row = find.get(id) as DebugResponseRow | undefined;
-      if (!row) return undefined;
       const readAt = now();
       audit.run(id, actor, readAt.toISOString());
+      const row = find.get(id) as DebugResponseRow | undefined;
+      if (!row) return undefined;
       if (Date.parse(row.expires_at) <= readAt.getTime() || !config.enabled || !encryptionKey) return undefined;
       const decipher = createDecipheriv("aes-256-gcm", encryptionKey, row.iv);
       decipher.setAuthTag(row.auth_tag);

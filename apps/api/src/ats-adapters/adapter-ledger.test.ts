@@ -253,6 +253,61 @@ describe("createAdapterLedger", () => {
     expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_human_reviews").get()).toEqual({ count: 0 });
   });
 
+  it("rejects raw HTML fragments before proposal persistence", () => {
+    const ledger = createAdapterLedger(database);
+    const candidate = proposal();
+
+    expect(() => ledger.createProposal({
+      ...candidate,
+      definition: {
+        ...candidate.definition,
+        fieldRules: [{
+          ...candidate.definition.fieldRules[0]!,
+          labelAliases: ["<section data-field='email'>Email</section>"]
+        }]
+      }
+    })).toThrowError("adapter_sensitive_payload_rejected");
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_proposals").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects screenshot and base64 artifacts before replay persistence", () => {
+    const ledger = createAdapterLedger(database);
+    ledger.createProposal(proposal());
+    const screenshot = `data:image/png;base64,${Buffer.alloc(96, 7).toString("base64")}`;
+
+    expect(() => ledger.recordReplay([replay("fixture-one", {
+      assertions: [{ code: "zero_submit", passed: true, detail: screenshot }]
+    })])).toThrowError("adapter_sensitive_payload_rejected");
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_replay_reports").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects credential-shaped AI findings before review persistence", () => {
+    const ledger = createAdapterLedger(database);
+    ledger.createProposal(proposal());
+    ledger.recordReplay([replay("fixture-one"), replay("fixture-two")]);
+
+    expect(() => ledger.recordAiReview(aiReview({
+      findings: [{ code: "unsafe", severity: "error", explanation: "client_secret sk_live_test_1234567890" }]
+    }))).toThrowError("adapter_sensitive_payload_rejected");
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_ai_reviews").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects executable browser command artifacts before human review persistence", () => {
+    const ledger = createAdapterLedger(database);
+    ledger.createProposal(proposal());
+    ledger.recordReplay([replay("fixture-one"), replay("fixture-two")]);
+    ledger.recordAiReview(aiReview());
+    const rawCommand = JSON.stringify({ type: "fill", fieldId: "email", value: "synthetic-value" });
+
+    expect(() => ledger.recordHumanDecision(humanDecision({ notes: rawCommand })))
+      .toThrowError("adapter_sensitive_payload_rejected");
+
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_human_reviews").get()).toEqual({ count: 0 });
+  });
+
   it("records immutable retirement tombstones for local and built-in packs", () => {
     const ledger = createAdapterLedger(database);
     ledger.retire("built-in-pack", "2.0.0", "unsafe mapping");

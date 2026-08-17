@@ -68,4 +68,31 @@ describe("createDebugRawStore", () => {
     expect(store.purgeExpired()).toBe(1);
     expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_debug_responses").get()).toEqual({ count: 0 });
   });
+
+  it("audits reads for absent and already-purged response ids", () => {
+    let current = new Date("2026-08-17T00:00:00.000Z");
+    const store = createDebugRawStore(database, {
+      enabled: true,
+      encryptionKey: Buffer.alloc(32, 4),
+      ttlHours: 1,
+      now: () => current
+    });
+
+    expect(store.read("missing-response", "missing-reviewer")).toBeUndefined();
+    const purgedId = store.retain({
+      proposalId: "proposal-1",
+      purpose: "proposal",
+      plaintext: "short-lived synthetic body"
+    });
+    current = new Date("2026-08-17T01:00:00.000Z");
+    expect(store.purgeExpired()).toBe(1);
+    expect(store.read(purgedId!, "purged-reviewer")).toBeUndefined();
+
+    expect(database.prepare(`
+      SELECT response_id, actor FROM ats_adapter_debug_accesses ORDER BY id
+    `).all()).toEqual([
+      { response_id: "missing-response", actor: "missing-reviewer" },
+      { response_id: purgedId, actor: "purged-reviewer" }
+    ]);
+  });
 });
