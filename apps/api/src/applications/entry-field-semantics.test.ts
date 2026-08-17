@@ -102,6 +102,38 @@ describe("deriveEntrySemanticHints", () => {
     ]);
   });
 
+  it("reindexes repeated entry starts from a certified DJI hint pack", () => {
+    const provenance = {
+      packId: "dji-campus",
+      packVersion: "1.0.0",
+      confidence: 1,
+      certification: "certified" as const
+    };
+    const fields = deriveEntrySemanticHints([
+      {
+        ...field("project-1-name", "项目名称"),
+        semanticHint: "projects[0].name",
+        semanticSource: "certified_hint",
+        semanticProvenance: provenance
+      },
+      field("project-1-description", "项目描述"),
+      {
+        ...field("project-2-name", "项目名称"),
+        semanticHint: "projects[0].name",
+        semanticSource: "certified_hint",
+        semanticProvenance: provenance
+      },
+      field("project-2-description", "项目描述")
+    ]);
+
+    expect(fields.map((candidate) => candidate.semanticHint)).toEqual([
+      "projects[0].name",
+      "projects[0].description",
+      "projects[1].name",
+      "projects[1].description"
+    ]);
+  });
+
   it("uses canonical profile paths for education and internship entries", () => {
     const fields = deriveEntrySemanticHints([
       field("school", "学校"),

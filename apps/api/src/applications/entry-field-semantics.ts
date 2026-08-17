@@ -74,7 +74,7 @@ export function deriveEntrySemanticHints(fields: FormField[], options: EntrySema
   return fields.map((field) => {
     const existingContext = entryContext(field.semanticHint);
     if (existingContext !== undefined) {
-      const cataloguedEntryStart = field.semanticSource === "dji_catalog"
+      const cataloguedEntryStart = (field.semanticSource === "dji_catalog" || field.semanticSource === "certified_hint")
         && fieldFor(existingContext.kind, field.label.trim()) === entryStartField(existingContext.kind);
       const index = cataloguedEntryStart
         ? Math.max(existingContext.index, state[existingContext.kind] + 1)
