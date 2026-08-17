@@ -728,6 +728,91 @@ describe("application machine", () => {
     database.close();
   });
 
+  it("prioritizes a challenge when re-observing after adapter certification", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "certification-challenge-field",
+        label: "Certification challenge field",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "",
+        nodeRef: fixtureNodeRef
+      }]
+    };
+    const challenged: FormSnapshot = {
+      ...form,
+      id: "certification-challenge-snapshot",
+      challenge: {
+        kind: "captcha",
+        detectedAt: "2026-08-18T00:00:00.000Z",
+        reasonCode: "moka_captcha_accessible_name"
+      }
+    };
+    const pack = CertifiedHintPackSchema.parse({
+      schemaVersion: 1,
+      packId: "certification-challenge-pack",
+      version: "1.0.0",
+      match: {
+        sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
+        stages: ["application_form"],
+        requiredTextSignals: [],
+        pageFingerprintHashes: []
+      },
+      sectionRules: [],
+      fieldRules: [],
+      actionRules: [],
+      fixtures: [{ fixtureId: "certification-challenge", expectedProfilePaths: ["basics.name"] }],
+      lifecycleStatus: "certified",
+      certifiedAt: "2026-08-17T00:00:00.000Z",
+      provenance: {
+        proposalId: "certification-challenge-proposal",
+        replayReportIds: ["certification-challenge-replay"],
+        humanReviewId: "certification-challenge-human-review"
+      }
+    });
+    let certified = false;
+    const invalidateExecution = vi.fn(async () => undefined);
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: {
+        observe: vi.fn().mockResolvedValueOnce(form).mockResolvedValueOnce(challenged),
+        execute: vi.fn(),
+        invalidateExecution
+      },
+      resolveField: async () => ({ status: "needs_question" as const, question: "Required" }),
+      approve: () => "approved-token",
+      hintPackRegistry: {
+        resolve: () => certified
+          ? { kind: "certified" as const, pack }
+          : { kind: "review_only" as const, reason: "no_certified_pack" as const, mismatchedPacks: [] },
+        listCertified: () => certified ? [pack] : []
+      },
+      adapterReviewService: {
+        prepare: async () => ({
+          replayReports: [],
+          lifecycleStatus: "candidate" as const,
+          aiReviewUnavailable: false,
+          writeBlocked: true as const
+        }),
+        retire: vi.fn()
+      }
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+    expect(service.state("task-1").value).toBe("awaiting_adapter_review");
+
+    certified = true;
+    await service.resumeAfterAdapterCertification("task-1");
+
+    expect(service.state("task-1").value).toBe("awaiting_challenge");
+    expect(invalidateExecution).toHaveBeenCalledTimes(2);
+    database.close();
+  });
+
   it("prioritizes a challenge over registry review without retiring the active pack", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

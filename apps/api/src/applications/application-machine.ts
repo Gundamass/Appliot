@@ -155,7 +155,10 @@ export const applicationMachine = setup({
       }
     },
     awaiting_adapter_review: {
-      on: { ADAPTER_CERTIFIED: "observing" }
+      on: {
+        ADAPTER_CERTIFIED: "observing",
+        CHALLENGE_DETECTED: { target: "awaiting_challenge", actions: "storeChallenge" }
+      }
     },
     review_locked: { on: { CANCEL: undefined } },
     cancelled: {},

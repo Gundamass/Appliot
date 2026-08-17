@@ -651,7 +651,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       try {
         const observed = await dependencies.browser.observe(taskId);
         const prepared = await prepareObservedSnapshot(taskId, actor, observed);
-        if (prepared === undefined) throw new Error("adapter_not_certified");
+        if (prepared === undefined) {
+          if (actor.getSnapshot().value === "awaiting_challenge") return;
+          throw new Error("adapter_not_certified");
+        }
         invalidateRunGeneration(taskId);
         await invalidateExecution(taskId);
         sendApplicationEvent(actor, { type: "ADAPTER_CERTIFIED" });
