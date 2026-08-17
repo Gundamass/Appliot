@@ -17,6 +17,8 @@ The documentation covers four independent repositories:
 
 Each repository is analyzed, documented, and verified independently. The context documents must not create a cross-repository call graph, shared runtime architecture, or integration relationship.
 
+Generated context artifacts are stored outside the repositories under `E:\projects\docs`, with one directory per repository. The repositories themselves are not modified by this documentation task.
+
 ## Goals
 
 For each repository, the resulting documents must let a reader determine:
@@ -44,15 +46,15 @@ The documentation will not:
 
 ## Documentation Architecture
 
-Every repository receives a root-level `PROJECT_CONTEXT.md`. This is the required entry point and is designed for progressive reading.
+Every repository receives `E:\projects\docs\<repository-name>\PROJECT_CONTEXT.md`. This is the required entry point and is designed for progressive reading.
 
-Small repositories may keep all content in that file. Larger repositories may add a `docs/project-context/` directory containing only the detail documents justified by their implementation.
+Small repositories may keep all content in that file. Larger repositories may add detail files beside it under `E:\projects\docs\<repository-name>\project-context\`, containing only the detail documents justified by their implementation.
 
 The maximum detail-document set is:
 
 ```text
-PROJECT_CONTEXT.md
-docs/project-context/
+<repository-name>/PROJECT_CONTEXT.md
+<repository-name>/project-context/
 |-- 01-architecture.md
 |-- 02-business-flows.md
 |-- 03-data-and-state.md
