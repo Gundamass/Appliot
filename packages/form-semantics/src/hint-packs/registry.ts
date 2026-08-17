@@ -2,6 +2,7 @@ import { createHash } from "node:crypto";
 import type { CertifiedHintPack, FormSnapshot } from "@resume/contracts";
 import { djiHintPack } from "./dji-pack.js";
 import { mokahrHintPack } from "./mokahr-pack.js";
+import { certifiedTextIncludes } from "./text-reference.js";
 
 export const BUILT_IN_HINT_PACKS = [djiHintPack, mokahrHintPack] as const;
 
@@ -34,16 +35,16 @@ export function createHintPackRegistry(input: {
         return { kind: "review_only", reason: "no_certified_pack", mismatchedPacks: [] };
       }
 
-      const text = normalize([
+      const text = [
         snapshot.title,
         ...snapshot.fields.map((field) => `${field.sectionHint ?? ""} ${field.label}`),
         ...snapshot.actions.map((action) => `${action.context ?? ""} ${action.text}`)
-      ].join(" "));
+      ].join(" ");
       const fingerprint = fingerprintSnapshot(snapshot);
       const siteCandidates = all().filter((candidate) => candidate.match.stages.includes(snapshot.stage as "application_form" | "review")
         && candidate.match.sites.some((site) => hostMatches(url.hostname, site.hostSuffix)
           && site.pathPrefixes.some((prefix) => url.pathname.startsWith(prefix)))
-        && candidate.match.requiredTextSignals.every((signal) => text.includes(normalize(signal))));
+        && candidate.match.requiredTextSignals.every((signal) => certifiedTextIncludes(text, signal)));
       const pack = siteCandidates.find((candidate) => candidate.match.pageFingerprintHashes.length === 0
         || candidate.match.pageFingerprintHashes.includes(fingerprint));
 

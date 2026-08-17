@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { CertifiedHintPack, FormSnapshot } from "@resume/contracts";
 import { djiHintPack } from "./dji-pack.js";
@@ -59,7 +60,61 @@ describe("certified hint-pack runtime", () => {
       { actionId: "add-laboratory", section: "laboratory" }
     ]);
   });
+
+  it("matches opaque local-pack references for arbitrary labels, headings, and action verbs", () => {
+    const pack: CertifiedHintPack = {
+      ...djiHintPack,
+      packId: "referenced-local",
+      match: { ...djiHintPack.match, requiredTextSignals: [], pageFingerprintHashes: [] },
+      sectionRules: [{
+        section: "work",
+        headingAliases: [textReference("Employment History")],
+        fieldOrderAliases: []
+      }],
+      fieldRules: [{
+        ruleId: "preferred-first-name",
+        profilePath: "basics.name",
+        labelAliases: [textReference("Preferred First Name")],
+        sections: ["work"],
+        controlTypes: ["text"],
+        confidence: 1
+      }],
+      actionRules: [{
+        kind: "add_repeated_entry",
+        verbs: [textReference("Add another employment")],
+        sections: ["work"]
+      }]
+    };
+    const observed = {
+      ...snapshot("https://jobs.example.test/apply", [{
+        label: "Preferred First Name",
+        sectionHint: "work"
+      }]),
+      actions: [{
+        id: "add-employment",
+        text: "Add another employment",
+        class: "safe_edit" as const,
+        context: "Employment History",
+        nodeRef
+      }]
+    };
+
+    expect(applyCertifiedHintPack(observed, pack).fields[0]).toMatchObject({
+      semanticHint: "basics.name",
+      semanticSource: "certified_hint"
+    });
+    expect(classifyRepeatedActions(observed, pack)).toEqual([
+      { actionId: "add-employment", section: "work" }
+    ]);
+  });
 });
+
+function textReference(value: string): string {
+  const normalized = value.normalize("NFKC").replace(/\s+/gu, "").trim().toLocaleLowerCase();
+  const length = [...normalized].length;
+  const digest = createHash("sha256").update(`certified-hint-text-v1\0${normalized}`).digest("hex");
+  return `ats:sha256:${length}:${digest}`;
+}
 
 function snapshot(
   url: string,

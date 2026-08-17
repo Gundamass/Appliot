@@ -10,6 +10,7 @@ import { migrateDatabase } from "../db/migrate.js";
 import { createAdapterLedger } from "./adapter-ledger.js";
 
 const hash = (character: string) => character.repeat(64);
+const matchingReference = /^ats:sha256:\d{1,3}:[a-f0-9]{64}$/u;
 
 function proposal(overrides: Partial<AiHintPackProposal> = {}): AiHintPackProposal {
   return {
@@ -154,8 +155,14 @@ describe("createAdapterLedger", () => {
     expect(() => ledger.certify("proposal-1")).toThrowError("adapter_transition_denied");
     expect(() => ledger.createProposal(proposal({ proposalId: "proposal-2", taskId: "task-2" })))
       .toThrow();
-    expect(database.prepare("SELECT payload_json FROM ats_adapter_ai_reviews WHERE review_id = ?").get("ai-review-1"))
-      .toEqual({ payload_json: JSON.stringify(aiReview()) });
+    expect(ledger.findReviewSummary("proposal-1")?.aiReview).toMatchObject({
+      recommendation: "accept_for_human_review",
+      findings: [{
+        code: "safe",
+        severity: "info",
+        explanation: "redacted:finding:safe:info:recommendation-accept_for_human_review"
+      }]
+    });
   });
 
   it("allows the explicitly acknowledged AI-unavailable path but no other replay-to-human path", () => {
@@ -185,7 +192,13 @@ describe("createAdapterLedger", () => {
     const ledger = createAdapterLedger(database);
     const candidate = proposal();
     ledger.createProposal(candidate);
-    expect(ledger.findProposal("proposal-1")).toEqual(candidate);
+    expect(ledger.findProposal("proposal-1")).toMatchObject({
+      definition: {
+        fieldRules: [expect.objectContaining({
+          labelAliases: [expect.stringMatching(matchingReference)]
+        })]
+      }
+    });
     expect(ledger.findActiveByFingerprint("task-1", hash("a"))?.lifecycleStatus).toBe("candidate");
     ledger.recordReplay([replay("fixture-one"), replay("fixture-two")]);
 
@@ -312,7 +325,11 @@ describe("createAdapterLedger", () => {
     "api-key synthetic",
     "client-secret synthetic",
     "node-ref synthetic",
-    "type/fill/field-id/value"
+    "type/fill/field-id/value",
+    "screenshot: page.png",
+    "approval: cap-abc",
+    "credential id AKIAIOSFODNN7EXAMPLE",
+    `ats:sha256:5:${"a".repeat(64)}`
   ])("rejects punctuation-normalized artifact metadata: %s", (artifact) => {
     const ledger = createAdapterLedger(database);
     const candidate = proposal();
@@ -330,24 +347,61 @@ describe("createAdapterLedger", () => {
     expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_proposals").get()).toEqual({ count: 0 });
   });
 
-  it("rejects natural-language profile values in operational alias fields", () => {
+  it("persists arbitrary bounded ATS matching text as opaque references", () => {
     const ledger = createAdapterLedger(database);
     const candidate = proposal();
+    const atsText = [
+      "Candidate Details",
+      "Candidate Information Session",
+      "Employment History",
+      "Preferred First Name",
+      "Add another employment"
+    ];
 
-    expect(() => ledger.createProposal({
+    ledger.createProposal({
       ...candidate,
       definition: {
         ...candidate.definition,
+        match: {
+          ...candidate.definition.match,
+          requiredTextSignals: [atsText[0]!, atsText[1]!]
+        },
+        sectionRules: [{
+          section: "work",
+          headingAliases: [atsText[2]!],
+          fieldOrderAliases: [[atsText[3]!]]
+        }],
         fieldRules: [{
           ...candidate.definition.fieldRules[0]!,
-          labelAliases: ["Alice Example"]
+          labelAliases: [atsText[3]!]
+        }],
+        actionRules: [{
+          kind: "add_repeated_entry",
+          verbs: [atsText[4]!],
+          sections: ["work"]
         }]
       }
-    })).toThrowError("adapter_sensitive_payload_rejected");
-    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_proposals").get()).toEqual({ count: 0 });
+    });
+
+    const persisted = ledger.findProposal("proposal-1")!;
+    expect(persisted.definition.match.requiredTextSignals).toEqual([
+      expect.stringMatching(matchingReference),
+      expect.stringMatching(matchingReference)
+    ]);
+    expect(persisted.definition.sectionRules[0]).toMatchObject({
+      headingAliases: [expect.stringMatching(matchingReference)],
+      fieldOrderAliases: [[expect.stringMatching(matchingReference)]]
+    });
+    expect(persisted.definition.fieldRules[0]?.labelAliases)
+      .toEqual([expect.stringMatching(matchingReference)]);
+    expect(persisted.definition.actionRules[0]?.verbs)
+      .toEqual([expect.stringMatching(matchingReference)]);
+    const payload = (database.prepare("SELECT payload_json FROM ats_adapter_proposals").get() as { payload_json: string })
+      .payload_json;
+    for (const value of atsText) expect(payload).not.toContain(value);
   });
 
-  it("stores unrestricted structured metadata only as sanitized references", () => {
+  it("returns explicit redacted review meaning without original prose or PII", () => {
     const ledger = createAdapterLedger(database);
     const profileValue = "Candidate name Alice Example";
     ledger.createProposal(proposal({ unsupportedBoundaries: [profileValue] }));
@@ -373,12 +427,27 @@ describe("createAdapterLedger", () => {
       expect(rows.every(({ payload_json }) => !payload_json.includes(profileValue))).toBe(true);
     }
     expect(ledger.findReviewSummary("proposal-1")).toMatchObject({
-      proposal: { unsupportedBoundaries: [expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u)] },
+      proposal: { unsupportedBoundaries: ["redacted:unsupported-boundary"] },
       replayReports: expect.arrayContaining([expect.objectContaining({
-        assertions: [expect.objectContaining({ detail: expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u) })]
+        status: "passed",
+        assertions: [expect.objectContaining({
+          code: "zero_submit",
+          passed: true,
+          detail: "redacted:assertion:zero_submit:passed:report-passed"
+        })]
       })]),
-      aiReview: { findings: [expect.objectContaining({ explanation: expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u) })] },
-      humanDecision: { notes: expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u) }
+      aiReview: {
+        recommendation: "accept_for_human_review",
+        findings: [expect.objectContaining({
+          code: "safe",
+          severity: "info",
+          explanation: "redacted:finding:safe:info:recommendation-accept_for_human_review"
+        })]
+      },
+      humanDecision: {
+        decision: "certify",
+        notes: "redacted:human-decision:certify:ai-review-available:fallback-not-acknowledged"
+      }
     });
   });
 
@@ -395,7 +464,7 @@ describe("createAdapterLedger", () => {
     expect(retirement).toEqual({
       pack_id: "built-in-pack",
       version: "2.0.0",
-      reason: expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u)
+      reason: "redacted:retirement-reason"
     });
     expect(JSON.stringify(retirement)).not.toContain(profileValue);
     expect(() => ledger.retire("candidate@example.com", "2.0.0", "unsafe mapping"))

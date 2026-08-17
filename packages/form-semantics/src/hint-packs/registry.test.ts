@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import type { CertifiedHintPack, FormSnapshot } from "@resume/contracts";
 import { djiHintPack } from "./dji-pack.js";
@@ -91,7 +92,39 @@ describe("certified hint-pack registry", () => {
     expect(registry.resolve(snapshot("https://one.example.test/two/apply", ["毕业院校"])).kind).toBe("review_only");
     expect(fingerprintSnapshot(valueA)).toBe(fingerprintSnapshot(valueB));
   });
+
+  it("resolves a local pack whose required text signals are opaque references", () => {
+    const referencedPack: CertifiedHintPack = {
+      ...djiHintPack,
+      packId: "referenced-local",
+      match: {
+        ...djiHintPack.match,
+        requiredTextSignals: [textReference("Candidate Details")],
+        pageFingerprintHashes: []
+      }
+    };
+    const registry = createHintPackRegistry({
+      builtIns: [],
+      local: () => [referencedPack],
+      isRetired: () => false
+    });
+
+    expect(registry.resolve(snapshot(
+      "https://apply.careers.dji.com/campus",
+      ["Candidate Details"]
+    ))).toMatchObject({
+      kind: "certified",
+      pack: { packId: "referenced-local" }
+    });
+  });
 });
+
+function textReference(value: string): string {
+  const normalized = value.normalize("NFKC").replace(/\s+/gu, "").trim().toLowerCase();
+  const length = [...normalized].length;
+  const digest = createHash("sha256").update(`certified-hint-text-v1\0${normalized}`).digest("hex");
+  return `ats:sha256:${length}:${digest}`;
+}
 
 function snapshot(url: string, labels: string[]): FormSnapshot {
   return {

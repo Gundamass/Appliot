@@ -1,4 +1,5 @@
 import type { CertifiedHintPack, FormField, FormSnapshot, HintPackRepeatSection } from "@resume/contracts";
+import { certifiedTextEquals, certifiedTextIncludes } from "./text-reference.js";
 
 export function applyCertifiedHintPack(snapshot: FormSnapshot, pack: CertifiedHintPack): FormSnapshot {
   if (pack.lifecycleStatus !== "certified") return snapshot;
@@ -11,13 +12,13 @@ export function classifyRepeatedActions(
 ): Array<{ actionId: string; section: HintPackRepeatSection }> {
   if (pack.lifecycleStatus !== "certified") return [];
   return snapshot.actions.flatMap((action) => pack.actionRules.flatMap((rule) => {
-    if (rule.kind !== "add_repeated_entry" || !rule.verbs.some((verb) => normalize(action.text).includes(normalize(verb)))) {
+    if (rule.kind !== "add_repeated_entry" || !rule.verbs.some((verb) => certifiedTextIncludes(action.text, verb))) {
       return [];
     }
-    const context = normalize(`${action.context ?? ""} ${action.text}`);
+    const context = `${action.context ?? ""} ${action.text}`;
     const section = pack.sectionRules.find((candidate) =>
       rule.sections.includes(candidate.section as HintPackRepeatSection)
-      && candidate.headingAliases.some((alias) => context.includes(normalize(alias)))
+      && candidate.headingAliases.some((alias) => certifiedTextIncludes(context, alias))
     )?.section;
     if (section === undefined || !rule.sections.includes(section as HintPackRepeatSection)) return [];
     return [{ actionId: action.id, section: section as HintPackRepeatSection }];
@@ -25,9 +26,8 @@ export function classifyRepeatedActions(
 }
 
 function annotate(field: FormField, pack: CertifiedHintPack): FormField {
-  const label = normalize(field.label);
   const rule = pack.fieldRules.find((candidate) => candidate.controlTypes.includes(field.type)
-    && candidate.labelAliases.some((alias) => normalize(alias) === label)
+    && candidate.labelAliases.some((alias) => certifiedTextEquals(field.label, alias))
     && (candidate.sections.length === 0
       || field.sectionHint === undefined
       || candidate.sections.includes(field.sectionHint)));
@@ -42,8 +42,4 @@ function annotate(field: FormField, pack: CertifiedHintPack): FormField {
       certification: "certified"
     }
   };
-}
-
-function normalize(value: string): string {
-  return value.normalize("NFKC").replace(/\s+/gu, "").trim().toLocaleLowerCase();
 }
