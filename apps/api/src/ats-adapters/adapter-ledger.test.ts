@@ -308,6 +308,101 @@ describe("createAdapterLedger", () => {
     expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_human_reviews").get()).toEqual({ count: 0 });
   });
 
+  it.each([
+    "api-key synthetic",
+    "client-secret synthetic",
+    "node-ref synthetic",
+    "type/fill/field-id/value"
+  ])("rejects punctuation-normalized artifact metadata: %s", (artifact) => {
+    const ledger = createAdapterLedger(database);
+    const candidate = proposal();
+
+    expect(() => ledger.createProposal({
+      ...candidate,
+      definition: {
+        ...candidate.definition,
+        fieldRules: [{
+          ...candidate.definition.fieldRules[0]!,
+          labelAliases: [artifact]
+        }]
+      }
+    })).toThrowError("adapter_sensitive_payload_rejected");
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_proposals").get()).toEqual({ count: 0 });
+  });
+
+  it("rejects natural-language profile values in operational alias fields", () => {
+    const ledger = createAdapterLedger(database);
+    const candidate = proposal();
+
+    expect(() => ledger.createProposal({
+      ...candidate,
+      definition: {
+        ...candidate.definition,
+        fieldRules: [{
+          ...candidate.definition.fieldRules[0]!,
+          labelAliases: ["Alice Example"]
+        }]
+      }
+    })).toThrowError("adapter_sensitive_payload_rejected");
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_proposals").get()).toEqual({ count: 0 });
+  });
+
+  it("stores unrestricted structured metadata only as sanitized references", () => {
+    const ledger = createAdapterLedger(database);
+    const profileValue = "Candidate name Alice Example";
+    ledger.createProposal(proposal({ unsupportedBoundaries: [profileValue] }));
+    ledger.recordReplay([
+      replay("fixture-one", {
+        assertions: [{ code: "zero_submit", passed: true, detail: profileValue }]
+      }),
+      replay("fixture-two")
+    ]);
+    ledger.recordAiReview(aiReview({
+      findings: [{ code: "safe", severity: "info", explanation: profileValue }]
+    }));
+    ledger.recordHumanDecision(humanDecision({ notes: profileValue }));
+
+    for (const table of [
+      "ats_adapter_proposals",
+      "ats_adapter_replay_reports",
+      "ats_adapter_ai_reviews",
+      "ats_adapter_human_reviews"
+    ]) {
+      const rows = database.prepare(`SELECT payload_json FROM ${table}`).all() as Array<{ payload_json: string }>;
+      expect(rows).not.toHaveLength(0);
+      expect(rows.every(({ payload_json }) => !payload_json.includes(profileValue))).toBe(true);
+    }
+    expect(ledger.findReviewSummary("proposal-1")).toMatchObject({
+      proposal: { unsupportedBoundaries: [expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u)] },
+      replayReports: expect.arrayContaining([expect.objectContaining({
+        assertions: [expect.objectContaining({ detail: expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u) })]
+      })]),
+      aiReview: { findings: [expect.objectContaining({ explanation: expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u) })] },
+      humanDecision: { notes: expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u) }
+    });
+  });
+
+  it("hashes arbitrary retirement reasons and rejects unsafe retirement identifiers", () => {
+    const ledger = createAdapterLedger(database);
+    const profileValue = "Candidate name Alice Example";
+
+    ledger.retire("built-in-pack", "2.0.0", profileValue);
+
+    const retirement = database.prepare(`
+      SELECT pack_id, version, reason FROM ats_adapter_pack_retirements
+      WHERE pack_id = ? AND version = ?
+    `).get("built-in-pack", "2.0.0") as { pack_id: string; version: string; reason: string };
+    expect(retirement).toEqual({
+      pack_id: "built-in-pack",
+      version: "2.0.0",
+      reason: expect.stringMatching(/^sanitized:sha256:[a-f0-9]{64}$/u)
+    });
+    expect(JSON.stringify(retirement)).not.toContain(profileValue);
+    expect(() => ledger.retire("candidate@example.com", "2.0.0", "unsafe mapping"))
+      .toThrowError("adapter_sensitive_payload_rejected");
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_pack_retirements").get()).toEqual({ count: 1 });
+  });
+
   it("records immutable retirement tombstones for local and built-in packs", () => {
     const ledger = createAdapterLedger(database);
     ledger.retire("built-in-pack", "2.0.0", "unsafe mapping");

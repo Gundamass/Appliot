@@ -1,7 +1,12 @@
+import { createHash } from "node:crypto";
 import Database from "better-sqlite3";
 import { afterEach, beforeEach, describe, expect, it } from "vitest";
 import { migrateDatabase } from "../db/migrate.js";
 import { createDebugRawStore } from "./debug-raw-store.js";
+
+function auditHash(kind: "actor" | "response", value: string): string {
+  return `sha256:${createHash("sha256").update(`${kind}\0${value}`).digest("hex")}`;
+}
 
 describe("createDebugRawStore", () => {
   let database: InstanceType<typeof Database>;
@@ -27,8 +32,11 @@ describe("createDebugRawStore", () => {
     expect(stored.ciphertext.equals(Buffer.from("raw model body", "utf8"))).toBe(false);
     expect(stored.expires_at).toBe("2026-08-18T00:00:00.000Z");
     expect(store.read(id!, "local-reviewer")).toBe("raw model body");
-    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_debug_accesses WHERE response_id = ?").get(id))
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_debug_accesses WHERE response_id = ?")
+      .get(auditHash("response", id!)))
       .toEqual({ count: 1 });
+    expect(database.prepare("SELECT actor FROM ats_adapter_debug_accesses").get())
+      .toEqual({ actor: auditHash("actor", "local-reviewer") });
     expect(() => createDebugRawStore(database, {
       enabled: true,
       encryptionKey: Buffer.alloc(32),
@@ -51,6 +59,21 @@ describe("createDebugRawStore", () => {
       .toEqual({ expires_at: "2026-08-18T00:00:00.000Z" });
   });
 
+  it("rejects unsafe caller-provided proposal ids before raw retention", () => {
+    const store = createDebugRawStore(database, {
+      enabled: true,
+      encryptionKey: Buffer.alloc(32, 2),
+      now: () => new Date("2026-08-17T00:00:00.000Z")
+    });
+
+    expect(() => store.retain({
+      proposalId: "candidate@example.com",
+      purpose: "proposal",
+      plaintext: "synthetic raw body"
+    })).toThrowError("debug_raw_proposal_id_invalid");
+    expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_debug_responses").get()).toEqual({ count: 0 });
+  });
+
   it("audits expired reads and purges expired ciphertext", () => {
     let current = new Date("2026-08-17T00:00:00.000Z");
     const store = createDebugRawStore(database, {
@@ -63,8 +86,9 @@ describe("createDebugRawStore", () => {
     current = new Date("2026-08-17T01:00:00.000Z");
 
     expect(store.read(id!, "expiry-reviewer")).toBeUndefined();
-    expect(database.prepare("SELECT actor FROM ats_adapter_debug_accesses WHERE response_id = ?").all(id))
-      .toEqual([{ actor: "expiry-reviewer" }]);
+    expect(database.prepare("SELECT actor FROM ats_adapter_debug_accesses WHERE response_id = ?")
+      .all(auditHash("response", id!)))
+      .toEqual([{ actor: auditHash("actor", "expiry-reviewer") }]);
     expect(store.purgeExpired()).toBe(1);
     expect(database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_debug_responses").get()).toEqual({ count: 0 });
   });
@@ -91,8 +115,16 @@ describe("createDebugRawStore", () => {
     expect(database.prepare(`
       SELECT response_id, actor FROM ats_adapter_debug_accesses ORDER BY id
     `).all()).toEqual([
-      { response_id: "missing-response", actor: "missing-reviewer" },
-      { response_id: purgedId, actor: "purged-reviewer" }
+      {
+        response_id: auditHash("response", "missing-response"),
+        actor: auditHash("actor", "missing-reviewer")
+      },
+      {
+        response_id: auditHash("response", purgedId!),
+        actor: auditHash("actor", "purged-reviewer")
+      }
     ]);
+    expect(JSON.stringify(database.prepare("SELECT response_id, actor FROM ats_adapter_debug_accesses").all()))
+      .not.toMatch(/missing-response|missing-reviewer|purged-reviewer/u);
   });
 });

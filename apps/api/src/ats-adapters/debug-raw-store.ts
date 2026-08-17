@@ -1,8 +1,9 @@
-import { createCipheriv, createDecipheriv, randomBytes, randomUUID } from "node:crypto";
+import { createCipheriv, createDecipheriv, createHash, randomBytes, randomUUID } from "node:crypto";
 import type { SqliteDatabase } from "../db/client.js";
 
 const DEFAULT_TTL_HOURS = 24;
 const MAX_TTL_HOURS = 168;
+const PROPOSAL_ID_PATTERN = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 
 export interface DebugRawStoreConfig {
   enabled: boolean;
@@ -28,6 +29,10 @@ interface DebugResponseRow {
   iv: Buffer;
   auth_tag: Buffer;
   expires_at: string;
+}
+
+function auditHash(kind: "actor" | "response", value: string): string {
+  return `sha256:${createHash("sha256").update(`${kind}\0${value}`).digest("hex")}`;
 }
 
 export function createDebugRawStore(database: SqliteDatabase, config: DebugRawStoreConfig): DebugRawStore {
@@ -56,6 +61,7 @@ export function createDebugRawStore(database: SqliteDatabase, config: DebugRawSt
   return {
     retain(input) {
       if (!config.enabled || !encryptionKey) return undefined;
+      if (!PROPOSAL_ID_PATTERN.test(input.proposalId)) throw new Error("debug_raw_proposal_id_invalid");
       const retainedAt = now();
       const iv = randomBytes(12);
       const cipher = createCipheriv("aes-256-gcm", encryptionKey, iv);
@@ -76,7 +82,7 @@ export function createDebugRawStore(database: SqliteDatabase, config: DebugRawSt
     },
     read(id, actor) {
       const readAt = now();
-      audit.run(id, actor, readAt.toISOString());
+      audit.run(auditHash("response", id), auditHash("actor", actor), readAt.toISOString());
       const row = find.get(id) as DebugResponseRow | undefined;
       if (!row) return undefined;
       if (Date.parse(row.expires_at) <= readAt.getTime() || !config.enabled || !encryptionKey) return undefined;

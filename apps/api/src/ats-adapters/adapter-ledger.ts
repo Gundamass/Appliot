@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   AdapterReviewSummarySchema,
   AiHintPackProposalSchema,
@@ -51,21 +52,48 @@ const identifierStringKeys = new Set([
   "proposalId", "taskId", "parentProposalId", "packId", "provider", "model",
   "ruleId", "reportId", "reviewId", "code", "reviewer"
 ]);
-const metadataStringKeys = new Set([
-  "requiredTextSignals", "headingAliases", "fieldOrderAliases", "labelAliases",
-  "verbs", "unsupportedBoundaries", "detail", "explanation", "notes"
+const uiMetadataStringKeys = new Set([
+  "requiredTextSignals", "headingAliases", "fieldOrderAliases", "labelAliases", "verbs"
 ]);
-const prohibitedMetadataWords = new Set([
-  "authorization", "bearer", "cookie", "session", "password", "client_secret",
-  "api_key", "access_token", "refresh_token", "currentvalue", "noderef", "approval",
-  "approvaltoken", "approvalkey", "screenshot"
+const unrestrictedStringKeys = new Set([
+  "unsupportedBoundaries", "detail", "explanation", "notes"
+]);
+const allowedUiMetadataValues = new Set([
+  "education", "education history", "school", "school name", "university", "college",
+  "major", "degree", "work", "work experience", "employment", "employer", "company",
+  "company name", "job title", "position", "internship", "internship experience", "project",
+  "projects", "project experience", "award", "awards", "language", "languages", "laboratory",
+  "lab", "email", "e-mail", "email address", "phone", "phone number", "mobile", "mobile phone",
+  "name", "full name", "gender", "date of birth", "birthday", "nationality", "address", "city",
+  "province", "country", "start date", "end date", "description", "responsibilities", "skills",
+  "certificate", "self evaluation", "add", "add entry", "save", "next", "continue",
+  "姓名", "性别", "出生日期", "国籍", "地址", "城市", "省份", "国家", "邮箱", "电子邮箱",
+  "电话", "手机号", "手机号码", "教育", "教育经历", "学校", "院校", "专业", "学历", "学位",
+  "工作", "工作经历", "公司", "职位", "实习", "实习经历", "项目", "项目经历", "获奖",
+  "获奖经历", "语言", "语言能力", "实验室", "开始日期", "结束日期", "描述", "职责", "技能",
+  "证书", "自我评价", "添加", "新增", "保存", "下一步", "继续"
+]);
+const allowedUnrestrictedLiterals = new Set([
+  "No submission occurred.",
+  "No terminal submission occurred.",
+  "Structured replay checks passed.",
+  "All hard assertions passed.",
+  "Unexpected submit was recorded.",
+  "unsafe mapping",
+  "superseded mapping"
+]);
+const prohibitedArtifactTokens = new Set([
+  "authorization", "bearer", "cookie", "session", "password", "currentvalue",
+  "noderef", "approval", "approvaltoken", "approvalkey", "screenshot"
 ]);
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const modelIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$/u;
+const packIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/u;
+const semverPattern = /^\d+\.\d+\.\d+$/u;
 const hostSuffixPattern = /^(?:[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?\.)*[A-Za-z0-9](?:[A-Za-z0-9-]{0,61}[A-Za-z0-9])?$/u;
 const pathPrefixPattern = /^\/[A-Za-z0-9._~/-]*$/u;
 const semanticPathPattern = /^[a-z][a-zA-Z0-9]*(?:\[\d+\])?(?:\.[a-z][a-zA-Z0-9]*)*$/u;
-const metadataPattern = /^[\p{L}\p{M}\p{N}\p{Zs}.,;:!?"'()_/-]+$/u;
+const sanitizedReferencePattern = /^sanitized:sha256:[a-f0-9]{64}$/u;
 
 function assertSanitizedPayload(value: unknown): void {
   if (!isSanitizedPersistenceValue(value)) throw new Error("adapter_sensitive_payload_rejected");
@@ -82,17 +110,84 @@ function isSanitizedPersistenceValue(value: unknown, key?: string): boolean {
 
 function isAllowedString(key: string, value: string): boolean {
   if (schemaConstrainedStringKeys.has(key)) return true;
-  if (key === "model") return modelIdentifierPattern.test(value);
-  if (identifierStringKeys.has(key)) return identifierPattern.test(value);
+  if (key === "model") return modelIdentifierPattern.test(value) && !hasExplicitArtifact(value);
+  if (identifierStringKeys.has(key)) return identifierPattern.test(value) && !hasExplicitArtifact(value);
   if (key === "hostSuffix") return hostSuffixPattern.test(value);
   if (key === "pathPrefixes") return pathPrefixPattern.test(value);
   if (key === "expectedProfilePaths") return semanticPathPattern.test(value);
-  if (!metadataStringKeys.has(key) || !metadataPattern.test(value)) return false;
+  if (unrestrictedStringKeys.has(key)) {
+    return allowedUnrestrictedLiterals.has(value) || sanitizedReferencePattern.test(value);
+  }
+  return uiMetadataStringKeys.has(key)
+    && allowedUiMetadataValues.has(value.normalize("NFKC").trim().toLowerCase());
+}
+
+function hasExplicitArtifact(value: string): boolean {
+  const normalized = value.normalize("NFKC").toLowerCase();
   const digits = value.match(/\p{N}/gu)?.length ?? 0;
-  const tokens = value.match(/[\p{L}\p{N}_]+/gu) ?? [];
-  if (digits > 4 || tokens.some((token) => /^[A-Za-z0-9_-]{32,}$/u.test(token))) return false;
-  return tokens.every((token) => !prohibitedMetadataWords.has(token.toLowerCase()))
-    && !tokens.some((token) => /^(?:sk_live_|sk_test_|ghp_|akia|eyj)[A-Za-z0-9_-]+$/iu.test(token));
+  const tokens = normalized.match(/[\p{L}\p{N}]+/gu) ?? [];
+  const tokenSet = new Set(tokens);
+  const hasPair = (left: string, right: string) => tokenSet.has(left) && tokenSet.has(right);
+  const commandShaped = tokenSet.has("type")
+    && ["fill", "click", "select", "upload"].some((token) => tokenSet.has(token))
+    && (tokenSet.has("value") || hasPair("field", "id"));
+  const opaqueToken = value.match(/[A-Za-z0-9+/_=-]{32,}/u) !== null;
+  return digits > 4
+    || /[@<>{}\\`|]/u.test(value)
+    || opaqueToken
+    || tokens.some((token) => prohibitedArtifactTokens.has(token))
+    || hasPair("api", "key")
+    || hasPair("client", "secret")
+    || hasPair("access", "token")
+    || hasPair("refresh", "token")
+    || hasPair("node", "ref")
+    || hasPair("current", "value")
+    || hasPair("approval", "token")
+    || commandShaped;
+}
+
+function sanitizedReference(value: string): string {
+  return `sanitized:sha256:${createHash("sha256").update(value).digest("hex")}`;
+}
+
+function sanitizeUnrestrictedText(value: string): string {
+  if (value.length === 0 || hasExplicitArtifact(value)) throw new Error("adapter_sensitive_payload_rejected");
+  if (allowedUnrestrictedLiterals.has(value) || sanitizedReferencePattern.test(value)) return value;
+  return sanitizedReference(value);
+}
+
+function sanitizeProposalForPersistence(proposal: AiHintPackProposal): AiHintPackProposal {
+  return AiHintPackProposalSchema.parse({
+    ...proposal,
+    unsupportedBoundaries: proposal.unsupportedBoundaries.map(sanitizeUnrestrictedText)
+  });
+}
+
+function sanitizeReplayForPersistence(report: ReplayReport): ReplayReport {
+  return ReplayReportSchema.parse({
+    ...report,
+    assertions: report.assertions.map((assertion) => ({
+      ...assertion,
+      detail: sanitizeUnrestrictedText(assertion.detail)
+    }))
+  });
+}
+
+function sanitizeAiReviewForPersistence(review: AiReplayReview): AiReplayReview {
+  return AiReplayReviewSchema.parse({
+    ...review,
+    findings: review.findings.map((finding) => ({
+      ...finding,
+      explanation: sanitizeUnrestrictedText(finding.explanation)
+    }))
+  });
+}
+
+function sanitizeHumanDecisionForPersistence(decision: HumanCertificationDecision): HumanCertificationDecision {
+  return HumanCertificationDecisionSchema.parse({
+    ...decision,
+    ...(decision.notes === undefined ? {} : { notes: sanitizeUnrestrictedText(decision.notes) })
+  });
 }
 
 export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
@@ -143,7 +238,7 @@ export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
 
   return {
     createProposal(input) {
-      const proposal = AiHintPackProposalSchema.parse(input);
+      const proposal = sanitizeProposalForPersistence(AiHintPackProposalSchema.parse(input));
       assertSanitizedPayload(proposal);
       database.prepare(`
         INSERT INTO ats_adapter_proposals (
@@ -181,7 +276,7 @@ export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
     },
     recordReplay(inputs) {
       if (inputs.length === 0) return;
-      const reports = inputs.map((report) => ReplayReportSchema.parse(report));
+      const reports = inputs.map((report) => sanitizeReplayForPersistence(ReplayReportSchema.parse(report)));
       reports.forEach(assertSanitizedPayload);
       database.transaction(() => {
         const row = findProposalRow.get(reports[0]!.proposalId) as ProposalRow | undefined;
@@ -212,7 +307,7 @@ export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
       })();
     },
     recordAiReview(input) {
-      const review = AiReplayReviewSchema.parse(input);
+      const review = sanitizeAiReviewForPersistence(AiReplayReviewSchema.parse(input));
       assertSanitizedPayload(review);
       database.transaction(() => {
         const row = findProposalRow.get(review.proposalId) as ProposalRow | undefined;
@@ -232,7 +327,7 @@ export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
       })();
     },
     recordHumanDecision(input) {
-      const decision = HumanCertificationDecisionSchema.parse(input);
+      const decision = sanitizeHumanDecisionForPersistence(HumanCertificationDecisionSchema.parse(input));
       assertSanitizedPayload(decision);
       database.transaction(() => {
         const row = findProposalRow.get(decision.proposalId) as ProposalRow | undefined;
@@ -294,17 +389,21 @@ export function createAdapterLedger(database: SqliteDatabase): AdapterLedger {
       })();
     },
     retire(packId, version, reason) {
+      if (!packIdPattern.test(packId) || !semverPattern.test(version)) {
+        throw new Error("adapter_sensitive_payload_rejected");
+      }
+      const persistedReason = sanitizeUnrestrictedText(reason);
       const retiredAt = new Date().toISOString();
       database.transaction(() => {
         database.prepare(`
           INSERT OR IGNORE INTO ats_adapter_pack_retirements (pack_id, version, reason, retired_at)
           VALUES (?, ?, ?, ?)
-        `).run(packId, version, reason, retiredAt);
+        `).run(packId, version, persistedReason, retiredAt);
         database.prepare(`
           UPDATE ats_adapter_certified_packs
           SET lifecycle_status = 'retired', retired_at = ?, retirement_reason = ?
           WHERE pack_id = ? AND version = ? AND lifecycle_status = 'certified'
-        `).run(retiredAt, reason, packId, version);
+        `).run(retiredAt, persistedReason, packId, version);
         database.prepare(`
           UPDATE ats_adapter_proposals
           SET lifecycle_status = 'retired', updated_at = ?
