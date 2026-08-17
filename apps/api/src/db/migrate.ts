@@ -223,6 +223,95 @@ export function migrateDatabase(database: SqliteDatabase): void {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS ats_adapter_proposals (
+      proposal_id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL,
+      parent_proposal_id TEXT,
+      pack_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      lifecycle_status TEXT NOT NULL CHECK (lifecycle_status IN (
+        'candidate', 'replay_verified', 'ai_reviewed', 'human_reviewed',
+        'certified', 'rejected', 'retired'
+      )),
+      provider TEXT NOT NULL,
+      model TEXT NOT NULL,
+      prompt_version TEXT NOT NULL,
+      input_hash TEXT NOT NULL,
+      output_hash TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (pack_id, version)
+    );
+    CREATE INDEX IF NOT EXISTS ats_adapter_proposals_fingerprint_idx
+      ON ats_adapter_proposals(task_id, input_hash, lifecycle_status);
+
+    CREATE TABLE IF NOT EXISTS ats_adapter_replay_reports (
+      report_id TEXT PRIMARY KEY,
+      proposal_id TEXT NOT NULL REFERENCES ats_adapter_proposals(proposal_id) ON DELETE CASCADE,
+      status TEXT NOT NULL CHECK (status IN ('passed', 'failed')),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ats_adapter_replay_reports_proposal_idx
+      ON ats_adapter_replay_reports(proposal_id, created_at, report_id);
+
+    CREATE TABLE IF NOT EXISTS ats_adapter_ai_reviews (
+      review_id TEXT PRIMARY KEY,
+      proposal_id TEXT NOT NULL UNIQUE REFERENCES ats_adapter_proposals(proposal_id) ON DELETE CASCADE,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ats_adapter_human_reviews (
+      review_id TEXT PRIMARY KEY,
+      proposal_id TEXT NOT NULL UNIQUE REFERENCES ats_adapter_proposals(proposal_id) ON DELETE CASCADE,
+      decision TEXT NOT NULL CHECK (decision IN ('certify', 'reject', 'revise')),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS ats_adapter_certified_packs (
+      pack_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      lifecycle_status TEXT NOT NULL CHECK (lifecycle_status IN ('certified', 'retired')),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      certified_at TEXT NOT NULL,
+      retired_at TEXT,
+      retirement_reason TEXT,
+      PRIMARY KEY (pack_id, version)
+    );
+
+    CREATE TABLE IF NOT EXISTS ats_adapter_pack_retirements (
+      pack_id TEXT NOT NULL,
+      version TEXT NOT NULL,
+      reason TEXT NOT NULL,
+      retired_at TEXT NOT NULL,
+      PRIMARY KEY (pack_id, version)
+    );
+
+    CREATE TABLE IF NOT EXISTS ats_adapter_debug_responses (
+      id TEXT PRIMARY KEY,
+      proposal_id TEXT NOT NULL,
+      purpose TEXT NOT NULL CHECK (purpose IN ('proposal', 'replay_review')),
+      ciphertext BLOB NOT NULL,
+      iv BLOB NOT NULL,
+      auth_tag BLOB NOT NULL,
+      expires_at TEXT NOT NULL,
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ats_adapter_debug_responses_expiry_idx
+      ON ats_adapter_debug_responses(expires_at);
+
+    CREATE TABLE IF NOT EXISTS ats_adapter_debug_accesses (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      response_id TEXT NOT NULL,
+      actor TEXT NOT NULL,
+      accessed_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS ats_adapter_debug_accesses_response_idx
+      ON ats_adapter_debug_accesses(response_id, id);
+
     CREATE TABLE IF NOT EXISTS application_checkpoints (
       task_id TEXT NOT NULL,
       sequence INTEGER NOT NULL CHECK (sequence > 0),

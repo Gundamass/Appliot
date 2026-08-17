@@ -3,6 +3,40 @@ import { describe, expect, it } from "vitest";
 import { migrateDatabase } from "./migrate.js";
 
 describe("migrateDatabase", () => {
+  it("creates the ATS adapter audit tables idempotently with JSON constraints", () => {
+    const database = new Database(":memory:");
+
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    const tables = database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name LIKE 'ats_adapter_%'
+      ORDER BY name
+    `).all();
+    expect(tables).toEqual([
+      { name: "ats_adapter_ai_reviews" },
+      { name: "ats_adapter_certified_packs" },
+      { name: "ats_adapter_debug_accesses" },
+      { name: "ats_adapter_debug_responses" },
+      { name: "ats_adapter_human_reviews" },
+      { name: "ats_adapter_pack_retirements" },
+      { name: "ats_adapter_proposals" },
+      { name: "ats_adapter_replay_reports" }
+    ]);
+    expect(() => database.prepare(`
+      INSERT INTO ats_adapter_proposals (
+        proposal_id, task_id, pack_id, version, lifecycle_status, provider, model,
+        prompt_version, input_hash, output_hash, payload_json, created_at, updated_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "proposal-invalid-json", "task-1", "example-ats", "1.0.0", "candidate",
+      "provider", "model", "hint-proposal-v1", "input", "output", "not-json",
+      "2026-08-17T00:00:00.000Z", "2026-08-17T00:00:00.000Z"
+    )).toThrow();
+    database.close();
+  });
+
   it("creates job matching persistence tables and indexes idempotently", () => {
     const database = new Database(":memory:");
 

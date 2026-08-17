@@ -27,6 +27,12 @@ export interface RemoteOcrAdapterConfig {
   timeoutMs: number;
 }
 
+export interface AtsAdapterDebugConfig {
+  enabled: true;
+  encryptionKey: Buffer;
+  ttlHours: number;
+}
+
 export interface ApiConfig {
   databaseFile: string;
   host: "127.0.0.1";
@@ -34,6 +40,7 @@ export interface ApiConfig {
   deepseek?: DeepSeekAdapterConfig;
   embedding?: RemoteEmbeddingAdapterConfig;
   ocr?: RemoteOcrAdapterConfig;
+  atsAdapterDebug?: AtsAdapterDebugConfig;
 }
 
 export class ConfigurationError extends Error {
@@ -48,6 +55,7 @@ const positiveInteger = z.preprocess(
   z.number().int().positive()
 );
 const tcpPort = positiveInteger.refine((value) => value <= 65_535);
+const debugTtlHours = positiveInteger.refine((value) => value <= 168);
 
 const nonNegativeInteger = z.preprocess(
   (value) => typeof value === "string" && value.trim() !== "" ? Number(value) : value,
@@ -191,6 +199,22 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     }
   }
 
+  const hasAtsAdapterDebug = Object.keys(env).some((name) => name.startsWith("ATS_ADAPTER_DEBUG_"));
+  let atsAdapterDebug: AtsAdapterDebugConfig | undefined;
+  if (hasAtsAdapterDebug) {
+    const debugErrors: string[] = [];
+    if (env.ATS_ADAPTER_DEBUG_RAW !== "1") debugErrors.push("ATS_ADAPTER_DEBUG_RAW");
+    const encodedKey = env.ATS_ADAPTER_DEBUG_KEY_BASE64;
+    const encryptionKey = typeof encodedKey === "string" ? Buffer.from(encodedKey, "base64") : undefined;
+    if (encryptionKey?.byteLength !== 32) debugErrors.push("ATS_ADAPTER_DEBUG_KEY_BASE64");
+    const ttlResult = debugTtlHours.safeParse(env.ATS_ADAPTER_DEBUG_TTL_HOURS ?? "24");
+    if (!ttlResult.success) debugErrors.push("ATS_ADAPTER_DEBUG_TTL_HOURS");
+    coreErrors.push(...debugErrors);
+    if (debugErrors.length === 0 && encryptionKey && ttlResult.success) {
+      atsAdapterDebug = { enabled: true, encryptionKey, ttlHours: ttlResult.data };
+    }
+  }
+
   if (coreErrors.length > 0) throw new ConfigurationError([...new Set(coreErrors)]);
   return {
     databaseFile,
@@ -198,6 +222,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     port,
     ...(deepseek ? { deepseek } : {}),
     ...(embedding ? { embedding } : {}),
-    ...(ocr ? { ocr } : {})
+    ...(ocr ? { ocr } : {}),
+    ...(atsAdapterDebug ? { atsAdapterDebug } : {})
   };
 }

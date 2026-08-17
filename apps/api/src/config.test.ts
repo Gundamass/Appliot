@@ -14,6 +14,41 @@ function captureError(action: () => unknown): string {
 }
 
 describe("API configuration", () => {
+  it("enables encrypted ATS adapter debug retention with a 24 hour default", () => {
+    const encryptionKey = Buffer.alloc(32, 7);
+
+    expect(loadConfig({
+      ATS_ADAPTER_DEBUG_RAW: "1",
+      ATS_ADAPTER_DEBUG_KEY_BASE64: encryptionKey.toString("base64")
+    }).atsAdapterDebug).toEqual({
+      enabled: true,
+      encryptionKey,
+      ttlHours: 24
+    });
+    expect(loadConfig({}).atsAdapterDebug).toBeUndefined();
+  });
+
+  it("rejects invalid ATS adapter debug keys, flags, and retention without reflecting the key", () => {
+    const secret = Buffer.alloc(31, 5).toString("base64");
+    const keyError = captureError(() => loadConfig({
+      ATS_ADAPTER_DEBUG_RAW: "1",
+      ATS_ADAPTER_DEBUG_KEY_BASE64: secret
+    }));
+    expect(keyError).toContain("ATS_ADAPTER_DEBUG_KEY_BASE64");
+    expect(keyError).not.toContain(secret);
+
+    expect(() => loadConfig({ ATS_ADAPTER_DEBUG_RAW: "true" })).toThrow("ATS_ADAPTER_DEBUG_RAW");
+    expect(() => loadConfig({ ATS_ADAPTER_DEBUG_RAW: "1", ATS_ADAPTER_DEBUG_TTL_HOURS: "0" }))
+      .toThrow("ATS_ADAPTER_DEBUG_TTL_HOURS");
+    expect(() => loadConfig({ ATS_ADAPTER_DEBUG_RAW: "1", ATS_ADAPTER_DEBUG_TTL_HOURS: "169" }))
+      .toThrow("ATS_ADAPTER_DEBUG_TTL_HOURS");
+    expect(loadConfig({
+      ATS_ADAPTER_DEBUG_RAW: "1",
+      ATS_ADAPTER_DEBUG_KEY_BASE64: Buffer.alloc(32, 8).toString("base64"),
+      ATS_ADAPTER_DEBUG_TTL_HOURS: "168"
+    }).atsAdapterDebug?.ttlHours).toBe(168);
+  });
+
   it("loads core defaults and a complete DeepSeek group", () => {
     expect(loadConfig({ DEEPSEEK_API_KEY: "test-key" })).toMatchObject({
       databaseFile: "data/resume-assistant.sqlite",
