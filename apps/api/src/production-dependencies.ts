@@ -2,7 +2,9 @@ import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ActionPolicy } from "@resume/action-policy";
+import { BUILT_IN_HINT_PACKS, createHintPackRegistry } from "@resume/form-semantics";
 import { djiJobAdapter, jobExpectationSnapshot, mokaJobAdapter } from "@resume/job-matching";
+import type { CertifiedHintPack } from "@resume/contracts";
 import {
   DeepSeekStructuredModelProvider,
   EMBEDDING_INSTRUCTION_VERSION,
@@ -47,6 +49,11 @@ import { createJobMatchService } from "./job-matching/job-match-service.js";
 import { createMatchCoordinator } from "./job-matching/match-coordinator.js";
 import { BoundedJobMatchTraceBuffer } from "./observability/job-match-trace.js";
 import { createDebugRawStore } from "./ats-adapters/debug-raw-store.js";
+import { createAdapterLedger } from "./ats-adapters/adapter-ledger.js";
+import { createAdapterReviewService } from "./ats-adapters/adapter-review-service.js";
+import { createAiProposalService } from "./ats-adapters/ai-proposal-service.js";
+import { createAiReplayReviewService } from "./ats-adapters/ai-replay-review-service.js";
+import { SyntheticReplayRunner } from "./ats-adapters/synthetic-replay-runner.js";
 
 type ProductionBrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
   & Partial<Pick<BrowserWorkerClient,
@@ -56,6 +63,7 @@ export interface ProductionAdapterDependencies {
   fetch?: typeof globalThis.fetch;
   browserClient?: ProductionBrowserClient;
   browserClientFactory?: () => Promise<ProductionBrowserClient>;
+  hintPacks?: readonly CertifiedHintPack[];
 }
 
 export interface ProductionDependencies extends AppDependencies {
@@ -83,6 +91,12 @@ export function createProductionDependencies(
     migrateDatabase(database);
     const debugRawStore = createDebugRawStore(database, config.atsAdapterDebug ?? { enabled: false });
     const profileRepository = createProfileRepository(database);
+    const adapterLedger = createAdapterLedger(database);
+    const hintPackRegistry = createHintPackRegistry({
+      builtIns: adapters.hintPacks ?? BUILT_IN_HINT_PACKS,
+      local: () => adapterLedger.listCertified(),
+      isRetired: (packId, version) => adapterLedger.isRetired(packId, version)
+    });
     const documentRepository = createDocumentRepository(database);
     const originalsDirectory = resolve(dirname(resolve(config.databaseFile)), "originals");
     const approvalKey = randomBytes(32);
@@ -175,6 +189,26 @@ export function createProductionDependencies(
     const structuredProvider = baseStructuredProvider === undefined
       ? undefined
       : new ObservedStructuredModelProvider(baseStructuredProvider, adapterHealth);
+    const adapterReviewService = createAdapterReviewService({
+      ledger: adapterLedger,
+      ...(structuredProvider === undefined || config.deepseek === undefined ? {} : {
+        aiProposalService: createAiProposalService({
+          provider: structuredProvider,
+          ledger: adapterLedger,
+          providerName: "deepseek",
+          model: config.deepseek.defaultModel
+        }),
+        aiReplayReviewService: createAiReplayReviewService({
+          provider: structuredProvider,
+          ledger: adapterLedger,
+          providerName: "deepseek",
+          model: config.deepseek.defaultModel
+        })
+      }),
+      replayRunner: new SyntheticReplayRunner(),
+      listProfilePaths: () => profileRepository.listActive().map((fact) => fact.fieldPath),
+      reviewer: "local-user"
+    });
     const ocrEngine = config.ocr === undefined
       ? undefined
       : new RemoteOcrEngine(config.ocr, adapters);
@@ -291,6 +325,8 @@ export function createProductionDependencies(
         }
       },
       resolveField: resolveApplicationField,
+      hintPackRegistry,
+      adapterReviewService,
       listProfileFacts() {
         return profileRepository.listActive();
       },

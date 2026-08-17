@@ -124,6 +124,27 @@ describe("migrateDatabase", () => {
     database.close();
   });
 
+  it("allows persistent adapter-review pauses in checkpoints and state events", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+
+    expect(() => database.prepare(`
+      INSERT INTO application_checkpoints (
+        task_id, sequence, state, url, stage, snapshot_id, field_ids_json,
+        questions_json, snapshot_json, content_review_json, field_coverage_json, created_at
+      ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `).run(
+      "task-adapter-review", 1, "awaiting_adapter_review", "https://jobs.example.test/apply", "application_form",
+      "snapshot-adapter-review", "[]", "[]", null, null, null, "2026-08-17T00:00:00.000Z"
+    )).not.toThrow();
+    expect(() => database.prepare(`
+      INSERT INTO application_task_events (task_id, type, state, created_at)
+      VALUES (?, 'state_changed', ?, ?)
+    `).run("task-adapter-review", "awaiting_adapter_review", "2026-08-17T00:00:00.000Z")).not.toThrow();
+
+    database.close();
+  });
+
   it("creates profile revision metadata and task synchronization columns idempotently", () => {
     const database = new Database(":memory:");
 

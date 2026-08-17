@@ -5,6 +5,7 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { ActionPolicy } from "../../packages/action-policy/src/index.js";
 import { createRagService } from "../../packages/rag/src/index.js";
+import { classifyRepeatedActions, mokahrHintPack } from "../../packages/form-semantics/src/index.js";
 import { createApplicationService } from "../../apps/api/src/applications/application-service.js";
 import { createCheckpointRepository } from "../../apps/api/src/applications/checkpoint-repository.js";
 import { planRepeatedSectionActions } from "../../apps/api/src/applications/repeated-section-planner.js";
@@ -81,7 +82,11 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
       remote: server.state(taskId),
       snapshot: checkpoint?.snapshot,
       repeatedSectionPlans: checkpoint?.snapshot
-        ? planRepeatedSectionActions(checkpoint.snapshot, repository.listActive())
+        ? planRepeatedSectionActions(
+            checkpoint.snapshot,
+            repository.listActive(),
+            classifyRepeatedActions(checkpoint.snapshot, mokahrHintPack)
+          )
         : []
     }, null, 2)).toBe("review_locked");
     expect(service.fieldCoverage(taskId)).toMatchObject({ missing: 0, review: 0, filled: 7 });

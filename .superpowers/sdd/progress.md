@@ -110,3 +110,15 @@ Tasks 1-6: local code complete. Candidate profile changes now advance a durable 
 Safety boundaries: existing page values and user edits remain authoritative; review-locked, cancelled, login-waiting, and failed tasks are excluded from automatic refresh; explicit failed-task recovery re-observes the live page and stops at `review_locked`. Local-at-rest encryption and sensitive-data routing to DeepSeek/vector services remain intentionally deferred by user decision.
 
 Fresh verification: `pnpm test` passed across all workspaces (API 374, Web 164, Browser Worker 67, plus package suites); `pnpm typecheck`, `pnpm build`, `pnpm audit --prod --audit-level high`, and `git diff --check` passed. `pnpm test:e2e` passed 18/18, including DJI-style coverage, Mokahr repeated sections/PDF upload, profile-completion retry, browser stability, and terminal-submit refusal. Real local task UI inspection at 1280x800 and 390x844 found no horizontal overflow, out-of-bounds elements, or submit controls.
+
+---
+
+Program: certified ATS adapter packs
+Plan: docs/superpowers/plans/2026-08-17-certified-ats-adapter-packs.md
+
+Task 1: complete (commit a98ec31, certified adapter contract and provenance boundary).
+Task 2: complete (commits a98ec31..9f336bb, task review approved). Source-controlled Moka/Mokahr and DJI packs are resolved through an immutable deterministic registry; non-certified and fingerprint-drifted packs remain review-only. Regression coverage includes `certified_hint` deterministic progress and repeated-entry indexing while retaining legacy `dji_catalog` checkpoint compatibility.
+Task 3: complete (commits 9f336bb..4497f24, direct final review clean). SQLite lifecycle ledger, retirement tombstones, opt-in AES-256-GCM raw-debug retention, every-read hashed audit records, sanitized durable payloads, and local-pack opaque text matching are covered by Task 3 57/57, form-semantics 17/17, typecheck, and branch diff checks.
+Task 4: complete (commit c513180, direct local review per user request). Added allowlisted AI observations, independent proposal and replay-review roles, hard replay schema gates, correlated opt-in encrypted raw-response capture, and self-evaluation exclusion. Fresh verification: model-provider 54/54, ATS adapter 44/44, production composition 42/42, typecheck, and staged diff check passed.
+Task 5: complete (commit 0f1909a). Deterministic hard validation and isolated synthetic replay now exercise the controlled browser path with zero-submit and boundary assertions.
+Task 6: complete (direct workspace). Added the certified-pack execution gate, persisted adapter-review projection, safe re-observation after certification, certified repeated-section classification, and pack retirement on unsafe readback. The profile-resume observation-failure regression is covered. Fresh verification: Task 6 API tests 161/161, API state-machine test 115/115, root typecheck, diff check, and Mokahr high-coverage browser regression 1/1 passed.

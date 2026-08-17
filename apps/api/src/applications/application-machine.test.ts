@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import { ApplicationTaskEventSchema, type ApplicationFieldAssessment, type ChallengeDiagnostic, type ExecutableCommand, type FormField, type FormSnapshot, type WorkerActivity, type WorkerResponse } from "@resume/contracts";
+import { ApplicationTaskEventSchema, CertifiedHintPackSchema, type ApplicationFieldAssessment, type ChallengeDiagnostic, type ExecutableCommand, type FormField, type FormSnapshot, type WorkerActivity, type WorkerResponse } from "@resume/contracts";
 import { createActor } from "xstate";
 import { describe, expect, it, vi } from "vitest";
 import { migrateDatabase } from "../db/migrate.js";
@@ -104,6 +104,9 @@ function readyAssessment(field: FormField): ApplicationFieldAssessment {
 describe("application machine", () => {
   it.each([
     ["observing", []],
+    ["awaiting_login", [{ type: "LOGIN_REQUIRED" }]],
+    ["needs_questions", [{ type: "QUESTIONS_REQUIRED", questions: [] }]],
+    ["awaiting_content_review", [{ type: "CONTENT_REVIEW_REQUIRED" }]],
     ["filling", [{ type: "READY_TO_FILL" }]],
     ["validating", [{ type: "READY_TO_FILL" }, { type: "PAGE_FILLED" }]],
     ["navigating", [{ type: "READY_TO_FILL" }, { type: "PAGE_FILLED" }, { type: "PAGE_VALID" }]]
@@ -139,6 +142,753 @@ describe("application machine", () => {
     expect(actor.getSnapshot().value).toBe("observing");
     expect(actor.getSnapshot().context.challenge).toBeUndefined();
     actor.stop();
+  });
+
+  it("pauses an unknown application page for adapter review", () => {
+    const actor = createActor(applicationMachine, {
+      input: { taskId: "task-adapter-review", applicationUrl: "https://unknown.test/apply" }
+    }).start();
+
+    sendApplicationEvent(actor, { type: "START" });
+    sendApplicationEvent(actor, { type: "ADAPTER_REVIEW_REQUIRED" });
+
+    expect(actor.getSnapshot().value).toBe("awaiting_adapter_review");
+    expect(actor.getSnapshot().can({ type: "READY_TO_FILL" })).toBe(false);
+    actor.stop();
+  });
+
+  it.each([
+    ["filling", [{ type: "READY_TO_FILL" }]],
+    ["validating", [{ type: "READY_TO_FILL" }, { type: "PAGE_FILLED" }]],
+    ["navigating", [{ type: "READY_TO_FILL" }, { type: "PAGE_FILLED" }, { type: "PAGE_VALID" }]]
+  ] satisfies Array<[string, ApplicationEvent[]]>)
+  ("quarantines an active certified pack from %s", (_state, setupEvents) => {
+    const actor = createActor(applicationMachine, {
+      input: { taskId: "task-adapter-quarantine", applicationUrl: "https://known.test/apply" }
+    }).start();
+    sendApplicationEvent(actor, { type: "START" });
+    setupEvents.forEach((event) => sendApplicationEvent(actor, event));
+
+    sendApplicationEvent(actor, { type: "ADAPTER_REVIEW_REQUIRED" });
+
+    expect(actor.getSnapshot().value).toBe("awaiting_adapter_review");
+    actor.stop();
+  });
+
+  it.each([
+    ["awaiting_login", [{ type: "LOGIN_REQUIRED" }]],
+    ["needs_questions", [{ type: "QUESTIONS_REQUIRED", questions: [] }]],
+    ["awaiting_content_review", [{ type: "CONTENT_REVIEW_REQUIRED" }]]
+  ] satisfies Array<[string, ApplicationEvent[]]>)
+  ("quarantines an observed page from %s before it can resume", (_state, setupEvents) => {
+    const actor = createActor(applicationMachine, {
+      input: { taskId: "task-adapter-pre-fill", applicationUrl: "https://known.test/apply" }
+    }).start();
+    sendApplicationEvent(actor, { type: "START" });
+    setupEvents.forEach((event) => sendApplicationEvent(actor, event));
+
+    sendApplicationEvent(actor, { type: "ADAPTER_REVIEW_REQUIRED" });
+
+    expect(actor.getSnapshot().value).toBe("awaiting_adapter_review");
+    actor.stop();
+  });
+
+  it("invalidates execution and performs zero writes for an unmatched ATS", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      url: "https://unknown.test/apply",
+      fields: [{
+        id: "unknown-name",
+        label: "Full name",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "",
+        nodeRef: fixtureNodeRef
+      }]
+    };
+    const invalidateExecution = vi.fn(async () => undefined);
+    const execute = vi.fn();
+    const resolveField = vi.fn(async () => ({ status: "verified" as const, value: "not-written" }));
+    const prepare = vi.fn(async () => ({
+      replayReports: [],
+      lifecycleStatus: "candidate" as const,
+      aiReviewUnavailable: false,
+      writeBlocked: true as const
+    }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute, invalidateExecution },
+      resolveField,
+      approve: () => "approved-token",
+      hintPackRegistry: {
+        resolve: () => ({ kind: "review_only" as const, reason: "no_certified_pack" as const, mismatchedPacks: [] }),
+        listCertified: () => []
+      },
+      adapterReviewService: { prepare, retire: vi.fn() }
+    });
+    service.start({ taskId: "task-adapter-review", applicationUrl: form.url });
+
+    await service.runUntilPause("task-adapter-review");
+
+    expect(service.state("task-adapter-review").value).toBe("awaiting_adapter_review");
+    expect(invalidateExecution).toHaveBeenCalledOnce();
+    expect(execute).not.toHaveBeenCalled();
+    expect(resolveField).not.toHaveBeenCalled();
+    expect(prepare).toHaveBeenCalledWith("task-adapter-review", form);
+    database.close();
+  });
+
+  it("expands a repeated section from the active certified pack action rule", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "prefilled-name",
+        label: "Name",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "Already filled",
+        semanticHint: "basics.name",
+        nodeRef: fixtureNodeRef
+      }],
+      actions: [{
+        id: "custom-add-project",
+        text: "Add another record",
+        class: "safe_edit",
+        context: "Portfolio history",
+        nodeRef: fixtureNodeRef
+      }]
+    };
+    const pack = CertifiedHintPackSchema.parse({
+      schemaVersion: 1,
+      packId: "test-custom-repeat-pack",
+      version: "1.0.0",
+      match: {
+        sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
+        stages: ["application_form"],
+        requiredTextSignals: [],
+        pageFingerprintHashes: []
+      },
+      sectionRules: [{ section: "projects", headingAliases: ["Portfolio history"], fieldOrderAliases: [] }],
+      fieldRules: [],
+      actionRules: [{ kind: "add_repeated_entry", verbs: ["Add another"], sections: ["projects"] }],
+      fixtures: [{ fixtureId: "test-custom-repeat", expectedProfilePaths: ["projects[0].name"] }],
+      lifecycleStatus: "certified",
+      certifiedAt: "2026-08-17T00:00:00.000Z",
+      provenance: {
+        proposalId: "test-custom-repeat-proposal",
+        replayReportIds: ["test-custom-repeat-replay"],
+        humanReviewId: "test-custom-repeat-human-review"
+      }
+    });
+    const execute = vi.fn(async () => ({
+      type: "execution_result" as const,
+      taskId: "task-1",
+      snapshotId: form.id,
+      commandType: "click_intermediate" as const,
+      status: "applied" as const,
+      actualValue: undefined,
+      snapshot: form,
+      errors: []
+    }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute },
+      resolveField: async () => ({ status: "verified" as const, value: "unused" }),
+      approve: () => "approved-token",
+      listProfileFacts: () => [{
+        id: "project-0",
+        fieldPath: "projects[0].name",
+        value: "Project",
+        status: "user_confirmed" as const,
+        confidence: 1,
+        scope: "profile" as const,
+        revision: 1,
+        evidence: []
+      }],
+      hintPackRegistry: {
+        resolve: () => ({ kind: "certified" as const, pack }),
+        listCertified: () => [pack]
+      },
+      adapterReviewService: {
+        prepare: async () => ({
+          replayReports: [],
+          lifecycleStatus: "candidate" as const,
+          aiReviewUnavailable: false,
+          writeBlocked: true as const
+        }),
+        retire: vi.fn()
+      }
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(execute).toHaveBeenCalledWith(expect.objectContaining({
+      type: "click_intermediate",
+      actionId: "custom-add-project"
+    }), expect.any(Number));
+    database.close();
+  });
+
+  it("quarantines a post-fill snapshot that no longer matches the certified pack", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const initial: FormSnapshot = {
+      ...snapshot("application_form"),
+      id: "known-snapshot",
+      fields: [
+        {
+          id: "first-field",
+          label: "First field",
+          type: "text",
+          required: true,
+          options: [],
+          currentValue: "",
+          sectionHint: "basics",
+          nodeRef: fixtureNodeRef
+        },
+        {
+          id: "second-field",
+          label: "Second field",
+          type: "text",
+          required: true,
+          options: [],
+          currentValue: "",
+          sectionHint: "basics",
+          nodeRef: fixtureNodeRef
+        }
+      ]
+    };
+    const drifted: FormSnapshot = {
+      ...initial,
+      id: "unknown-snapshot",
+      url: "https://unknown.test/apply",
+      mutationEpoch: fixtureNodeRef.observedAt + 1,
+      fields: initial.fields.map((field, index) => ({
+        ...field,
+        semanticHint: index === 0 ? "basics.name" : "basics.phone"
+      }))
+    };
+    const pack = CertifiedHintPackSchema.parse({
+      schemaVersion: 1,
+      packId: "test-fill-pack",
+      version: "1.0.0",
+      match: {
+        sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
+        stages: ["application_form"],
+        requiredTextSignals: [],
+        pageFingerprintHashes: []
+      },
+      sectionRules: [{ section: "basics", headingAliases: ["Personal details"], fieldOrderAliases: [] }],
+      fieldRules: [
+        {
+          ruleId: "first-field",
+          profilePath: "basics.name",
+          labelAliases: ["First field"],
+          sections: ["basics"],
+          controlTypes: ["text"],
+          confidence: 1
+        },
+        {
+          ruleId: "second-field",
+          profilePath: "basics.phone",
+          labelAliases: ["Second field"],
+          sections: ["basics"],
+          controlTypes: ["text"],
+          confidence: 1
+        }
+      ],
+      actionRules: [],
+      fixtures: [{ fixtureId: "test-fill", expectedProfilePaths: ["basics.name", "basics.phone"] }],
+      lifecycleStatus: "certified",
+      certifiedAt: "2026-08-17T00:00:00.000Z",
+      provenance: {
+        proposalId: "test-fill-proposal",
+        replayReportIds: ["test-fill-replay"],
+        humanReviewId: "test-fill-human-review"
+      }
+    });
+    const prepare = vi.fn(async () => ({
+      replayReports: [],
+      lifecycleStatus: "candidate" as const,
+      aiReviewUnavailable: false,
+      writeBlocked: true as const
+    }));
+    const invalidateExecution = vi.fn(async () => undefined);
+    const execute = vi.fn(async (command: ExecutableCommand) => ({
+      type: "execution_result" as const,
+      taskId: command.taskId,
+      snapshotId: initial.id,
+      commandType: command.type,
+      status: "applied" as const,
+      actualValue: "written",
+      snapshot: drifted,
+      errors: []
+    }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => initial, execute, invalidateExecution },
+      resolveField: async (_taskId, field) => ({ status: "verified" as const, value: field.id }),
+      approve: () => "approved-token",
+      hintPackRegistry: {
+        resolve: (observed) => observed.url === initial.url
+          ? { kind: "certified" as const, pack }
+          : { kind: "review_only" as const, reason: "no_certified_pack" as const, mismatchedPacks: [] },
+        listCertified: () => [pack]
+      },
+      adapterReviewService: { prepare, retire: vi.fn() }
+    });
+    service.start({ taskId: "task-1", applicationUrl: initial.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(service.state("task-1").value).toBe("awaiting_adapter_review");
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(invalidateExecution).toHaveBeenCalledOnce();
+    expect(prepare).toHaveBeenCalledWith("task-1", drifted);
+    database.close();
+  });
+
+  it("retires the active pack after a full-page readback mismatch", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const initial: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "audit-field",
+        label: "Audited field",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "",
+        sectionHint: "basics",
+        nodeRef: fixtureNodeRef
+      }],
+      actions: [{
+        id: "review-action",
+        text: "Review",
+        class: "terminal_submit",
+        nodeRef: fixtureNodeRef
+      }]
+    };
+    const filled: FormSnapshot = {
+      ...initial,
+      id: "filled-snapshot",
+      fields: initial.fields.map((field) => ({
+        ...field,
+        currentValue: "written",
+        semanticHint: "basics.name"
+      }))
+    };
+    const reverted: FormSnapshot = {
+      ...initial,
+      id: "reverted-snapshot",
+      fields: initial.fields.map((field) => ({ ...field, semanticHint: "basics.name" }))
+    };
+    const pack = CertifiedHintPackSchema.parse({
+      schemaVersion: 1,
+      packId: "test-audit-pack",
+      version: "1.0.0",
+      match: {
+        sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
+        stages: ["application_form"],
+        requiredTextSignals: [],
+        pageFingerprintHashes: []
+      },
+      sectionRules: [{ section: "basics", headingAliases: ["Personal details"], fieldOrderAliases: [] }],
+      fieldRules: [{
+        ruleId: "audit-field",
+        profilePath: "basics.name",
+        labelAliases: ["Audited field"],
+        sections: ["basics"],
+        controlTypes: ["text"],
+        confidence: 1
+      }],
+      actionRules: [],
+      fixtures: [{ fixtureId: "test-audit", expectedProfilePaths: ["basics.name"] }],
+      lifecycleStatus: "certified",
+      certifiedAt: "2026-08-17T00:00:00.000Z",
+      provenance: {
+        proposalId: "test-audit-proposal",
+        replayReportIds: ["test-audit-replay"],
+        humanReviewId: "test-audit-human-review"
+      }
+    });
+    const prepare = vi.fn(async () => ({
+      replayReports: [],
+      lifecycleStatus: "candidate" as const,
+      aiReviewUnavailable: false,
+      writeBlocked: true as const
+    }));
+    const retire = vi.fn();
+    const invalidateExecution = vi.fn(async () => undefined);
+    const execute = vi.fn(async (command: ExecutableCommand) => ({
+      type: "execution_result" as const,
+      taskId: command.taskId,
+      snapshotId: initial.id,
+      commandType: command.type,
+      status: "applied" as const,
+      actualValue: "written",
+      snapshot: filled,
+      errors: []
+    }));
+    const observe = vi.fn()
+      .mockResolvedValueOnce(initial)
+      .mockResolvedValueOnce(reverted);
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute, invalidateExecution },
+      resolveField: async () => ({ status: "verified" as const, value: "written" }),
+      approve: () => "approved-token",
+      hintPackRegistry: {
+        resolve: () => ({ kind: "certified" as const, pack }),
+        listCertified: () => [pack]
+      },
+      adapterReviewService: { prepare, retire }
+    });
+    service.start({ taskId: "task-1", applicationUrl: initial.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(service.state("task-1").value).toBe("awaiting_adapter_review");
+    expect(retire).toHaveBeenCalledWith("test-audit-pack", "1.0.0", "unsafe mapping");
+    expect(invalidateExecution).toHaveBeenCalledOnce();
+    expect(prepare).toHaveBeenCalledWith("task-1", reverted);
+    expect(execute).toHaveBeenCalledOnce();
+    database.close();
+  });
+
+  it.each(["controlled_value_reverted", "node_role_changed"] as const)(
+    "retires the active pack instead of retrying a certified-pack regression: %s",
+    async (regression) => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "regressed-field",
+        label: "Regressed field",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "",
+        sectionHint: "basics",
+        nodeRef: fixtureNodeRef
+      }],
+      actions: [{
+        id: "review-action",
+        text: "Review",
+        class: "terminal_submit",
+        nodeRef: fixtureNodeRef
+      }]
+    };
+    const pack = CertifiedHintPackSchema.parse({
+      schemaVersion: 1,
+      packId: "test-regression-pack",
+      version: "1.0.0",
+      match: {
+        sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
+        stages: ["application_form"],
+        requiredTextSignals: [],
+        pageFingerprintHashes: []
+      },
+      sectionRules: [{ section: "basics", headingAliases: ["Personal details"], fieldOrderAliases: [] }],
+      fieldRules: [{
+        ruleId: "regressed-field",
+        profilePath: "basics.name",
+        labelAliases: ["Regressed field"],
+        sections: ["basics"],
+        controlTypes: ["text"],
+        confidence: 1
+      }],
+      actionRules: [],
+      fixtures: [{ fixtureId: "test-regression", expectedProfilePaths: ["basics.name"] }],
+      lifecycleStatus: "certified",
+      certifiedAt: "2026-08-17T00:00:00.000Z",
+      provenance: {
+        proposalId: "test-regression-proposal",
+        replayReportIds: ["test-regression-replay"],
+        humanReviewId: "test-regression-human-review"
+      }
+    });
+    const prepare = vi.fn(async () => ({
+      replayReports: [],
+      lifecycleStatus: "candidate" as const,
+      aiReviewUnavailable: false,
+      writeBlocked: true as const
+    }));
+    const retire = vi.fn();
+    const execute = vi.fn(async (command: ExecutableCommand) => ({
+      type: "execution_result" as const,
+      taskId: command.taskId,
+      snapshotId: form.id,
+      commandType: command.type,
+      status: "blocked" as const,
+      actualValue: "",
+      snapshot: form,
+      errors: [regression]
+    }));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute, invalidateExecution: vi.fn(async () => undefined) },
+      resolveField: async () => ({ status: "verified" as const, value: "written" }),
+      approve: () => "approved-token",
+      hintPackRegistry: {
+        resolve: () => ({ kind: "certified" as const, pack }),
+        listCertified: () => [pack]
+      },
+      adapterReviewService: { prepare, retire }
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+
+    await service.runUntilPause("task-1");
+
+    expect(service.state("task-1").value).toBe("awaiting_adapter_review");
+    expect(retire).toHaveBeenCalledWith("test-regression-pack", "1.0.0", "unsafe mapping");
+    expect(prepare).toHaveBeenCalledWith("task-1", form);
+    expect(execute).toHaveBeenCalledOnce();
+      database.close();
+    }
+  );
+
+  it("requires a fresh execution epoch when resuming after adapter certification", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      actions: [{
+        id: "review-action",
+        text: "Review",
+        class: "terminal_submit",
+        nodeRef: fixtureNodeRef
+      }]
+    };
+    const pack = CertifiedHintPackSchema.parse({
+      schemaVersion: 1,
+      packId: "test-resume-pack",
+      version: "1.0.0",
+      match: {
+        sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
+        stages: ["application_form"],
+        requiredTextSignals: [],
+        pageFingerprintHashes: []
+      },
+      sectionRules: [],
+      fieldRules: [],
+      actionRules: [],
+      fixtures: [{ fixtureId: "test-resume", expectedProfilePaths: ["basics.name"] }],
+      lifecycleStatus: "certified",
+      certifiedAt: "2026-08-17T00:00:00.000Z",
+      provenance: {
+        proposalId: "test-resume-proposal",
+        replayReportIds: ["test-resume-replay"],
+        humanReviewId: "test-resume-human-review"
+      }
+    });
+    let certified = false;
+    const invalidateExecution = vi.fn(async () => undefined);
+    const execute = vi.fn();
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe: async () => form, execute, invalidateExecution },
+      resolveField: async () => ({ status: "verified" as const, value: "unused" }),
+      approve: () => "approved-token",
+      hintPackRegistry: {
+        resolve: () => certified
+          ? { kind: "certified" as const, pack }
+          : { kind: "review_only" as const, reason: "no_certified_pack" as const, mismatchedPacks: [] },
+        listCertified: () => certified ? [pack] : []
+      },
+      adapterReviewService: {
+        prepare: async () => ({
+          replayReports: [],
+          lifecycleStatus: "candidate" as const,
+          aiReviewUnavailable: false,
+          writeBlocked: true as const
+        }),
+        retire: vi.fn()
+      }
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+    expect(service.state("task-1").value).toBe("awaiting_adapter_review");
+
+    certified = true;
+    await service.resumeAfterAdapterCertification("task-1");
+
+    expect(invalidateExecution).toHaveBeenCalledTimes(2);
+    expect(execute).not.toHaveBeenCalled();
+    expect(service.state("task-1").value).toBe("review_locked");
+    database.close();
+  });
+
+  it("prioritizes a challenge over registry review without retiring the active pack", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "challenge-field",
+        label: "Challenge field",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "",
+        sectionHint: "basics",
+        nodeRef: fixtureNodeRef
+      }]
+    };
+    const challenged: FormSnapshot = {
+      ...form,
+      id: "challenge-snapshot",
+      challenge: {
+        kind: "captcha",
+        detectedAt: "2026-08-18T00:00:00.000Z",
+        reasonCode: "moka_captcha_accessible_name"
+      }
+    };
+    const pack = CertifiedHintPackSchema.parse({
+      schemaVersion: 1,
+      packId: "test-challenge-pack",
+      version: "1.0.0",
+      match: {
+        sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
+        stages: ["application_form"],
+        requiredTextSignals: [],
+        pageFingerprintHashes: []
+      },
+      sectionRules: [{ section: "basics", headingAliases: ["Personal details"], fieldOrderAliases: [] }],
+      fieldRules: [{
+        ruleId: "challenge-field",
+        profilePath: "basics.name",
+        labelAliases: ["Challenge field"],
+        sections: ["basics"],
+        controlTypes: ["text"],
+        confidence: 1
+      }],
+      actionRules: [],
+      fixtures: [{ fixtureId: "test-challenge", expectedProfilePaths: ["basics.name"] }],
+      lifecycleStatus: "certified",
+      certifiedAt: "2026-08-17T00:00:00.000Z",
+      provenance: {
+        proposalId: "test-challenge-proposal",
+        replayReportIds: ["test-challenge-replay"],
+        humanReviewId: "test-challenge-human-review"
+      }
+    });
+    const resolve = vi.fn(() => ({ kind: "certified" as const, pack }));
+    const prepare = vi.fn(async () => ({
+      replayReports: [],
+      lifecycleStatus: "candidate" as const,
+      aiReviewUnavailable: false,
+      writeBlocked: true as const
+    }));
+    const retire = vi.fn();
+    const observe = vi.fn()
+      .mockResolvedValueOnce(form)
+      .mockResolvedValueOnce(challenged);
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute: vi.fn(), invalidateExecution: vi.fn(async () => undefined) },
+      resolveField: async () => ({ status: "needs_question" as const, question: "Required" }),
+      approve: () => "approved-token",
+      hintPackRegistry: { resolve, listCertified: () => [pack] },
+      adapterReviewService: { prepare, retire }
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+    expect(service.state("task-1").value).toBe("needs_questions");
+
+    await service.handleActivity({ type: "page_stable", taskId: "task-1", fingerprint: "challenge" });
+
+    expect(service.state("task-1").value).toBe("awaiting_challenge");
+    expect(resolve).toHaveBeenCalledOnce();
+    expect(retire).not.toHaveBeenCalled();
+    expect(prepare).not.toHaveBeenCalled();
+    database.close();
+  });
+
+  it("retires a pack that fails a fresh fingerprint check before any further write", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const initial: FormSnapshot = {
+      ...snapshot("application_form"),
+      id: "fingerprint-initial",
+      fields: [{
+        id: "fingerprint-field",
+        label: "Name",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "",
+        nodeRef: fixtureNodeRef
+      }]
+    };
+    const drifted = { ...initial, id: "fingerprint-drifted" };
+    const pack = CertifiedHintPackSchema.parse({
+      schemaVersion: 1,
+      packId: "test-fingerprint-pack",
+      version: "1.0.0",
+      match: {
+        sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
+        stages: ["application_form"],
+        requiredTextSignals: [],
+        pageFingerprintHashes: []
+      },
+      sectionRules: [],
+      fieldRules: [],
+      actionRules: [],
+      fixtures: [{ fixtureId: "test-fingerprint", expectedProfilePaths: ["basics.name"] }],
+      lifecycleStatus: "certified",
+      certifiedAt: "2026-08-17T00:00:00.000Z",
+      provenance: {
+        proposalId: "test-fingerprint-proposal",
+        replayReportIds: ["test-fingerprint-replay"],
+        humanReviewId: "test-fingerprint-human-review"
+      }
+    });
+    const retire = vi.fn();
+    const prepare = vi.fn(async () => ({
+      replayReports: [],
+      lifecycleStatus: "candidate" as const,
+      aiReviewUnavailable: false,
+      writeBlocked: true as const
+    }));
+    const resolve = vi.fn((observed: FormSnapshot) => observed.id === initial.id
+      ? { kind: "certified" as const, pack }
+      : {
+          kind: "review_only" as const,
+          reason: "fingerprint_mismatch" as const,
+          mismatchedPacks: [pack]
+        });
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: {
+        observe: vi.fn().mockResolvedValueOnce(initial).mockResolvedValueOnce(drifted),
+        execute: vi.fn(),
+        invalidateExecution: vi.fn(async () => undefined)
+      },
+      resolveField: async () => ({ status: "needs_question" as const, question: "Required" }),
+      approve: () => "approved-token",
+      hintPackRegistry: { resolve, listCertified: () => [pack] },
+      adapterReviewService: { prepare, retire }
+    });
+    service.start({ taskId: "task-1", applicationUrl: initial.url });
+    await service.runUntilPause("task-1");
+    expect(service.state("task-1").value).toBe("needs_questions");
+
+    await service.handleActivity({ type: "page_stable", taskId: "task-1", fingerprint: "drift" });
+
+    expect(service.state("task-1").value).toBe("awaiting_adapter_review");
+    expect(retire).toHaveBeenCalledWith("test-fingerprint-pack", "1.0.0", "superseded mapping");
+    expect(prepare).toHaveBeenCalledWith("task-1", drifted);
+    database.close();
   });
 
   it("uses one observed node and one signed execution epoch for approval and execution", async () => {
@@ -3685,6 +4435,40 @@ describe("application machine", () => {
     expect(service.fieldCoverage("task-1")?.fields).toContainEqual(expect.objectContaining({
       fieldId: "field-manual", status: "filled", source: "user", confidence: 1
     }));
+    database.close();
+  });
+
+  it("keeps a question pause intact when profile resumption cannot observe the page", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const form: FormSnapshot = {
+      ...snapshot("application_form"),
+      fields: [{
+        id: "profile-resume-field",
+        label: "Profile resume field",
+        type: "text",
+        required: true,
+        options: [],
+        currentValue: "",
+        nodeRef: fixtureNodeRef
+      }]
+    };
+    const observe = vi.fn()
+      .mockResolvedValueOnce(form)
+      .mockRejectedValueOnce(new Error("observation failure"));
+    const service = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      browser: { observe, execute: vi.fn() },
+      resolveField: async () => ({ status: "needs_question" as const, question: "Required" }),
+      approve: () => "unused"
+    });
+    service.start({ taskId: "task-1", applicationUrl: form.url });
+    await service.runUntilPause("task-1");
+    expect(service.state("task-1").value).toBe("needs_questions");
+
+    await expect(service.resumeWithProfile("task-1")).rejects.toThrow("observation failure");
+
+    expect(service.state("task-1").value).toBe("needs_questions");
     database.close();
   });
 

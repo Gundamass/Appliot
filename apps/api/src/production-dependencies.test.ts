@@ -1,6 +1,6 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
-import type { FormField, FormSnapshot, JobPageSnapshot, ProfileFact, WorkerActivity } from "@resume/contracts";
+import { CertifiedHintPackSchema, type FormField, type FormSnapshot, type JobPageSnapshot, type ProfileFact, type WorkerActivity } from "@resume/contracts";
 import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
 import { z } from "zod";
 import type { FieldSemanticResolver } from "./applications/field-semantic-resolver.js";
@@ -69,7 +69,59 @@ function fullConfig() {
   });
 }
 
+const jobsExampleHintPack = CertifiedHintPackSchema.parse({
+  schemaVersion: 1,
+  packId: "test-jobs-example",
+  version: "1.0.0",
+  match: {
+    sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
+    stages: ["application_form", "review"],
+    requiredTextSignals: [],
+    pageFingerprintHashes: []
+  },
+  sectionRules: [],
+  fieldRules: [],
+  actionRules: [],
+  fixtures: [{ fixtureId: "jobs-example", expectedProfilePaths: ["basics.name"] }],
+  lifecycleStatus: "certified",
+  certifiedAt: "2026-08-17T00:00:00.000Z",
+  provenance: {
+    proposalId: "test-jobs-example-proposal",
+    replayReportIds: ["test-jobs-example-replay"],
+    humanReviewId: "test-jobs-example-human-review"
+  }
+});
+
 describe("production dependency composition", () => {
+  it("fails closed on an unmatched application form before any field resolution or browser write", async () => {
+    const taskId = "0e5a5d8b-4123-4d4d-8b5f-8cf2eb0e7d81";
+    const form: FormSnapshot = {
+      id: "unknown-form",
+      taskId,
+      url: "https://unknown.example.test/apply",
+      title: "Unknown application",
+      stage: "application_form",
+      frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" },
+      mutationEpoch: fixtureNodeRef.observedAt,
+      fields: [applicationField("Name")],
+      actions: [],
+      errors: []
+    };
+    const browserClient = productionBrowserClient({
+      observe: vi.fn(async () => ({ type: "snapshot" as const, snapshot: form }))
+    });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), { browserClient });
+
+    dependencies.applicationService!.start({ taskId, applicationUrl: form.url });
+    await dependencies.applicationService!.openBrowser(taskId);
+    await dependencies.applicationService!.runUntilPause(taskId);
+
+    expect(dependencies.applicationService!.state(taskId).value).toBe("awaiting_adapter_review");
+    expect(browserClient.invalidateExecution).toHaveBeenCalledOnce();
+    expect(browserClient.execute).not.toHaveBeenCalled();
+    await dependencies.close?.();
+  });
+
   it("composes job matching from confirmed knowledge-base expectations with the shared browser lease", async () => {
     const browserClient = productionBrowserClient();
     const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
@@ -157,7 +209,10 @@ describe("production dependency composition", () => {
       DEEPSEEK_API_KEY: "deepseek-test-token",
       ATS_ADAPTER_DEBUG_RAW: "1",
       ATS_ADAPTER_DEBUG_KEY_BASE64: Buffer.alloc(32, 7).toString("base64")
-    }), { fetch: fetch as typeof globalThis.fetch, browserClient: productionBrowserClient() });
+    }), {
+      fetch: fetch as typeof globalThis.fetch,
+      browserClient: productionBrowserClient()
+    });
 
     await dependencies.selfEvaluationModelProvider!.generateStructured({
       system: "Return json.",
@@ -217,7 +272,11 @@ describe("production dependency composition", () => {
       EMBEDDING_MODEL: "Qwen/Qwen3-Embedding-8B",
       EMBEDDING_MODEL_REVISION: QWEN_REVISION,
       EMBEDDING_DIMENSIONS: "4096"
-    }), { fetch: fetch as typeof globalThis.fetch, browserClient: productionBrowserClient() });
+    }), {
+      fetch: fetch as typeof globalThis.fetch,
+      browserClient: productionBrowserClient(),
+      hintPacks: [jobsExampleHintPack]
+    });
     const profileFact = confirmedProfileFact("basics.name", "候选人事实文本");
     dependencies.profileRepository.createExtracted({ ...profileFact, status: "extracted" });
     dependencies.profileRepository.confirm(profileFact.id);
@@ -1372,7 +1431,8 @@ describe("production dependency composition", () => {
     const browserClientFactory = vi.fn().mockResolvedValue(client);
     const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
       browserClient: client,
-      browserClientFactory
+      browserClientFactory,
+      hintPacks: [jobsExampleHintPack]
     });
     dependencies.profileRepository.createExtracted({
       id: "self-evaluation",
@@ -1473,7 +1533,10 @@ describe("production dependency composition", () => {
       }),
       stop: vi.fn()
     };
-    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), { browserClient });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient,
+      hintPacks: [jobsExampleHintPack]
+    });
     dependencies.profileRepository.createExtracted({
       id: "self-profile",
       fieldPath: "selfEvaluation",

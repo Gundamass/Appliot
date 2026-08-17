@@ -35,6 +35,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     const serviceState = dependencies.applicationService.state(task.id);
     const state = toApiState(serviceState.value);
     const contentReview = dependencies.applicationService.contentReview(task.id);
+    const adapterReview = dependencies.applicationService.adapterReview(task.id);
     const fieldCoverage = dependencies.applicationService.fieldCoverage(task.id);
     const executionProgress = dependencies.applicationService.progress(task.id).executionProgress;
     const commands = state === "awaiting_challenge" || state === "awaiting_adapter_review"
@@ -73,6 +74,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       ...(fieldCoverage === undefined ? {} : { fieldCoverage }),
       ...(executionProgress === undefined ? {} : { executionProgress }),
       ...(serviceState.context.challenge === undefined ? {} : { challenge: serviceState.context.challenge }),
+      ...(adapterReview === undefined ? {} : { adapterReview }),
       ...(contentReview === undefined ? {} : {
         contentReview: {
           id: contentReview.id,
@@ -270,6 +272,8 @@ function commandErrorCode(error: unknown): string {
   const stableCodes = new Set([
     "answer_persistence_failed",
     "answer_persistence_unavailable",
+    "adapter_not_certified",
+    "adapter_review_resume_not_allowed",
     "application_answer_not_found",
     "browser_open_unavailable",
     "checkpoint_mismatch",
@@ -306,7 +310,7 @@ function commandsForState(state: ApplicationTaskState): ApplicationTask["command
     case "awaiting_challenge":
       return ["cancel", "resume_after_challenge"];
     case "awaiting_adapter_review":
-      return ["cancel"];
+      return ["cancel", "open_browser", "resume_after_adapter_certification"];
     case "filling":
     case "validating":
     case "navigating":
@@ -339,6 +343,9 @@ async function executeCommand(dependencies: ApplicationRouteDependencies, taskId
       return;
     case "resume_after_challenge":
       await service.resumeAfterChallenge(taskId);
+      return;
+    case "resume_after_adapter_certification":
+      await service.resumeAfterAdapterCertification(taskId);
       return;
     case "resume_with_profile":
       await service.resumeWithProfile(taskId);

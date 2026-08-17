@@ -1,5 +1,5 @@
 import Database from "better-sqlite3";
-import type { FormSnapshot } from "@resume/contracts";
+import { AdapterReviewSummarySchema, type FormSnapshot } from "@resume/contracts";
 import { describe, expect, it } from "vitest";
 import { migrateDatabase } from "../db/migrate.js";
 import { createCheckpointRepository } from "./checkpoint-repository.js";
@@ -66,6 +66,64 @@ describe("checkpoint repository challenge persistence", () => {
     });
 
     expect(() => repository.latest(snapshot.taskId)).toThrow();
+    database.close();
+  });
+
+  it("round-trips an adapter-review projection with its paused checkpoint", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createCheckpointRepository(database);
+    const adapterReview = AdapterReviewSummarySchema.parse({
+      proposal: {
+        proposalId: "proposal-1",
+        taskId: snapshot.taskId,
+        lifecycleStatus: "candidate",
+        provider: "fixture",
+        model: "fixture-model",
+        promptVersion: "hint-proposal-v1",
+        inputHash: "a".repeat(64),
+        outputHash: "b".repeat(64),
+        definition: {
+          schemaVersion: 1,
+          packId: "fixture-ats",
+          version: "1.0.0",
+          match: {
+            sites: [{ hostSuffix: "example.test", pathPrefixes: ["/apply"] }],
+            stages: ["application_form"],
+            requiredTextSignals: [],
+            pageFingerprintHashes: []
+          },
+          sectionRules: [],
+          fieldRules: [],
+          actionRules: [],
+          fixtures: [{ fixtureId: "fixture-basic", expectedProfilePaths: ["basics.name"] }]
+        },
+        unsupportedBoundaries: [],
+        rejectedActions: [],
+        createdAt: "2026-08-17T00:00:00.000Z"
+      },
+      replayReports: [],
+      lifecycleStatus: "candidate",
+      aiReviewUnavailable: false,
+      writeBlocked: true
+    });
+
+    repository.save({
+      taskId: snapshot.taskId,
+      state: "awaiting_adapter_review",
+      url: snapshot.url,
+      stage: snapshot.stage,
+      snapshotId: snapshot.id,
+      fieldIds: [],
+      questions: [],
+      snapshot,
+      adapterReview
+    });
+
+    expect(repository.latest(snapshot.taskId)).toMatchObject({
+      state: "awaiting_adapter_review",
+      adapterReview
+    });
     database.close();
   });
 });

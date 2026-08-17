@@ -431,7 +431,7 @@ describe("application task routes", () => {
     });
   });
 
-  it("keeps an adapter-review pause fail closed even when legacy recovery is available", async () => {
+  it("exposes the sanitized adapter review and resumes only through certification", async () => {
     const { app, database, applicationService } = await buildApp();
     const stored = {
       id: "91dc4bd6-425a-4cab-a38d-d13e33cda771",
@@ -444,21 +444,30 @@ describe("application task routes", () => {
       context: { taskId: stored.id, applicationUrl: stored.applicationUrl, questions: [], errors: [] }
     } as unknown as ReturnType<typeof applicationService.state>);
     vi.spyOn(applicationService, "requiresRecovery").mockReturnValue(true);
+    const adapterReview = {
+      replayReports: [],
+      lifecycleStatus: "candidate" as const,
+      aiReviewUnavailable: false,
+      writeBlocked: true as const
+    };
+    vi.spyOn(applicationService, "adapterReview").mockReturnValue(adapterReview);
+    const resumeAfterCertification = vi.spyOn(applicationService, "resumeAfterAdapterCertification").mockResolvedValue();
 
     const response = await app.inject({ method: "GET", url: `/api/applications/${stored.id}` });
 
     expect(response.statusCode).toBe(200);
     expect(response.json()).toMatchObject({
       state: "awaiting_adapter_review",
-      commands: ["cancel"]
+      commands: ["cancel", "open_browser", "resume_after_adapter_certification"],
+      adapterReview
     });
     const resume = await app.inject({
       method: "POST",
       url: `/api/applications/${stored.id}/commands`,
       payload: { type: "resume_after_adapter_certification" }
     });
-    expect(resume.statusCode).toBe(409);
-    expect(resume.json()).toMatchObject({ code: "application_command_not_allowed" });
+    expect(resume.statusCode).toBe(200);
+    expect(resumeAfterCertification).toHaveBeenCalledWith(stored.id);
   });
 
   it("projects the recovery commands currently authorized by the coordinator", async () => {

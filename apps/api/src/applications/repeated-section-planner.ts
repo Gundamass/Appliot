@@ -1,9 +1,8 @@
-import type { FormSnapshot, ProfileFact } from "@resume/contracts";
-import { classifyMokahrAddActions, type MokahrSection } from "@resume/form-semantics";
+import type { FormSnapshot, HintPackRepeatSection, ProfileFact } from "@resume/contracts";
 import { compatibleExperienceIndexes, type ExperienceSection } from "./experience-routing.js";
 
 export interface RepeatedSectionPlan {
-  section: MokahrSection;
+  section: HintPackRepeatSection;
   actionId: string;
   missingEntries: number;
   profileIndexes: number[];
@@ -11,13 +10,10 @@ export interface RepeatedSectionPlan {
 
 export function planRepeatedSectionActions(
   snapshot: FormSnapshot,
-  profileFacts: readonly ProfileFact[]
+  profileFacts: readonly ProfileFact[],
+  classifiedActions: readonly { actionId: string; section: HintPackRepeatSection }[]
 ): RepeatedSectionPlan[] {
-  return classifyMokahrAddActions(snapshot.actions.map((action) => ({
-    id: action.id,
-    text: action.text,
-    nearbyText: action.context ?? ""
-  }))).flatMap((action) => {
+  return classifiedActions.flatMap((action) => {
     const profileIndexes = profileIndexesForSection(profileFacts, action.section);
     const observedEntries = observedEntryCount(snapshot, action.section);
     const missingEntries = Math.max(0, profileIndexes.length - observedEntries);
@@ -27,7 +23,7 @@ export function planRepeatedSectionActions(
   });
 }
 
-function profileIndexesForSection(facts: readonly ProfileFact[], section: MokahrSection): number[] {
+function profileIndexesForSection(facts: readonly ProfileFact[], section: HintPackRepeatSection): number[] {
   if (isExperienceSection(section)) return compatibleExperienceIndexes(facts, section);
   const root = section === "laboratory" ? "campus" : section;
   const indexes = new Set<number>();
@@ -39,7 +35,7 @@ function profileIndexesForSection(facts: readonly ProfileFact[], section: Mokahr
   return [...indexes].sort((left, right) => left - right);
 }
 
-function observedEntryCount(snapshot: FormSnapshot, section: MokahrSection): number {
+function observedEntryCount(snapshot: FormSnapshot, section: HintPackRepeatSection): number {
   const root = section === "laboratory" ? "campus" : isExperienceSection(section) ? "work" : section;
   const indexes = new Set<number>();
   for (const field of snapshot.fields) {
@@ -52,6 +48,6 @@ function observedEntryCount(snapshot: FormSnapshot, section: MokahrSection): num
   return indexes.size;
 }
 
-function isExperienceSection(section: MokahrSection): section is ExperienceSection {
+function isExperienceSection(section: HintPackRepeatSection): section is ExperienceSection {
   return section === "work" || section === "internship" || section === "work_combined";
 }

@@ -9,6 +9,8 @@ import type {
   ApplicationDisplayCategory,
   ApplicationTaskProgress,
   ApplicationTaskState,
+  AdapterReviewSummary,
+  CertifiedHintPack,
   ExecutableCommand,
   FormField,
   FormSnapshot,
@@ -16,7 +18,12 @@ import type {
   WorkerActivity,
   WorkerResponse
 } from "@resume/contracts";
-import { classifyMokahrAddActions } from "@resume/form-semantics";
+import {
+  applyCertifiedHintPack,
+  classifyRepeatedActions,
+  mokahrHintPack,
+  type HintPackRegistry
+} from "@resume/form-semantics";
 import { createActor } from "xstate";
 import {
   applicationMachine,
@@ -74,11 +81,13 @@ export interface ApplicationService {
   openBrowser(taskId: string): Promise<void>;
   resume(taskId: string): Promise<void>;
   resumeAfterChallenge(taskId: string): Promise<void>;
+  resumeAfterAdapterCertification(taskId: string): Promise<void>;
   resumeWithProfile(taskId: string): Promise<void>;
   refreshFromProfile(): Promise<void>;
   syncTaskFromProfile(taskId: string): Promise<void>;
   answerQuestions(taskId: string, answers: Record<string, unknown>): Promise<void>;
   contentReview(taskId: string): ContentReview | undefined;
+  adapterReview(taskId: string): AdapterReviewSummary | undefined;
   fieldCoverage(taskId: string): ApplicationFieldCoverage | undefined;
   approveReview(taskId: string, reviewId: string, editedValue?: string): Promise<void>;
   rejectReview(taskId: string, reviewId: string): Promise<void>;
@@ -103,6 +112,11 @@ interface FieldResolution {
   fieldPath?: string;
   requiresContentReview?: boolean;
   contentReview?: Pick<ApplicationContentReview, "original" | "reasons" | "evidence" | "unsupportedClaims" | "status">;
+}
+
+interface AdapterReviewServicePort {
+  prepare(taskId: string, snapshot: FormSnapshot): Promise<AdapterReviewSummary>;
+  retire(packId: string, version: string, reason: string): void;
 }
 
 interface ApplicationServiceDependencies {
@@ -134,6 +148,8 @@ interface ApplicationServiceDependencies {
   validateContentReview?: (review: ContentReview, editedValue: string) => string[];
   resolveFileId?: (taskId: string, field: FormField) => string | undefined;
   listProfileFacts?: () => readonly import("@resume/contracts").ProfileFact[];
+  hintPackRegistry?: HintPackRegistry;
+  adapterReviewService?: AdapterReviewServicePort;
 }
 
 export interface StartApplicationInput {
@@ -181,6 +197,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
   };
   const latestSnapshots = new Map<string, FormSnapshot>();
   const contentReviews = new Map<string, ContentReview>();
+  const adapterReviews = new Map<string, AdapterReviewSummary>();
+  const activeHintPacks = new Map<string, CertifiedHintPack>();
   const recoveryCheckpoints = new Map<string, ApplicationCheckpoint>();
   const lastPublishedStates = new Map<string, ApplicationTaskState>();
   const stableActivities = new Map<string, Promise<void>>();
@@ -246,6 +264,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       if (isApplicationFormReady(checkpoint.snapshot)) applicationFormsReached.add(taskId);
     }
     if (checkpoint.contentReview) contentReviews.set(taskId, checkpoint.contentReview);
+    if (checkpoint.adapterReview) adapterReviews.set(taskId, checkpoint.adapterReview);
     if (checkpoint.fieldCoverage) fieldCoverageStore.restore(taskId, checkpoint.fieldCoverage);
     const storedProgress = dependencies.checkpoints.latestProgress(taskId);
     if (storedProgress) progress.restore(taskId, storedProgress);
@@ -279,7 +298,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       ...(coverage === undefined ? {} : { fieldCoverage: coverage }),
       ...(contentReviews.get(machineState.context.taskId) === undefined
         ? {}
-        : { contentReview: contentReviews.get(machineState.context.taskId)! })
+        : { contentReview: contentReviews.get(machineState.context.taskId)! }),
+      ...(adapterReviews.get(machineState.context.taskId) === undefined
+        ? {}
+        : { adapterReview: adapterReviews.get(machineState.context.taskId)! })
     });
     const state = toApiState(machineState.value as ApplicationStateValue);
     if (lastPublishedStates.get(machineState.context.taskId) !== state) {
@@ -318,19 +340,22 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       return { snapshot: current, mismatches: [], challenged: false };
     }
 
-    const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
-    latestSnapshots.set(taskId, observed);
-    if (await pauseForChallenge(actor, observed)) {
+    const observed = await dependencies.browser.observe(taskId);
+    const prepared = await prepareObservedSnapshot(taskId, actor, observed);
+    if (prepared === undefined) {
       return { snapshot: observed, mismatches: [], challenged: true };
     }
-    const mismatches = coordinator.audit(observed);
+    const mismatches = coordinator.audit(prepared);
     for (const mismatch of mismatches) {
       fieldCoverageStore.markFailed(taskId, mismatch.fieldId, "controlled_value_reverted");
       const operation = auditOperationsFor(taskId).get(mismatch.operationKey);
       if (operation !== undefined) progress.recordFailure(operation, "READBACK_MISMATCH");
     }
-    persist(actor, observed);
-    return { snapshot: observed, mismatches, challenged: false };
+    if (mismatches.length > 0 && await quarantineActivePack(taskId, actor, "unsafe mapping", observed)) {
+      return { snapshot: observed, mismatches, challenged: true };
+    }
+    persist(actor, prepared);
+    return { snapshot: prepared, mismatches, challenged: false };
   };
 
   const nextRunGeneration = (taskId: string): number => {
@@ -359,10 +384,78 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     return challengeCoordinator.pause(actor, snapshot);
   };
 
+  const prepareObservedSnapshot = async (
+    taskId: string,
+    actor: ApplicationActor,
+    observed: FormSnapshot
+  ): Promise<FormSnapshot | undefined> => {
+    latestSnapshots.set(taskId, observed);
+    if (await pauseForChallenge(actor, observed)) return undefined;
+    if (observed.stage !== "application_form"
+      || dependencies.hintPackRegistry === undefined
+      || dependencies.adapterReviewService === undefined) {
+      return deriveSnapshot(observed);
+    }
+
+    const adapterResolution = dependencies.hintPackRegistry.resolve(observed);
+    if (adapterResolution.kind === "review_only") {
+      if (adapterResolution.reason === "fingerprint_mismatch") {
+        for (const pack of adapterResolution.mismatchedPacks) {
+          dependencies.adapterReviewService.retire(pack.packId, pack.version, "superseded mapping");
+        }
+      }
+      activeHintPacks.delete(taskId);
+      await invalidateExecution(taskId);
+      invalidateRunGeneration(taskId);
+      adapterReviews.set(taskId, await dependencies.adapterReviewService.prepare(taskId, observed));
+      if (actor.getSnapshot().value !== "awaiting_adapter_review") {
+        sendApplicationEvent(actor, { type: "ADAPTER_REVIEW_REQUIRED" });
+      }
+      persist(actor, observed);
+      return undefined;
+    }
+
+    activeHintPacks.set(taskId, adapterResolution.pack);
+    return withDerivedEntrySemantics(
+      applyCertifiedHintPack(observed, adapterResolution.pack),
+      dependencies.listProfileFacts?.() ?? []
+    );
+  };
+
+  const classifiedRepeatedActions = (taskId: string, snapshot: FormSnapshot) => {
+    const activePack = activeHintPacks.get(taskId);
+    if (activePack !== undefined) return classifyRepeatedActions(snapshot, activePack);
+    // Legacy in-process test composition omits the production registry entirely.
+    if (dependencies.hintPackRegistry === undefined && dependencies.adapterReviewService === undefined) {
+      return classifyRepeatedActions(snapshot, mokahrHintPack);
+    }
+    return [];
+  };
+
   const invalidateRunGeneration = (taskId: string): number => {
     const generation = (runGenerations.get(taskId) ?? 0) + 1;
     runGenerations.set(taskId, generation);
     return generation;
+  };
+
+  const quarantineActivePack = async (
+    taskId: string,
+    actor: ApplicationActor,
+    reason: string,
+    snapshot: FormSnapshot
+  ): Promise<boolean> => {
+    const pack = activeHintPacks.get(taskId);
+    if (pack === undefined || dependencies.adapterReviewService === undefined) return false;
+    dependencies.adapterReviewService.retire(pack.packId, pack.version, reason);
+    activeHintPacks.delete(taskId);
+    await invalidateExecution(taskId);
+    invalidateRunGeneration(taskId);
+    adapterReviews.set(taskId, await dependencies.adapterReviewService.prepare(taskId, snapshot));
+    if (actor.getSnapshot().value !== "awaiting_adapter_review") {
+      sendApplicationEvent(actor, { type: "ADAPTER_REVIEW_REQUIRED" });
+    }
+    persist(actor, snapshot);
+    return true;
   };
 
   const invalidateRun = (taskId: string): number => {
@@ -377,7 +470,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
   const runIsLive = (taskId: string, generation: number, actor: ApplicationActor): boolean =>
     runGenerations.get(taskId) === generation
     && actor.getSnapshot().value !== "cancelled"
-    && actor.getSnapshot().value !== "awaiting_challenge";
+    && actor.getSnapshot().value !== "awaiting_challenge"
+    && actor.getSnapshot().value !== "awaiting_adapter_review";
 
   const runIsCurrent = (taskId: string, generation: number, actor: ApplicationActor): boolean =>
     runIsLive(taskId, generation, actor)
@@ -432,6 +526,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       return contentReviews.get(taskId);
     },
 
+    adapterReview(taskId: string) {
+      return adapterReviews.get(taskId);
+    },
+
     fieldCoverage(taskId: string) {
       requireActor(taskId);
       return fieldCoverageStore.snapshot(taskId);
@@ -470,31 +568,33 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         if (existingActor) {
           const recoveryCheckpoint = recoveryCheckpoints.get(taskId);
           if (recoveryCheckpoint) {
-            const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
-            if (await pauseForChallenge(existingActor, observed)) return;
+            const observed = await dependencies.browser.observe(taskId);
+            const prepared = await prepareObservedSnapshot(taskId, existingActor, observed);
+            if (prepared === undefined) return;
             if (observed.stage !== "login" && !matchesCheckpoint(observed, recoveryCheckpoint)) {
               actors.delete(taskId);
               recoveryCheckpoints.delete(taskId);
               throw new Error("checkpoint_mismatch");
             }
-            if (observed.stage === "login") {
+            if (prepared.stage === "login") {
               sendApplicationEvent(existingActor, { type: "LOGIN_REQUIRED" });
             }
-            latestSnapshots.set(taskId, observed);
+            latestSnapshots.set(taskId, prepared);
             recoveryCheckpoints.delete(taskId);
-            persist(existingActor, observed);
+            persist(existingActor, prepared);
             return;
           }
           if (existingActor.getSnapshot().value !== "awaiting_login") {
             throw new Error(`投递任务已在当前进程恢复：${taskId}`);
           }
-          const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
-          if (await pauseForChallenge(existingActor, observed)) return;
-          latestSnapshots.set(taskId, observed);
+          const observed = await dependencies.browser.observe(taskId);
           if (observed.stage !== "login") {
             sendApplicationEvent(existingActor, { type: "RESUME" });
           }
-          persist(existingActor, observed);
+          const prepared = await prepareObservedSnapshot(taskId, existingActor, observed);
+          if (prepared === undefined) return;
+          latestSnapshots.set(taskId, prepared);
+          persist(existingActor, prepared);
           return;
         }
         const checkpoint = dependencies.checkpoints.latest(taskId);
@@ -506,17 +606,23 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         restoreActor(actor, checkpoint.state, checkpoint.questions, checkpoint.snapshot?.challenge);
         actors.set(taskId, actor);
 
-        const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
-        if (await pauseForChallenge(actor, observed)) return;
-        if (checkpoint.state !== "awaiting_login" && !matchesCheckpoint(observed, checkpoint)) {
+        const observed = await dependencies.browser.observe(taskId);
+        if (checkpoint.state === "awaiting_login"
+          && actor.getSnapshot().value === "awaiting_login"
+          && observed.stage !== "login") {
+          sendApplicationEvent(actor, { type: "RESUME" });
+        }
+        const prepared = await prepareObservedSnapshot(taskId, actor, observed);
+        if (prepared === undefined) return;
+        if (checkpoint.state !== "awaiting_login" && !matchesCheckpoint(prepared, checkpoint)) {
           actors.delete(taskId);
           throw new Error("checkpoint_mismatch");
         }
         if (checkpoint.state === "awaiting_login" && actor.getSnapshot().value === "awaiting_login") {
           sendApplicationEvent(actor, { type: "RESUME" });
         }
-        latestSnapshots.set(taskId, observed);
-        persist(actor, observed);
+        latestSnapshots.set(taskId, prepared);
+        persist(actor, prepared);
       } catch (error) {
         if (newlyReserved) releaseBrowserTask(taskId);
         throw error;
@@ -527,6 +633,32 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       const newlyReserved = reserveBrowserTask(taskId);
       try {
         await challengeCoordinator.resume(requireActor(taskId));
+      } catch (error) {
+        if (newlyReserved) releaseBrowserTask(taskId);
+        throw error;
+      }
+    },
+
+    async resumeAfterAdapterCertification(taskId: string): Promise<void> {
+      const actor = requireActor(taskId);
+      if (actor.getSnapshot().value !== "awaiting_adapter_review") {
+        throw new Error("adapter_review_resume_not_allowed");
+      }
+      if (dependencies.hintPackRegistry === undefined || dependencies.adapterReviewService === undefined) {
+        throw new Error("adapter_not_certified");
+      }
+      const newlyReserved = reserveBrowserTask(taskId);
+      try {
+        const observed = await dependencies.browser.observe(taskId);
+        const prepared = await prepareObservedSnapshot(taskId, actor, observed);
+        if (prepared === undefined) throw new Error("adapter_not_certified");
+        invalidateRunGeneration(taskId);
+        await invalidateExecution(taskId);
+        sendApplicationEvent(actor, { type: "ADAPTER_CERTIFIED" });
+        adapterReviews.delete(taskId);
+        latestSnapshots.set(taskId, prepared);
+        persist(actor, prepared);
+        await service.runUntilPause(taskId, prepared);
       } catch (error) {
         if (newlyReserved) releaseBrowserTask(taskId);
         throw error;
@@ -566,12 +698,13 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       if (actor.getSnapshot().value !== "needs_questions") throw new Error("profile_resumption_not_allowed");
       const newlyReserved = reserveBrowserTask(taskId);
       try {
-        const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
-        if (await pauseForChallenge(actor, observed)) return;
+        const observed = await dependencies.browser.observe(taskId);
+        const prepared = await prepareObservedSnapshot(taskId, actor, observed);
+        if (prepared === undefined) return;
         sendApplicationEvent(actor, { type: "PROFILE_UPDATED" });
-        latestSnapshots.set(taskId, observed);
-        persist(actor, observed);
-        await service.runUntilPause(taskId, observed);
+        latestSnapshots.set(taskId, prepared);
+        persist(actor, prepared);
+        await service.runUntilPause(taskId, prepared);
       } catch (error) {
         if (newlyReserved) releaseBrowserTask(taskId);
         throw error;
@@ -720,6 +853,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       actors.delete(taskId);
       latestSnapshots.delete(taskId);
       contentReviews.delete(taskId);
+      adapterReviews.delete(taskId);
+      activeHintPacks.delete(taskId);
       recoveryCheckpoints.delete(taskId);
       lastPublishedStates.delete(taskId);
       stableActivities.delete(taskId);
@@ -749,7 +884,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     async runUntilPauseInternal(taskId: string, initialSnapshot?: FormSnapshot): Promise<void> {
       const actor = requireActor(taskId);
       if (actor.getSnapshot().value === "review_locked") return;
-      if (actor.getSnapshot().value === "awaiting_challenge") return;
+      if (actor.getSnapshot().value === "awaiting_challenge"
+        || actor.getSnapshot().value === "awaiting_adapter_review") return;
       if (progress.snapshot(taskId).status === "paused") return;
       const runGeneration = nextRunGeneration(taskId);
       let page: FormSnapshot;
@@ -763,9 +899,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           throw error;
         }
       }
-      page = deriveSnapshot(page);
+      const preparedPage = await prepareObservedSnapshot(taskId, actor, page);
+      if (preparedPage === undefined) return;
+      page = preparedPage;
       if (!runIsCurrent(taskId, runGeneration, actor)) return;
-      if (await pauseForChallenge(actor, page)) return;
       latestSnapshots.set(taskId, page);
       persist(actor, page);
 
@@ -794,7 +931,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
 
       const repeatedAction = planRepeatedSectionActions(
         page,
-        dependencies.listProfileFacts?.() ?? []
+        dependencies.listProfileFacts?.() ?? [],
+        classifiedRepeatedActions(taskId, page)
       )[0];
       if (repeatedAction) {
         const profileFacts = dependencies.listProfileFacts?.() ?? [];
@@ -820,9 +958,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           approval
         }));
         if (!runIsCurrent(taskId, runGeneration, actor)) return;
-        const expanded = deriveSnapshot(result.snapshot);
-        latestSnapshots.set(taskId, expanded);
-        if (await pauseForChallenge(actor, expanded)) return;
+        const expanded = await prepareObservedSnapshot(taskId, actor, result.snapshot);
+        if (expanded === undefined) return;
+        if (isPackReadbackRegression(result)
+          && await quarantineActivePack(taskId, actor, "unsafe mapping", result.snapshot)) return;
         persist(actor, expanded);
         if (result.status !== "applied") {
           pauseAfterExecutionFailure(actor, operation, result);
@@ -840,10 +979,13 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           throw error;
         }
         if (!runIsCurrent(taskId, runGeneration, actor)) return;
-        const verified = deriveSnapshot(observed);
-        latestSnapshots.set(taskId, verified);
-        if (await pauseForChallenge(actor, verified)) return;
-        const remaining = planRepeatedSectionActions(verified, profileFacts)
+        const verified = await prepareObservedSnapshot(taskId, actor, observed);
+        if (verified === undefined) return;
+        const remaining = planRepeatedSectionActions(
+          verified,
+          profileFacts,
+          classifiedRepeatedActions(taskId, verified)
+        )
           .find((candidate) => candidate.section === repeatedAction.section)?.missingEntries ?? 0;
         if (remaining >= repeatedAction.missingEntries) {
           progress.recordFailure(operation, "READBACK_MISMATCH");
@@ -875,9 +1017,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           () => executeWithSignedEpoch(command)
         );
         if (!runIsCurrent(taskId, runGeneration, actor)) return;
-        const uploadSnapshot = deriveSnapshot(result.snapshot);
-        latestSnapshots.set(taskId, uploadSnapshot);
-        if (await pauseForChallenge(actor, uploadSnapshot)) return;
+        const uploadSnapshot = await prepareObservedSnapshot(taskId, actor, result.snapshot);
+        if (uploadSnapshot === undefined) return;
+        if (isPackReadbackRegression(result)
+          && await quarantineActivePack(taskId, actor, "unsafe mapping", result.snapshot)) return;
         if (result.status !== "applied") {
           pauseAfterExecutionFailure(actor, uploadOperation, result);
           persist(actor, uploadSnapshot);
@@ -885,7 +1028,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         }
         page = uploadSnapshot;
         persist(actor, page);
-        if (planRepeatedSectionActions(page, dependencies.listProfileFacts?.() ?? []).length > 0) {
+        if (planRepeatedSectionActions(
+          page,
+          dependencies.listProfileFacts?.() ?? [],
+          classifiedRepeatedActions(taskId, page)
+        ).length > 0) {
           await service.runUntilPauseInternal(taskId, page);
           return;
         }
@@ -1056,10 +1203,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
                     if (!runIsLive(taskId, runGeneration, actor)) return false;
                     await invalidateExecution(taskId);
                     if (!runIsLive(taskId, runGeneration, actor)) return false;
-                    const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+                    const observedSnapshot = await dependencies.browser.observe(taskId);
                     if (!runIsLive(taskId, runGeneration, actor)) return false;
-                    latestSnapshots.set(taskId, observed);
-                    if (await pauseForChallenge(actor, observed)) return false;
+                    const observed = await prepareObservedSnapshot(taskId, actor, observedSnapshot);
+                    if (observed === undefined || !runIsLive(taskId, runGeneration, actor)) return false;
                     const candidate = searchValues === undefined
                       ? observed.fields.find((candidate) => candidate.id === field.id)
                       : findSemanticField(observed, field, semanticPath!);
@@ -1099,9 +1246,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
             throw error;
           }
           if (!runIsCurrent(taskId, runGeneration, actor)) return false;
-          current = deriveSnapshot(result.snapshot);
-          latestSnapshots.set(taskId, current);
-          if (await pauseForChallenge(actor, current)) return false;
+          const preparedResultSnapshot = await prepareObservedSnapshot(taskId, actor, result.snapshot);
+          if (preparedResultSnapshot === undefined) return false;
+          current = preparedResultSnapshot;
+          if (isPackReadbackRegression(result)
+            && await quarantineActivePack(taskId, actor, "unsafe mapping", result.snapshot)) return false;
           const approvedReview = contentReviews.get(taskId);
           if (result.status === "applied"
             && approvedReview?.status === "approved"
@@ -1117,10 +1266,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
             if (commandType === "fill" || commandType === "select") {
               await invalidateExecution(taskId);
               if (!runIsCurrent(taskId, runGeneration, actor)) return false;
-              const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
+              const observedSnapshot = await dependencies.browser.observe(taskId);
               if (!runIsCurrent(taskId, runGeneration, actor)) return false;
-              latestSnapshots.set(taskId, observed);
-              if (await pauseForChallenge(actor, observed)) return false;
+              const observed = await prepareObservedSnapshot(taskId, actor, observedSnapshot);
+              if (observed === undefined || !runIsCurrent(taskId, runGeneration, actor)) return false;
               const retryField = observed.fields.find((candidate) => candidate.id === field.id);
               if (sameStructure(current, observed)
                 && retryField !== undefined
@@ -1172,9 +1321,11 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
                       throw error;
                     }
                     if (!runIsCurrent(taskId, runGeneration, actor)) return false;
-                    current = deriveSnapshot(result.snapshot);
-                    latestSnapshots.set(taskId, current);
-                    if (await pauseForChallenge(actor, current)) return false;
+                    const preparedRetrySnapshot = await prepareObservedSnapshot(taskId, actor, result.snapshot);
+                    if (preparedRetrySnapshot === undefined) return false;
+                    current = preparedRetrySnapshot;
+                    if (isPackReadbackRegression(result)
+                      && await quarantineActivePack(taskId, actor, "unsafe mapping", result.snapshot)) return false;
                     if (result.status === "applied") {
                       if (!await recordSuccessfulApply(field, fillOperation, result)) return false;
                       continue;
@@ -1350,11 +1501,9 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       sendApplicationEvent(actor, { type: "PAGE_VALID" });
       persist(actor, current);
 
-      const repeatedSectionActionIds = new Set(classifyMokahrAddActions(current.actions.map((action) => ({
-        id: action.id,
-        text: action.text,
-        nearbyText: action.context ?? ""
-      }))).map((action) => action.actionId));
+      const repeatedSectionActionIds = new Set(
+        classifiedRepeatedActions(taskId, current).map((action) => action.actionId)
+      );
       const intermediate = current.actions.find((action) =>
         (action.class === "intermediate_navigation" || action.class === "intermediate_save")
         && !repeatedSectionActionIds.has(action.id));
@@ -1407,9 +1556,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
         throw error;
       }
       if (!runIsCurrent(taskId, runGeneration, actor)) return;
-      const nextPage = deriveSnapshot(result.snapshot);
-      latestSnapshots.set(taskId, nextPage);
-      if (await pauseForChallenge(actor, nextPage)) return;
+      const nextPage = await prepareObservedSnapshot(taskId, actor, result.snapshot);
+      if (nextPage === undefined) return;
+      if (isPackReadbackRegression(result)
+        && await quarantineActivePack(taskId, actor, "unsafe mapping", result.snapshot)) return;
       if (result.status !== "applied") {
         pauseAfterExecutionFailure(actor, navigationOperation, result);
         persist(actor, nextPage);
@@ -1477,16 +1627,20 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       const existing = stableActivities.get(activity.taskId);
       if (existing) return existing;
       const handling = (async () => {
-        const observed = deriveSnapshot(await dependencies.browser.observe(activity.taskId));
-        if (await pauseForChallenge(actor, observed)) return;
+        const observedSnapshot = await dependencies.browser.observe(activity.taskId);
+        const wasAwaitingLogin = actor.getSnapshot().value === "awaiting_login";
+        if (wasAwaitingLogin && observedSnapshot.stage !== "login") {
+          sendApplicationEvent(actor, { type: "RESUME" });
+        }
+        const observed = await prepareObservedSnapshot(activity.taskId, actor, observedSnapshot);
+        if (observed === undefined) return;
         latestSnapshots.set(activity.taskId, observed);
         const machineState = actor.getSnapshot().value;
-        if (machineState === "awaiting_login") {
+        if (wasAwaitingLogin) {
           if (observed.stage === "login") {
             persist(actor, observed);
             return;
           }
-          sendApplicationEvent(actor, { type: "RESUME" });
           progress.resumeIfCheckpointMatches(activity.taskId, true);
           persist(actor, observed);
           await service.runUntilPause(activity.taskId, observed);
@@ -1522,14 +1676,14 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     },
 
     async retryCurrent(taskId: string): Promise<void> {
-      requireActor(taskId);
+      const actor = requireActor(taskId);
       if (!progress.snapshot(taskId).recovery.includes("retry_current")) throw new Error("recovery_not_allowed");
       const newlyReserved = reserveBrowserTask(taskId);
       try {
         await invalidateExecution(taskId);
-        let observed = deriveSnapshot(await dependencies.browser.observe(taskId));
-        if (await pauseForChallenge(requireActor(taskId), observed)) return;
-        latestSnapshots.set(taskId, observed);
+        const observedSnapshot = await dependencies.browser.observe(taskId);
+        let observed = await prepareObservedSnapshot(taskId, actor, observedSnapshot);
+        if (observed === undefined) return;
         const checkpoint = dependencies.checkpoints.latest(taskId);
         const failedObservation = progress.snapshot(taskId).lastResult?.operation.kind === "observe"
           && progress.snapshot(taskId).lastResult?.operation.errorCode === "PAGE_ERROR";
@@ -1540,9 +1694,10 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
           && isBrowserStartupPage(observed)
           && dependencies.browser.open !== undefined) {
           await dependencies.browser.open(taskId, checkpoint.url);
-          observed = deriveSnapshot(await dependencies.browser.observe(taskId));
-          if (await pauseForChallenge(requireActor(taskId), observed)) return;
-          latestSnapshots.set(taskId, observed);
+          const reopenedSnapshot = await dependencies.browser.observe(taskId);
+          const reopened = await prepareObservedSnapshot(taskId, actor, reopenedSnapshot);
+          if (reopened === undefined) return;
+          observed = reopened;
           reopenedCheckpoint = true;
         }
         const checkpointMatches = checkpoint !== undefined && (
@@ -1564,9 +1719,9 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
       if (!progress.snapshot(taskId).recovery.includes("manual_done")) throw new Error("recovery_not_allowed");
       await invalidateExecution(taskId);
       const actor = requireActor(taskId);
-      const observed = deriveSnapshot(await dependencies.browser.observe(taskId));
-      if (await pauseForChallenge(actor, observed)) return;
-      latestSnapshots.set(taskId, observed);
+      const observedSnapshot = await dependencies.browser.observe(taskId);
+      const observed = await prepareObservedSnapshot(taskId, actor, observedSnapshot);
+      if (observed === undefined) return;
       const fieldId = progress.snapshot(taskId).stalledFieldId;
       const field = observed.fields.find((candidate) => candidate.id === fieldId);
       if (!field || !hasUserValue(field.currentValue) || observed.errors.length > 0) {
@@ -1580,7 +1735,7 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
   challengeCoordinator = createChallengeCoordinator({
     invalidateExecution,
     persist,
-    observe: async (taskId) => deriveSnapshot(await dependencies.browser.observe(taskId)),
+    observe: (taskId) => dependencies.browser.observe(taskId),
     continueWithSnapshot: (taskId, snapshot) => service.runUntilPauseInternal(taskId, snapshot)
   });
 
@@ -1606,6 +1761,12 @@ function isTerminalSafetyBlock(result: ExecutionResult): boolean {
     error === "unsafe_intermediate_action"
     || error === "unsafe_intermediate_navigation"
     || error === "terminal_submission_blocked"
+  );
+}
+
+function isPackReadbackRegression(result: ExecutionResult): boolean {
+  return result.errors.some((error) =>
+    error === "controlled_value_reverted" || error === "node_role_changed"
   );
 }
 
@@ -1644,6 +1805,8 @@ function restoreActor(
   } else if (state === "awaiting_challenge") {
     if (challenge === undefined) throw new Error("challenge_checkpoint_invalid");
     sendApplicationEvent(actor, { type: "CHALLENGE_DETECTED", challenge });
+  } else if (state === "awaiting_adapter_review") {
+    sendApplicationEvent(actor, { type: "ADAPTER_REVIEW_REQUIRED" });
   } else if (state === "review_locked") {
     sendApplicationEvent(actor, { type: "REVIEW_REACHED" });
   } else if (state === "failed") {
@@ -1663,6 +1826,7 @@ function toApiState(state: ApplicationStateValue): ApplicationTaskState {
     needs_questions: "needs_questions",
     awaiting_content_review: "awaiting_content_review",
     awaiting_challenge: "awaiting_challenge",
+    awaiting_adapter_review: "awaiting_adapter_review",
     filling: "filling",
     validating: "validating",
     navigating: "navigating",

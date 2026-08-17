@@ -8,6 +8,7 @@ export type ApplicationStateValue =
   | "needs_questions"
   | "awaiting_content_review"
   | "awaiting_challenge"
+  | "awaiting_adapter_review"
   | "filling"
   | "validating"
   | "navigating"
@@ -25,6 +26,8 @@ export interface ApplicationContext {
 
 export type ApplicationEvent =
   | { type: "START" }
+  | { type: "ADAPTER_REVIEW_REQUIRED" }
+  | { type: "ADAPTER_CERTIFIED" }
   | { type: "LOGIN_REQUIRED" }
   | { type: "QUESTIONS_REQUIRED"; questions: ApplicationQuestion[] }
   | { type: "CONTENT_REVIEW_REQUIRED" }
@@ -76,6 +79,7 @@ export const applicationMachine = setup({
     created: { on: { START: "observing" } },
     observing: {
       on: {
+        ADAPTER_REVIEW_REQUIRED: "awaiting_adapter_review",
         LOGIN_REQUIRED: "awaiting_login",
         QUESTIONS_REQUIRED: { target: "needs_questions", actions: "storeQuestions" },
         CONTENT_REVIEW_REQUIRED: "awaiting_content_review",
@@ -86,21 +90,32 @@ export const applicationMachine = setup({
         CHALLENGE_DETECTED: { target: "awaiting_challenge", actions: "storeChallenge" }
       }
     },
-    awaiting_login: { on: { RESUME: "observing" } },
+    awaiting_login: {
+      on: {
+        ADAPTER_REVIEW_REQUIRED: "awaiting_adapter_review",
+        CHALLENGE_DETECTED: { target: "awaiting_challenge", actions: "storeChallenge" },
+        RESUME: "observing"
+      }
+    },
     needs_questions: {
       on: {
+        ADAPTER_REVIEW_REQUIRED: "awaiting_adapter_review",
+        CHALLENGE_DETECTED: { target: "awaiting_challenge", actions: "storeChallenge" },
         ANSWERS_PROVIDED: { target: "observing", actions: "clearQuestions" },
         PROFILE_UPDATED: { target: "observing", actions: "clearQuestions" }
       }
     },
     awaiting_content_review: {
       on: {
+        ADAPTER_REVIEW_REQUIRED: "awaiting_adapter_review",
+        CHALLENGE_DETECTED: { target: "awaiting_challenge", actions: "storeChallenge" },
         CONTENT_APPROVED: "filling",
         CONTENT_REJECTED: { target: "failed", actions: "storeErrors" }
       }
     },
     filling: {
       on: {
+        ADAPTER_REVIEW_REQUIRED: "awaiting_adapter_review",
         PAGE_FILLED: "validating",
         QUESTIONS_REQUIRED: { target: "needs_questions", actions: "storeQuestions" },
         CONTENT_REVIEW_REQUIRED: "awaiting_content_review",
@@ -112,6 +127,7 @@ export const applicationMachine = setup({
     },
     validating: {
       on: {
+        ADAPTER_REVIEW_REQUIRED: "awaiting_adapter_review",
         PAGE_VALID: "navigating",
         PAGE_INVALID: { target: "needs_questions", actions: "storeErrors" },
         REVIEW_REACHED: "review_locked",
@@ -122,6 +138,7 @@ export const applicationMachine = setup({
     },
     navigating: {
       on: {
+        ADAPTER_REVIEW_REQUIRED: "awaiting_adapter_review",
         PAGE_NAVIGATED: "observing",
         REVIEW_REACHED: "review_locked",
         FAIL: { target: "failed", actions: "storeErrors" },
@@ -136,6 +153,9 @@ export const applicationMachine = setup({
           actions: ["clearChallenge", "clearErrors"]
         }
       }
+    },
+    awaiting_adapter_review: {
+      on: { ADAPTER_CERTIFIED: "observing" }
     },
     review_locked: { on: { CANCEL: undefined } },
     cancelled: {},

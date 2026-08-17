@@ -1,6 +1,8 @@
 import {
+  AdapterReviewSummarySchema,
   ApplicationQuestionSchema,
   ApplicationFieldCoverageSchema,
+  type AdapterReviewSummary,
   FormSnapshotSchema,
   type ApplicationContentReview,
   type ApplicationFieldCoverage,
@@ -23,6 +25,7 @@ export interface ApplicationCheckpointInput {
   snapshot?: FormSnapshot;
   contentReview?: StoredContentReview;
   fieldCoverage?: ApplicationFieldCoverage;
+  adapterReview?: AdapterReviewSummary;
 }
 
 export interface StoredContentReview {
@@ -55,6 +58,7 @@ interface CheckpointRow {
   snapshot_json: string | null;
   content_review_json: string | null;
   field_coverage_json: string | null;
+  adapter_review_json: string | null;
   created_at: string;
 }
 
@@ -82,8 +86,8 @@ export function createCheckpointRepository(database: SqliteDatabase): Checkpoint
   const insert = database.prepare(`
     INSERT INTO application_checkpoints (
       task_id, sequence, state, url, stage, snapshot_id, field_ids_json, questions_json,
-      snapshot_json, content_review_json, field_coverage_json, created_at
-    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+      snapshot_json, content_review_json, field_coverage_json, adapter_review_json, created_at
+    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
   `);
   const nextSequence = database.prepare(`
     SELECT COALESCE(MAX(sequence), 0) + 1 AS sequence
@@ -110,6 +114,7 @@ export function createCheckpointRepository(database: SqliteDatabase): Checkpoint
       checkpoint.snapshot === undefined ? null : JSON.stringify(checkpoint.snapshot),
       checkpoint.contentReview === undefined ? null : JSON.stringify(checkpoint.contentReview),
       checkpoint.fieldCoverage === undefined ? null : JSON.stringify(checkpoint.fieldCoverage),
+      checkpoint.adapterReview === undefined ? null : JSON.stringify(checkpoint.adapterReview),
       createdAt
     );
     return { ...checkpoint, sequence, createdAt };
@@ -161,6 +166,9 @@ function fromRow(row: CheckpointRow): ApplicationCheckpoint {
       ...(row.field_coverage_json === null
         ? {}
         : { fieldCoverage: ApplicationFieldCoverageSchema.parse(JSON.parse(row.field_coverage_json)) }),
+      ...(row.adapter_review_json === null
+        ? {}
+        : { adapterReview: AdapterReviewSummarySchema.parse(JSON.parse(row.adapter_review_json)) }),
     createdAt: row.created_at
   };
 }

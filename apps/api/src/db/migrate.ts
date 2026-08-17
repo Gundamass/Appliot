@@ -202,7 +202,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
       type TEXT NOT NULL CHECK (type = 'state_changed'),
       state TEXT NOT NULL CHECK (state IN (
         'created', 'observing_page', 'waiting_for_login', 'needs_questions',
-        'awaiting_content_review', 'awaiting_challenge', 'filling', 'validating', 'navigating',
+        'awaiting_content_review', 'awaiting_challenge', 'awaiting_adapter_review', 'filling', 'validating', 'navigating',
         'review_locked', 'cancelled', 'failed'
       )),
       created_at TEXT NOT NULL
@@ -317,7 +317,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
       sequence INTEGER NOT NULL CHECK (sequence > 0),
       state TEXT NOT NULL CHECK (state IN (
         'created', 'observing', 'awaiting_login', 'needs_questions',
-        'awaiting_content_review', 'awaiting_challenge', 'filling', 'validating', 'navigating',
+        'awaiting_content_review', 'awaiting_challenge', 'awaiting_adapter_review', 'filling', 'validating', 'navigating',
         'review_locked', 'cancelled', 'failed'
       )),
       url TEXT NOT NULL,
@@ -328,6 +328,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
       snapshot_json TEXT CHECK (snapshot_json IS NULL OR json_valid(snapshot_json)),
       content_review_json TEXT CHECK (content_review_json IS NULL OR json_valid(content_review_json)),
       field_coverage_json TEXT CHECK (field_coverage_json IS NULL OR json_valid(field_coverage_json)),
+      adapter_review_json TEXT CHECK (adapter_review_json IS NULL OR json_valid(adapter_review_json)),
       created_at TEXT NOT NULL,
       PRIMARY KEY (task_id, sequence)
     );
@@ -402,8 +403,11 @@ export function migrateDatabase(database: SqliteDatabase): void {
   if (!checkpointColumns.some((column) => column.name === "field_coverage_json")) {
     database.exec("ALTER TABLE application_checkpoints ADD COLUMN field_coverage_json TEXT");
   }
+  if (!checkpointColumns.some((column) => column.name === "adapter_review_json")) {
+    database.exec("ALTER TABLE application_checkpoints ADD COLUMN adapter_review_json TEXT");
+  }
 
-  upgradeChallengeStateConstraints(database);
+  upgradeApplicationStateConstraints(database);
 
   upgradeFactForeignKeys(database);
 
@@ -436,9 +440,13 @@ export function migrateDatabase(database: SqliteDatabase): void {
   `);
 }
 
-function upgradeChallengeStateConstraints(database: SqliteDatabase): void {
-  const eventTableNeedsUpgrade = !tableSql(database, "application_task_events").includes("'awaiting_challenge'");
-  const checkpointTableNeedsUpgrade = !tableSql(database, "application_checkpoints").includes("'awaiting_challenge'");
+function upgradeApplicationStateConstraints(database: SqliteDatabase): void {
+  const supportsAllApplicationPauseStates = (table: string) => {
+    const sql = tableSql(database, table);
+    return ["'awaiting_challenge'", "'awaiting_adapter_review'"].every((state) => sql.includes(state));
+  };
+  const eventTableNeedsUpgrade = !supportsAllApplicationPauseStates("application_task_events");
+  const checkpointTableNeedsUpgrade = !supportsAllApplicationPauseStates("application_checkpoints");
   if (!eventTableNeedsUpgrade && !checkpointTableNeedsUpgrade) return;
 
   const upgrade = database.transaction(() => {
@@ -454,7 +462,7 @@ function upgradeChallengeStateConstraints(database: SqliteDatabase): void {
           type TEXT NOT NULL CHECK (type = 'state_changed'),
           state TEXT NOT NULL CHECK (state IN (
             'created', 'observing_page', 'waiting_for_login', 'needs_questions',
-            'awaiting_content_review', 'awaiting_challenge', 'filling', 'validating', 'navigating',
+            'awaiting_content_review', 'awaiting_challenge', 'awaiting_adapter_review', 'filling', 'validating', 'navigating',
             'review_locked', 'cancelled', 'failed'
           )),
           created_at TEXT NOT NULL
@@ -474,7 +482,7 @@ function upgradeChallengeStateConstraints(database: SqliteDatabase): void {
           sequence INTEGER NOT NULL CHECK (sequence > 0),
           state TEXT NOT NULL CHECK (state IN (
             'created', 'observing', 'awaiting_login', 'needs_questions',
-            'awaiting_content_review', 'awaiting_challenge', 'filling', 'validating', 'navigating',
+            'awaiting_content_review', 'awaiting_challenge', 'awaiting_adapter_review', 'filling', 'validating', 'navigating',
             'review_locked', 'cancelled', 'failed'
           )),
           url TEXT NOT NULL,
@@ -485,16 +493,17 @@ function upgradeChallengeStateConstraints(database: SqliteDatabase): void {
           snapshot_json TEXT CHECK (snapshot_json IS NULL OR json_valid(snapshot_json)),
           content_review_json TEXT CHECK (content_review_json IS NULL OR json_valid(content_review_json)),
           field_coverage_json TEXT CHECK (field_coverage_json IS NULL OR json_valid(field_coverage_json)),
+          adapter_review_json TEXT CHECK (adapter_review_json IS NULL OR json_valid(adapter_review_json)),
           created_at TEXT NOT NULL,
           PRIMARY KEY (task_id, sequence)
         );
         INSERT INTO application_checkpoints (
           task_id, sequence, state, url, stage, snapshot_id, field_ids_json,
-          questions_json, snapshot_json, content_review_json, field_coverage_json, created_at
+          questions_json, snapshot_json, content_review_json, field_coverage_json, adapter_review_json, created_at
         )
         SELECT
           task_id, sequence, state, url, stage, snapshot_id, field_ids_json,
-          questions_json, snapshot_json, content_review_json, field_coverage_json, created_at
+          questions_json, snapshot_json, content_review_json, field_coverage_json, adapter_review_json, created_at
         FROM application_checkpoints_challenge_legacy;
         DROP TABLE application_checkpoints_challenge_legacy;
       `);
