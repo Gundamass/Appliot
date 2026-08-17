@@ -115,7 +115,7 @@ function hasExplicitArtifact(value: string): boolean {
     || /-----BEGIN [A-Z0-9 ]+-----/u.test(value)
     || /\b[a-f0-9]{64,}\b/iu.test(value);
   const credentialHeader = /(?:^|[\r\n;,])\s*(?:proxy[\s_/-]*)?authorization(?:\s*[:=]\s*|\s+)(?:basic|bearer|digest|negotiate|ntlm|aws4-hmac-sha256)\s+\S+/iu.test(value);
-  const artifactAssignment = /(?:^|[\s;,])(?:cookie|session|authorization|password|screenshot|approval(?:[\s_/-]*(?:token|key))?|api[\s_/-]*key|client[\s_/-]*secret|access[\s_/-]*token|refresh[\s_/-]*token)\s*[:=]/iu.test(value);
+  const artifactAssignment = /(?:^|[\s;,])(?:cookie|session|password|screenshot|approval(?:[\s_/-]*(?:token|key))?|api[\s_/-]*key|client[\s_/-]*secret|access[\s_/-]*token|refresh[\s_/-]*token)\s*[:=]/iu.test(value);
   const knownCredential = /(?:AKIA|ASIA)[A-Z0-9]{16}|(?:sk_(?:live|test)|ghp_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]+/u.test(value);
   return /\p{N}{7,}/u.test(value)
     || /[@<>{}\\`|]/u.test(value)

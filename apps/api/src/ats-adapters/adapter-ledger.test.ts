@@ -362,7 +362,8 @@ describe("createAdapterLedger", () => {
       "Add another employment",
       "Work Authorization",
       "ProfessionalQualificationsSummaryField",
-      "Work Authorization Basic Information"
+      "Work Authorization Basic Information",
+      "Work Authorization: United States"
     ];
 
     ledger.createProposal({
@@ -380,7 +381,7 @@ describe("createAdapterLedger", () => {
         }],
         fieldRules: [{
           ...candidate.definition.fieldRules[0]!,
-          labelAliases: [atsText[3]!, atsText[5]!, atsText[6]!, atsText[7]!]
+          labelAliases: [atsText[3]!, atsText[5]!, atsText[6]!, atsText[7]!, atsText[8]!]
         }],
         actionRules: [{
           kind: "add_repeated_entry",
@@ -400,6 +401,7 @@ describe("createAdapterLedger", () => {
       fieldOrderAliases: [[expect.stringMatching(matchingReference)]]
     });
     expect(persisted.definition.fieldRules[0]?.labelAliases).toEqual([
+      expect.stringMatching(matchingReference),
       expect.stringMatching(matchingReference),
       expect.stringMatching(matchingReference),
       expect.stringMatching(matchingReference),
