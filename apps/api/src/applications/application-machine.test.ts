@@ -1356,8 +1356,14 @@ describe("application machine", () => {
             status: "verified",
             value: "13800000000",
             assessment: {
-              fieldId: field.id, label: field.label, status: "ready", source: "exact",
-              confidence: 1, reason: "精确映射", evidence: []
+              fieldId: field.id, label: field.label, status: "ready", source: "certified_hint",
+              confidence: 1, reason: "认证提示包映射", evidence: [],
+              semanticProvenance: {
+                packId: "dji-campus",
+                packVersion: "1.0.0",
+                confidence: 1,
+                certification: "certified"
+              }
             }
           }
         : phase === "deterministic"

@@ -21,12 +21,14 @@ describe("DJI field catalog", () => {
       selectField("获奖级别", ["国家级", "省级", "校级"])
     ]));
 
-    expect(snapshot.fields.map(({ label, semanticHint, semanticSource }) => ({ label, semanticHint, semanticSource }))).toEqual([
-      { label: "姓名", semanticHint: "basics.name", semanticSource: "dji_catalog" },
-      { label: "手机号码", semanticHint: "basics.phone", semanticSource: "dji_catalog" },
-      { label: "毕业院校", semanticHint: "education[0].institution", semanticSource: "dji_catalog" },
-      { label: "项目名称", semanticHint: "projects[0].name", semanticSource: "dji_catalog" },
-      { label: "获奖级别", semanticHint: "awards[0].level", semanticSource: "dji_catalog" }
+    expect(snapshot.fields.map(({ label, semanticHint, semanticSource, semanticProvenance }) => ({
+      label, semanticHint, semanticSource, semanticProvenance
+    }))).toEqual([
+      { label: "姓名", semanticHint: "basics.name", semanticSource: "certified_hint", semanticProvenance: provenance() },
+      { label: "手机号码", semanticHint: "basics.phone", semanticSource: "certified_hint", semanticProvenance: provenance() },
+      { label: "毕业院校", semanticHint: "education[0].institution", semanticSource: "certified_hint", semanticProvenance: provenance() },
+      { label: "项目名称", semanticHint: "projects[0].name", semanticSource: "certified_hint", semanticProvenance: provenance() },
+      { label: "获奖级别", semanticHint: "awards[0].level", semanticSource: "certified_hint", semanticProvenance: provenance() }
     ]);
   });
 
@@ -42,7 +44,7 @@ describe("DJI field catalog", () => {
 
   it("rejects catalog entries with an incompatible observed control type", () => {
     const snapshot = annotateDjiFields(makeSnapshot("https://apply.careers.dji.com/campus-recruitment/dji/143359#/apply", [
-      selectField("项目名称", ["项目 A", "项目 B"])
+      selectField("项目名称", ["项目 A", "项目 B"], "projects")
     ]));
 
     expect(snapshot.fields[0]?.semanticHint).toBeUndefined();
@@ -62,10 +64,36 @@ function makeSnapshot(url: string, fields: FormSnapshot["fields"]): FormSnapshot
   };
 }
 
-function textField(label: string): FormSnapshot["fields"][number] {
-  return { nodeRef: fixtureNodeRef, id: `field-${label}`, label, type: "text", required: false, options: [], currentValue: "" };
+function textField(label: string, sectionHint?: FormSnapshot["fields"][number]["sectionHint"]): FormSnapshot["fields"][number] {
+  return {
+    nodeRef: fixtureNodeRef,
+    id: `field-${label}`,
+    label,
+    type: "text",
+    required: false,
+    options: [],
+    currentValue: "",
+    ...(sectionHint === undefined ? {} : { sectionHint })
+  };
 }
 
-function selectField(label: string, options: string[]): FormSnapshot["fields"][number] {
-  return { nodeRef: fixtureNodeRef, id: `field-${label}`, label, type: "select", required: false, options, currentValue: "" };
+function selectField(
+  label: string,
+  options: string[],
+  sectionHint?: FormSnapshot["fields"][number]["sectionHint"]
+): FormSnapshot["fields"][number] {
+  return {
+    nodeRef: fixtureNodeRef,
+    id: `field-${label}`,
+    label,
+    type: "select",
+    required: false,
+    options,
+    currentValue: "",
+    ...(sectionHint === undefined ? {} : { sectionHint })
+  };
+}
+
+function provenance() {
+  return { packId: "dji-campus", packVersion: "1.0.0", confidence: 1, certification: "certified" as const };
 }

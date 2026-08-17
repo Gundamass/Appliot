@@ -37,7 +37,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     const contentReview = dependencies.applicationService.contentReview(task.id);
     const fieldCoverage = dependencies.applicationService.fieldCoverage(task.id);
     const executionProgress = dependencies.applicationService.progress(task.id).executionProgress;
-    const commands = state === "awaiting_challenge"
+    const commands = state === "awaiting_challenge" || state === "awaiting_adapter_review"
       ? commandsForState(state)
       : dependencies.applicationService.requiresRecovery(task.id)
       ? ["cancel", "resume"] as ApplicationTask["commands"]
@@ -47,7 +47,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       fact.scope === "application" && fact.taskId === task.id
     );
     const hasTaskAnswer = taskAnswers.length > 0;
-    if (hasTaskAnswer && !["awaiting_challenge", "review_locked", "cancelled", "failed"].includes(state)) {
+    if (hasTaskAnswer && !["awaiting_challenge", "awaiting_adapter_review", "review_locked", "cancelled", "failed"].includes(state)) {
       commands.push("promote_answer_to_profile");
     }
     if (contentReview?.status === "blocked" || (contentReview?.unsupportedClaims.length ?? 0) > 0) {
@@ -305,6 +305,8 @@ function commandsForState(state: ApplicationTaskState): ApplicationTask["command
       return ["cancel", "open_browser", "approve_content", "reject_content"];
     case "awaiting_challenge":
       return ["cancel", "resume_after_challenge"];
+    case "awaiting_adapter_review":
+      return ["cancel"];
     case "filling":
     case "validating":
     case "navigating":
@@ -396,6 +398,7 @@ function toApiState(state: string): ApplicationTaskState {
     needs_questions: "needs_questions",
     awaiting_content_review: "awaiting_content_review",
     awaiting_challenge: "awaiting_challenge",
+    awaiting_adapter_review: "awaiting_adapter_review",
     filling: "filling",
     validating: "validating",
     navigating: "navigating",

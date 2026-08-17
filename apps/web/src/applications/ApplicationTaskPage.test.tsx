@@ -2,7 +2,7 @@ import type { ApplicationAutofillPhase, ApplicationExecutionProgress, Applicatio
 import { render, screen, waitFor } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
-import { ApplicationTaskPage } from "./ApplicationTaskPage.js";
+import { ApplicationTaskPage, ProgressSummary } from "./ApplicationTaskPage.js";
 import type { TaskEventConnection } from "./useTaskEvents.js";
 
 const task: ApplicationTask = {
@@ -98,6 +98,18 @@ describe("ApplicationTaskPage", () => {
     />);
 
     expect(await screen.findByRole("heading", { name: "等待进入简历填写页面" })).toBeVisible();
+  });
+
+  it("labels an adapter-review pause without exposing a write-resume action", () => {
+    const adapterReviewTask = {
+      ...task,
+      state: "awaiting_adapter_review" as const,
+      commands: ["cancel"] as ApplicationTask["commands"]
+    };
+    render(<ProgressSummary task={adapterReviewTask} activities={[]} connection="disconnected" />);
+
+    expect(screen.getByText("上次状态：等待 ATS 适配审核")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "适配包已认证，重新观察" })).not.toBeInTheDocument();
   });
 
   it("opens review evidence without exposing profile field-source controls", async () => {

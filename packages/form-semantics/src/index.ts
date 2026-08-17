@@ -17,6 +17,16 @@ export {
 } from "./field-registry.js";
 export { normalizeForm, type FormContext } from "./normalize.js";
 export {
+  BUILT_IN_HINT_PACKS,
+  createHintPackRegistry,
+  fingerprintSnapshot,
+  type HintPackRegistry,
+  type HintPackResolution
+} from "./hint-packs/registry.js";
+export { applyCertifiedHintPack, classifyRepeatedActions } from "./hint-packs/runtime.js";
+export { djiHintPack, DJI_FIELD_RULES } from "./hint-packs/dji-pack.js";
+export { mokahrHintPack, MOKAHR_ACTION_RULES, MOKAHR_SECTIONS } from "./hint-packs/mokahr-pack.js";
+export {
   classifyMokahrAddActions,
   isMokahrPage,
   sortMokahrEntryFields,

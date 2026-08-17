@@ -7,6 +7,7 @@ import {
   type MokahrObservedAction,
   type MokahrObservedField
 } from "./mokahr-adapter.js";
+import { mokahrHintPack } from "./hint-packs/mokahr-pack.js";
 
 const actions: MokahrObservedAction[] = [
   { id: "add-education", text: "添加", nearbyText: "教育经历" },
@@ -16,11 +17,24 @@ const actions: MokahrObservedAction[] = [
 ];
 
 describe("Mokahr 动态区块适配", () => {
+  it("keeps the source-controlled pack certified with laboratory repeat support", () => {
+    expect(mokahrHintPack).toMatchObject({
+      packId: "mokahr-cn",
+      lifecycleStatus: "certified",
+      fieldRules: []
+    });
+    expect(mokahrHintPack.actionRules[0]?.sections).toContain("laboratory");
+  });
+
   it("通过 Mokahr/DJI URL 或页面特征识别页面", () => {
     expect(isMokahrPage({ url: "https://apply.careers.dji.com/campus-recruitment/dji/143359" })).toBe(true);
     expect(isMokahrPage({
       url: "https://careers.example.com/apply",
       pageText: "Moka 招聘 教育经历 项目经历"
+    })).toBe(true);
+    expect(isMokahrPage({
+      url: "not-a-url",
+      pageText: "Mokahr 招聘 教育经历"
     })).toBe(true);
     expect(isMokahrPage({ url: "https://careers.example.com/apply", pageText: "候选人申请表" })).toBe(false);
   });

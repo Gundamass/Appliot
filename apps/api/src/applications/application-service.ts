@@ -207,7 +207,8 @@ export function createApplicationService(dependencies: ApplicationServiceDepende
     if (coverage === undefined) return;
     const counts: ApplicationExecutionCounts = {
       exact: coverage.fields.filter((field) =>
-        field.status === "filled" && (field.source === "exact" || field.source === "dji_catalog")).length,
+        field.status === "filled"
+        && (field.source === "exact" || field.source === "dji_catalog" || field.source === "certified_hint")).length,
       semantic: coverage.fields.filter((field) =>
         field.status === "filled" && field.source === "semantic").length,
       user: coverage.fields.filter((field) =>

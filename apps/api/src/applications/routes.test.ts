@@ -431,6 +431,36 @@ describe("application task routes", () => {
     });
   });
 
+  it("keeps an adapter-review pause fail closed even when legacy recovery is available", async () => {
+    const { app, database, applicationService } = await buildApp();
+    const stored = {
+      id: "91dc4bd6-425a-4cab-a38d-d13e33cda771",
+      applicationUrl: "https://jobs.example.test/adapter-review"
+    };
+    applicationService.start({ taskId: stored.id, applicationUrl: stored.applicationUrl });
+    createApplicationTaskRepository(database).create(stored);
+    vi.spyOn(applicationService, "state").mockReturnValue({
+      value: "awaiting_adapter_review",
+      context: { taskId: stored.id, applicationUrl: stored.applicationUrl, questions: [], errors: [] }
+    } as unknown as ReturnType<typeof applicationService.state>);
+    vi.spyOn(applicationService, "requiresRecovery").mockReturnValue(true);
+
+    const response = await app.inject({ method: "GET", url: `/api/applications/${stored.id}` });
+
+    expect(response.statusCode).toBe(200);
+    expect(response.json()).toMatchObject({
+      state: "awaiting_adapter_review",
+      commands: ["cancel"]
+    });
+    const resume = await app.inject({
+      method: "POST",
+      url: `/api/applications/${stored.id}/commands`,
+      payload: { type: "resume_after_adapter_certification" }
+    });
+    expect(resume.statusCode).toBe(409);
+    expect(resume.json()).toMatchObject({ code: "application_command_not_allowed" });
+  });
+
   it("projects the recovery commands currently authorized by the coordinator", async () => {
     const { app, database, applicationService } = await buildApp();
     const stored = {
