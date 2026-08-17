@@ -53,6 +53,8 @@ export interface SyntheticRuntimeState {
   writeCounts: Record<string, number>;
   mutationCount: number;
   auditCount: number;
+  readbackSnapshots: Record<string, string>[];
+  repeatedOrder: string[];
 }
 
 export interface SyntheticChallengeState {
@@ -67,21 +69,39 @@ export interface SyntheticAtsServer {
   close(): Promise<void>;
 }
 
-const applicationTemplatePath = fileURLToPath(new URL("../public/application.html", import.meta.url));
-const reviewTemplatePath = fileURLToPath(new URL("../public/review.html", import.meta.url));
-const stabilityTemplatePath = fileURLToPath(new URL("../public/stability.html", import.meta.url));
-const runtimeP0TemplatePath = fileURLToPath(new URL("../public/runtime-p0.html", import.meta.url));
-const challengeP0TemplatePath = fileURLToPath(new URL("../public/challenge-p0.html", import.meta.url));
-const jobListTemplatePath = fileURLToPath(new URL("../public/job-list.html", import.meta.url));
+export interface StartSyntheticAtsOptions {
+  fixtureRoot?: URL;
+}
 
-export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
-  const [applicationTemplate, reviewTemplate, stabilityTemplate, runtimeP0Template, challengeP0Template, jobListTemplate] = await Promise.all([
-    readFile(applicationTemplatePath, "utf8"),
-    readFile(reviewTemplatePath, "utf8"),
-    readFile(stabilityTemplatePath, "utf8"),
-    readFile(runtimeP0TemplatePath, "utf8"),
-    readFile(challengeP0TemplatePath, "utf8"),
-    readFile(jobListTemplatePath, "utf8")
+const DEFAULT_FIXTURE_ROOT = new URL("../public/", import.meta.url);
+const ADAPTER_REPLAY_FIXTURE_IDS = new Set([
+  "adapter-replay-basic",
+  "adapter-replay-boundary",
+  "adapter-replay-access-denied",
+  "adapter-replay-rate-limited",
+  "adapter-replay-repeated"
+]);
+const ADAPTER_REPLAY_STATE_KEYS = new Set(["name", "school", "unrelatedSentinel"]);
+
+export async function startSyntheticAts(options: StartSyntheticAtsOptions = {}): Promise<SyntheticAtsServer> {
+  const fixtureRoot = options.fixtureRoot ?? DEFAULT_FIXTURE_ROOT;
+  const [applicationTemplate, reviewTemplate, stabilityTemplate, runtimeP0Template, challengeP0Template, jobListTemplate, adapterReplayBasicTemplate, adapterReplayBoundaryTemplate, adapterReplayRepeatedTemplate] = await Promise.all([
+    readFixture(fixtureRoot, "application.html"),
+    readFixture(fixtureRoot, "review.html"),
+    readFixture(fixtureRoot, "stability.html"),
+    readFixture(fixtureRoot, "runtime-p0.html"),
+    readFixture(fixtureRoot, "challenge-p0.html"),
+    readFixture(fixtureRoot, "job-list.html"),
+    readFixture(fixtureRoot, "adapter-replay-basic.html"),
+    readFixture(fixtureRoot, "adapter-replay-boundary.html"),
+    readFixture(fixtureRoot, "adapter-replay-repeated.html")
+  ]);
+  const adapterReplayTemplates = new Map([
+    ["adapter-replay-basic", adapterReplayBasicTemplate],
+    ["adapter-replay-boundary", adapterReplayBoundaryTemplate],
+    ["adapter-replay-access-denied", adapterReplayBasicTemplate],
+    ["adapter-replay-rate-limited", adapterReplayBasicTemplate],
+    ["adapter-replay-repeated", adapterReplayRepeatedTemplate]
   ]);
   const tasks = new Map<string, SyntheticTaskState>();
   const taskState = (taskId: string): SyntheticTaskState => {
@@ -97,13 +117,15 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
       workAddCount: 0,
       internshipAddCount: 0,
       projectAddCount: 0,
-      runtime: {
-        scenario: "",
-        values: {},
-        writeCounts: {},
-        mutationCount: 0,
-        auditCount: 0
-      }
+        runtime: {
+          scenario: "",
+          values: {},
+          writeCounts: {},
+          mutationCount: 0,
+          auditCount: 0,
+          readbackSnapshots: [],
+          repeatedOrder: []
+        }
     };
     tasks.set(taskId, created);
     return created;
@@ -115,6 +137,27 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
       const url = new URL(request.url ?? "/", origin);
       const taskId = url.searchParams.get("taskId") ?? "default-task";
       const scenario = url.searchParams.get("scenario") ?? "default";
+      if (request.method === "GET" && url.pathname.startsWith("/adapter-replay/")) {
+        const fixtureId = url.pathname.slice("/adapter-replay/".length);
+        const template = ADAPTER_REPLAY_FIXTURE_IDS.has(fixtureId)
+          ? adapterReplayTemplates.get(fixtureId)
+          : undefined;
+        if (template === undefined) {
+          response.statusCode = 404;
+          response.end("Not Found");
+          return;
+        }
+        const state = taskState(taskId);
+        state.runtime.scenario = fixtureId;
+        state.runtime.values.unrelatedSentinel ??= "UNCHANGED";
+        const httpChallenge = adapterReplayHttpChallenge(fixtureId);
+        if (httpChallenge !== undefined) {
+          response.statusCode = httpChallenge.status;
+          state.challenge = { scenario: fixtureId, kind: httpChallenge.kind, fillCount: 0 };
+        }
+        sendHtml(response, render(template, taskId, fixtureId));
+        return;
+      }
       if (request.method === "GET" && url.pathname === "/job-list.html") {
         taskState(taskId);
         sendHtml(response, jobListTemplate);
@@ -202,6 +245,17 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
         if (body.writeCounts !== undefined) state.runtime.writeCounts = { ...body.writeCounts };
         if (body.mutationCount !== undefined) state.runtime.mutationCount = body.mutationCount;
         if (body.auditCount !== undefined) state.runtime.auditCount = body.auditCount;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.end(JSON.stringify(state));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/adapter-replay-state") {
+        const update = parseAdapterReplayState(JSON.parse(await readText(request)));
+        const state = taskState(taskId);
+        state.runtime.values = { ...update.values };
+        state.runtime.writeCounts = { ...update.writeCounts };
+        state.runtime.readbackSnapshots = update.readbackSnapshots.map((snapshot) => ({ ...snapshot }));
+        state.runtime.repeatedOrder = [...update.repeatedOrder];
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         response.end(JSON.stringify(state));
         return;
@@ -294,9 +348,78 @@ function challengeKindForScenario(scenario: string): SyntheticChallengeState["ki
   }
 }
 
+function adapterReplayHttpChallenge(fixtureId: string): {
+  status: number;
+  kind: Extract<SyntheticChallengeState["kind"], "access_denied" | "rate_limited">;
+} | undefined {
+  if (fixtureId === "adapter-replay-access-denied") return { status: 403, kind: "access_denied" };
+  if (fixtureId === "adapter-replay-rate-limited") return { status: 429, kind: "rate_limited" };
+  return undefined;
+}
+
+async function readFixture(root: URL, filename: string): Promise<string> {
+  const path = fileURLToPath(new URL(filename, root));
+  return readFile(path, "utf8");
+}
+
+function parseAdapterReplayState(value: unknown): {
+  values: Record<string, string>;
+  writeCounts: Record<string, number>;
+  readbackSnapshots: Record<string, string>[];
+  repeatedOrder: string[];
+} {
+  if (!isRecord(value)) throw new Error("adapter_replay_state_invalid");
+  const values = markerRecord(value.values);
+  const writeCounts = countRecord(value.writeCounts);
+  const readbackSnapshots = Array.isArray(value.readbackSnapshots)
+    ? value.readbackSnapshots.map(markerRecord)
+    : [];
+  const repeatedOrder = Array.isArray(value.repeatedOrder)
+    && value.repeatedOrder.every((item) => typeof item === "string" && item.length <= 80)
+    ? [...value.repeatedOrder]
+    : [];
+  return { values, writeCounts, readbackSnapshots, repeatedOrder };
+}
+
+function markerRecord(value: unknown): Record<string, string> {
+  if (!isRecord(value)) throw new Error("adapter_replay_state_invalid");
+  const result: Record<string, string> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!ADAPTER_REPLAY_STATE_KEYS.has(key) || typeof item !== "string" || !isSyntheticMarker(item)) {
+      throw new Error("adapter_replay_value_not_marker");
+    }
+    result[key] = item;
+  }
+  return result;
+}
+
+function countRecord(value: unknown): Record<string, number> {
+  if (!isRecord(value)) throw new Error("adapter_replay_state_invalid");
+  const result: Record<string, number> = {};
+  for (const [key, item] of Object.entries(value)) {
+    if (!ADAPTER_REPLAY_STATE_KEYS.has(key)
+      || typeof item !== "number"
+      || !Number.isSafeInteger(item)
+      || item < 0) {
+      throw new Error("adapter_replay_state_invalid");
+    }
+    result[key] = item;
+  }
+  return result;
+}
+
+function isSyntheticMarker(value: string): boolean {
+  return value === "" || value === "UNCHANGED" || /^MARKER_[A-Za-z0-9_]+$/u.test(value);
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === "object" && value !== null && !Array.isArray(value);
+}
+
 function render(template: string, taskId: string, scenario: string): string {
   return template
     .replaceAll("{{TASK_ID}}", encodeURIComponent(taskId))
+    .replaceAll("{{FIXTURE_ID}}", encodeURIComponent(scenario))
     .replaceAll("{{SCENARIO}}", encodeURIComponent(scenario))
     .replaceAll("{{SCENARIO_JSON}}", JSON.stringify(scenario))
     .replaceAll("{{PHONE_FIELD}}", scenario === "stuck-control"

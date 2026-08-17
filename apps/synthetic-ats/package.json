@@ -2,6 +2,9 @@
   "name": "@resume/synthetic-ats",
   "private": true,
   "type": "module",
+  "exports": {
+    "./server": "./src/server.ts"
+  },
   "scripts": {
     "test": "vitest run --passWithNoTests",
     "typecheck": "tsc --noEmit -p ../../tsconfig.json",

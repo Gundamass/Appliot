@@ -5,7 +5,7 @@
   "scripts": {
     "test": "vitest run",
     "typecheck": "tsc --noEmit -p ../../tsconfig.json",
-    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.js --external:@napi-rs/canvas --external:better-sqlite3 --external:drizzle-orm --external:drizzle-orm/* --external:fastify --external:@fastify/* --external:pdfjs-dist/* && esbuild ../browser-worker/src/main.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/browser-worker.js --external:playwright-core",
+    "build": "esbuild src/server.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/server.js --external:@napi-rs/canvas --external:better-sqlite3 --external:drizzle-orm --external:drizzle-orm/* --external:fastify --external:@fastify/* --external:pdfjs-dist/* && esbuild ../browser-worker/src/main.ts --bundle --platform=node --format=esm --target=node24 --outfile=dist/browser-worker.js --external:playwright-core && node ../../scripts/copy-synthetic-ats-assets.mjs",
     "start": "node --env-file-if-exists=../../.env.local dist/server.js",
     "dev": "node --env-file-if-exists=../../.env.local --import tsx src/server.ts"
   },
@@ -20,6 +20,7 @@
     "@resume/model-provider": "workspace:*",
     "@resume/profile-domain": "workspace:*",
     "@resume/rag": "workspace:*",
+    "@resume/synthetic-ats": "workspace:*",
     "better-sqlite3": "11.10.0",
     "drizzle-orm": "0.45.2",
     "fastify": "5.11.3",

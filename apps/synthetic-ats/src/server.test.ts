@@ -115,6 +115,74 @@ describe("synthetic ATS application scenarios", () => {
     expect(server.state("runtime-state")).toMatchObject(recorded);
   });
 
+  it("serves declared adapter replay fixtures with an immutable unrelated sentinel", async () => {
+    const server = await startSyntheticAts();
+    servers.push(server);
+
+    const response = await fetch(`${server.baseUrl}/adapter-replay/adapter-replay-basic?taskId=adapter-replay-task`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('data-fixture="adapter-replay-basic"');
+    expect(server.state("adapter-replay-task")).toMatchObject({
+      runtime: {
+        values: { unrelatedSentinel: "UNCHANGED" },
+        writeCounts: {}
+      },
+      submissionCount: 0
+    });
+
+    const unknown = await fetch(`${server.baseUrl}/adapter-replay/not-declared?taskId=adapter-replay-task`);
+    expect(unknown.status).toBe(404);
+  });
+
+  it("serves the boundary replay fixture without recording a submission", async () => {
+    const server = await startSyntheticAts();
+    servers.push(server);
+
+    const response = await fetch(`${server.baseUrl}/adapter-replay/adapter-replay-boundary?taskId=adapter-replay-boundary-task`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('data-fixture="adapter-replay-boundary"');
+    expect(server.state("adapter-replay-boundary-task")).toMatchObject({
+      runtime: { values: { unrelatedSentinel: "UNCHANGED" }, writeCounts: {} },
+      submissionCount: 0
+    });
+  });
+
+  it.each([
+    ["adapter-replay-access-denied", 403, "access_denied"],
+    ["adapter-replay-rate-limited", 429, "rate_limited"]
+  ] as const)("returns the declared HTTP challenge for %s", async (fixtureId, status, kind) => {
+    const server = await startSyntheticAts();
+    servers.push(server);
+
+    const response = await fetch(`${server.baseUrl}/adapter-replay/${fixtureId}?taskId=${fixtureId}-task`);
+
+    expect(response.status).toBe(status);
+    expect(server.state(`${fixtureId}-task`)).toMatchObject({
+      challenge: { scenario: fixtureId, kind, fillCount: 0 },
+      submissionCount: 0
+    });
+  });
+
+  it("serves the repeated-section replay fixture with no initial writes", async () => {
+    const server = await startSyntheticAts();
+    servers.push(server);
+
+    const response = await fetch(`${server.baseUrl}/adapter-replay/adapter-replay-repeated?taskId=adapter-replay-repeated-task`);
+
+    expect(response.status).toBe(200);
+    expect(await response.text()).toContain('data-fixture="adapter-replay-repeated"');
+    expect(server.state("adapter-replay-repeated-task")).toMatchObject({
+      runtime: {
+        values: { unrelatedSentinel: "UNCHANGED" },
+        repeatedOrder: [],
+        writeCounts: {}
+      },
+      submissionCount: 0
+    });
+  });
+
   it("serves every Challenge P0 mode with finite state and never submits", async () => {
     const server = await startSyntheticAts();
     servers.push(server);

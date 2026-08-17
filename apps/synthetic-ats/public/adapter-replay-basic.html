@@ -1,0 +1,40 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width,initial-scale=1">
+  <title>Adapter replay fixture</title>
+</head>
+<body data-fixture="{{FIXTURE_ID}}">
+  <main>
+    <h1>Adapter replay fixture</h1>
+    <form method="post" action="/submit?taskId={{TASK_ID}}">
+      <label for="replay-name">Full name<input id="replay-name" name="fixture.fullName" data-replay-key="name"></label>
+      <label for="replay-school">School<input id="replay-school" name="fixture.school" data-replay-key="school"></label>
+      <label for="replay-unrelated">Unrelated sentinel<input id="replay-unrelated" name="fixture.unrelated" data-replay-key="unrelatedSentinel" value="UNCHANGED"></label>
+      <button type="submit">Submit application</button>
+    </form>
+  </main>
+  <script>
+    const taskId = "{{TASK_ID}}";
+    const writeCounts = {};
+    const values = () => Object.fromEntries(
+      [...document.querySelectorAll("[data-replay-key]")]
+        .map((control) => [control.dataset.replayKey, control.value])
+    );
+    const sync = () => fetch(`/api/adapter-replay-state?taskId=${encodeURIComponent(taskId)}`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({ values: values(), writeCounts, readbackSnapshots: [values()], repeatedOrder: [] })
+    });
+    document.querySelectorAll("[data-replay-key]").forEach((control) => {
+      control.addEventListener("input", () => {
+        const key = control.dataset.replayKey;
+        writeCounts[key] = (writeCounts[key] || 0) + 1;
+        void sync();
+      });
+    });
+    void sync();
+  </script>
+</body>
+</html>
