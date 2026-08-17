@@ -6,6 +6,7 @@ import { djiJobAdapter, jobExpectationSnapshot, mokaJobAdapter } from "@resume/j
 import {
   DeepSeekStructuredModelProvider,
   EMBEDDING_INSTRUCTION_VERSION,
+  type RawStructuredResponse,
   RemoteEmbeddingProvider,
   ScheduledEmbeddingProvider
 } from "@resume/model-provider";
@@ -45,6 +46,7 @@ import { createJobMatchRepository, type JobMatchRepository } from "./job-matchin
 import { createJobMatchService } from "./job-matching/job-match-service.js";
 import { createMatchCoordinator } from "./job-matching/match-coordinator.js";
 import { BoundedJobMatchTraceBuffer } from "./observability/job-match-trace.js";
+import { createDebugRawStore } from "./ats-adapters/debug-raw-store.js";
 
 type ProductionBrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
   & Partial<Pick<BrowserWorkerClient,
@@ -79,6 +81,7 @@ export function createProductionDependencies(
   };
   try {
     migrateDatabase(database);
+    const debugRawStore = createDebugRawStore(database, config.atsAdapterDebug ?? { enabled: false });
     const profileRepository = createProfileRepository(database);
     const documentRepository = createDocumentRepository(database);
     const originalsDirectory = resolve(dirname(resolve(config.databaseFile)), "originals");
@@ -154,9 +157,21 @@ export function createProductionDependencies(
       ...(config.embedding === undefined ? {} : { embedding: config.embedding }),
       ...(config.ocr === undefined ? {} : { ocr: config.ocr })
     }, adapters);
+    const observeAtsRawResponse = config.atsAdapterDebug === undefined
+      ? undefined
+      : (response: RawStructuredResponse) => {
+          if (response.purpose === "adapter_proposal") {
+            debugRawStore.retain({ proposalId: response.requestId, purpose: "proposal", plaintext: response.content });
+          } else if (response.purpose === "adapter_replay_review") {
+            debugRawStore.retain({ proposalId: response.requestId, purpose: "replay_review", plaintext: response.content });
+          }
+        };
     const baseStructuredProvider = config.deepseek === undefined
       ? undefined
-      : new DeepSeekStructuredModelProvider(config.deepseek, adapters);
+      : new DeepSeekStructuredModelProvider(config.deepseek, {
+          ...adapters,
+          ...(observeAtsRawResponse === undefined ? {} : { observeRawResponse: observeAtsRawResponse })
+        });
     const structuredProvider = baseStructuredProvider === undefined
       ? undefined
       : new ObservedStructuredModelProvider(baseStructuredProvider, adapterHealth);

@@ -2,6 +2,7 @@ import { beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
 import type { FormField, FormSnapshot, JobPageSnapshot, ProfileFact, WorkerActivity } from "@resume/contracts";
 import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
+import { z } from "zod";
 import type { FieldSemanticResolver } from "./applications/field-semantic-resolver.js";
 import { loadConfig } from "./config.js";
 import { createApp } from "./app.js";
@@ -144,6 +145,43 @@ describe("production dependency composition", () => {
     expect(dependencies.adapterHealth).toBeDefined();
     expect(fetch).not.toHaveBeenCalled();
     dependencies.close?.();
+  });
+
+  it("retains correlated ATS raw responses only with explicit encrypted debug configuration", async () => {
+    const rawContent = JSON.stringify({ facts: [] });
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: rawContent } }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const dependencies = createProductionDependencies(loadConfig({
+      DATABASE_FILE: ":memory:",
+      DEEPSEEK_API_KEY: "deepseek-test-token",
+      ATS_ADAPTER_DEBUG_RAW: "1",
+      ATS_ADAPTER_DEBUG_KEY_BASE64: Buffer.alloc(32, 7).toString("base64")
+    }), { fetch: fetch as typeof globalThis.fetch, browserClient: productionBrowserClient() });
+
+    await dependencies.selfEvaluationModelProvider!.generateStructured({
+      system: "Return json.",
+      user: "sanitized adapter observation",
+      schema: z.object({ facts: z.array(z.unknown()) }),
+      jsonExample: { facts: [] },
+      metadata: { requestId: "proposal-raw-1", purpose: "adapter_proposal" }
+    });
+
+    const row = dependencies.database.prepare(`
+      SELECT proposal_id, purpose, ciphertext FROM ats_adapter_debug_responses
+    `).get() as { proposal_id: string; purpose: string; ciphertext: Buffer };
+    expect(row).toMatchObject({ proposal_id: "proposal-raw-1", purpose: "proposal" });
+    expect(row.ciphertext.equals(Buffer.from(rawContent, "utf8"))).toBe(false);
+    await dependencies.selfEvaluationModelProvider!.generateStructured({
+      system: "Return json.",
+      user: "ordinary self evaluation",
+      schema: z.object({ facts: z.array(z.unknown()) }),
+      jsonExample: { facts: [] },
+      metadata: { requestId: "self-evaluation-raw-1", purpose: "self_evaluation" }
+    });
+    expect(dependencies.database.prepare("SELECT COUNT(*) AS count FROM ats_adapter_debug_responses").get())
+      .toEqual({ count: 1 });
+    await dependencies.close?.();
   });
 
   it("shares one scheduled embedding provider across ontology resolution and Fact synchronization", async () => {

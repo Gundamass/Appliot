@@ -1,5 +1,5 @@
 import { z } from "zod";
-import type { StructuredGenerationInput, StructuredModelProvider } from "./provider.js";
+import type { RawStructuredResponse, StructuredGenerationInput, StructuredModelProvider } from "./provider.js";
 
 const DEFAULT_BASE_URL = "https://api.deepseek.com";
 const DEFAULT_MODEL = "deepseek-v4-flash";
@@ -27,6 +27,7 @@ export interface DeepSeekProviderConfig {
 export interface DeepSeekProviderDependencies {
   fetch?: typeof globalThis.fetch;
   sleep?: (delayMs: number) => Promise<void>;
+  observeRawResponse?: (response: RawStructuredResponse) => Promise<void> | void;
 }
 
 export type DeepSeekProviderErrorKind =
@@ -66,11 +67,13 @@ export class DeepSeekStructuredModelProvider implements StructuredModelProvider 
   private readonly config: NormalizedConfig;
   private readonly fetch: typeof globalThis.fetch;
   private readonly sleep: (delayMs: number) => Promise<void>;
+  private readonly observeRawResponse: ((response: RawStructuredResponse) => Promise<void> | void) | undefined;
 
   constructor(config: DeepSeekProviderConfig, dependencies: DeepSeekProviderDependencies = {}) {
     this.config = normalizeConfig(config);
     this.fetch = dependencies.fetch ?? globalThis.fetch;
     this.sleep = dependencies.sleep ?? ((delayMs) => new Promise((resolve) => setTimeout(resolve, delayMs)));
+    this.observeRawResponse = dependencies.observeRawResponse;
   }
 
   async generateStructured<T>(input: StructuredGenerationInput<T>): Promise<T> {
@@ -169,6 +172,9 @@ export class DeepSeekStructuredModelProvider implements StructuredModelProvider 
 
       const content = completion.data.choices[0]!.message.content;
       if (!content?.trim()) throw new ClassifiedFailure(new DeepSeekProviderError("validation"), "retryable_validation");
+      if (input.metadata !== undefined && this.observeRawResponse !== undefined) {
+        await this.observeRawResponse({ ...input.metadata, model, content });
+      }
 
       let parsed: unknown;
       try {

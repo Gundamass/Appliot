@@ -285,4 +285,36 @@ describe("DeepSeekStructuredModelProvider", () => {
       system: "Return json.", user: "resume", schema: FactsSchema, jsonExample: { facts: [] }
     })).resolves.toEqual({ facts: [] });
   });
+
+  it("observes raw adapter responses only when correlation metadata is present", async () => {
+    const rawContent = JSON.stringify({ facts: [] });
+    const observeRawResponse = vi.fn(async () => undefined);
+    const provider = new DeepSeekStructuredModelProvider(config, {
+      fetch: fakeFetch(completion(rawContent), completion(rawContent)) as typeof globalThis.fetch,
+      sleep: async () => undefined,
+      observeRawResponse
+    });
+
+    await provider.generateStructured({
+      system: "Return json.",
+      user: "sanitized observation",
+      schema: FactsSchema,
+      jsonExample: { facts: [] },
+      metadata: { requestId: "proposal-1", purpose: "adapter_proposal" }
+    });
+    await provider.generateStructured({
+      system: "Return json.",
+      user: "ordinary request",
+      schema: FactsSchema,
+      jsonExample: { facts: [] }
+    });
+
+    expect(observeRawResponse).toHaveBeenCalledTimes(1);
+    expect(observeRawResponse).toHaveBeenCalledWith({
+      requestId: "proposal-1",
+      purpose: "adapter_proposal",
+      model: "deepseek-v4-flash",
+      content: rawContent
+    });
+  });
 });
