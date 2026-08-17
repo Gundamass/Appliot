@@ -60,7 +60,7 @@ const unrestrictedStringKeys = new Set([
 ]);
 const allowedRetirementReasons = new Set(["unsafe mapping", "superseded mapping"]);
 const prohibitedArtifactTokens = new Set([
-  "authorization", "bearer", "password", "currentvalue", "noderef", "approvaltoken", "approvalkey"
+  "bearer", "password", "currentvalue", "noderef", "approvaltoken", "approvalkey"
 ]);
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
 const modelIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$/u;
@@ -109,12 +109,18 @@ function hasExplicitArtifact(value: string): boolean {
   const commandShaped = tokenSet.has("type")
     && ["fill", "click", "select", "upload"].some((token) => tokenSet.has(token))
     && (tokenSet.has("value") || hasPair("field", "id"));
-  const opaqueToken = value.match(/[A-Za-z0-9+/_=-]{32,}/u) !== null;
+  const encodedArtifact = /\bdata:[^,\s]{1,128};base64,[A-Za-z0-9+/]+={0,2}/iu.test(value)
+    || /\bbase64\s*[:,=]\s*[A-Za-z0-9+/]{24,}={0,2}/iu.test(value)
+    || /\beyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}(?:\.[A-Za-z0-9_-]{10,})?\b/u.test(value)
+    || /-----BEGIN [A-Z0-9 ]+-----/u.test(value)
+    || /\b[a-f0-9]{64,}\b/iu.test(value);
+  const credentialHeader = /(?:^|[\r\n;,])\s*(?:proxy[\s_/-]*)?authorization(?:\s*[:=]\s*|\s+)(?:basic|bearer|digest|negotiate|ntlm|aws4-hmac-sha256)\s+\S+/iu.test(value);
   const artifactAssignment = /(?:^|[\s;,])(?:cookie|session|authorization|password|screenshot|approval(?:[\s_/-]*(?:token|key))?|api[\s_/-]*key|client[\s_/-]*secret|access[\s_/-]*token|refresh[\s_/-]*token)\s*[:=]/iu.test(value);
   const knownCredential = /(?:AKIA|ASIA)[A-Z0-9]{16}|(?:sk_(?:live|test)|ghp_|github_pat_|xox[baprs]-)[A-Za-z0-9_-]+/u.test(value);
   return /\p{N}{7,}/u.test(value)
     || /[@<>{}\\`|]/u.test(value)
-    || opaqueToken
+    || encodedArtifact
+    || credentialHeader
     || artifactAssignment
     || knownCredential
     || tokens.some((token) => prohibitedArtifactTokens.has(token))

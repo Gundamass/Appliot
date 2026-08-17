@@ -328,6 +328,10 @@ describe("createAdapterLedger", () => {
     "type/fill/field-id/value",
     "screenshot: page.png",
     "approval: cap-abc",
+    "Authorization: Bearer synthetic-token",
+    "Authorization Basic dXNlcjpwYXNz",
+    "Authorization Digest response=abcdefabcdefabcdefabcdefabcdefab",
+    "Proxy-Authorization Negotiate synthetic-token",
     "credential id AKIAIOSFODNN7EXAMPLE",
     `ats:sha256:5:${"a".repeat(64)}`
   ])("rejects punctuation-normalized artifact metadata: %s", (artifact) => {
@@ -355,7 +359,10 @@ describe("createAdapterLedger", () => {
       "Candidate Information Session",
       "Employment History",
       "Preferred First Name",
-      "Add another employment"
+      "Add another employment",
+      "Work Authorization",
+      "ProfessionalQualificationsSummaryField",
+      "Work Authorization Basic Information"
     ];
 
     ledger.createProposal({
@@ -373,7 +380,7 @@ describe("createAdapterLedger", () => {
         }],
         fieldRules: [{
           ...candidate.definition.fieldRules[0]!,
-          labelAliases: [atsText[3]!]
+          labelAliases: [atsText[3]!, atsText[5]!, atsText[6]!, atsText[7]!]
         }],
         actionRules: [{
           kind: "add_repeated_entry",
@@ -392,8 +399,12 @@ describe("createAdapterLedger", () => {
       headingAliases: [expect.stringMatching(matchingReference)],
       fieldOrderAliases: [[expect.stringMatching(matchingReference)]]
     });
-    expect(persisted.definition.fieldRules[0]?.labelAliases)
-      .toEqual([expect.stringMatching(matchingReference)]);
+    expect(persisted.definition.fieldRules[0]?.labelAliases).toEqual([
+      expect.stringMatching(matchingReference),
+      expect.stringMatching(matchingReference),
+      expect.stringMatching(matchingReference),
+      expect.stringMatching(matchingReference)
+    ]);
     expect(persisted.definition.actionRules[0]?.verbs)
       .toEqual([expect.stringMatching(matchingReference)]);
     const payload = (database.prepare("SELECT payload_json FROM ats_adapter_proposals").get() as { payload_json: string })

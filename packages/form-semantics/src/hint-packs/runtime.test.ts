@@ -69,12 +69,15 @@ describe("certified hint-pack runtime", () => {
       sectionRules: [{
         section: "work",
         headingAliases: [textReference("Employment History")],
-        fieldOrderAliases: []
+        fieldOrderAliases: [
+          [textReference("Work Authorization")],
+          [textReference("Preferred First Name")]
+        ]
       }],
       fieldRules: [{
-        ruleId: "preferred-first-name",
+        ruleId: "work-authorization",
         profilePath: "basics.name",
-        labelAliases: [textReference("Preferred First Name")],
+        labelAliases: [textReference("Work Authorization")],
         sections: ["work"],
         controlTypes: ["text"],
         confidence: 1
@@ -89,6 +92,9 @@ describe("certified hint-pack runtime", () => {
       ...snapshot("https://jobs.example.test/apply", [{
         label: "Preferred First Name",
         sectionHint: "work"
+      }, {
+        label: "Work Authorization",
+        sectionHint: "work"
       }]),
       actions: [{
         id: "add-employment",
@@ -99,12 +105,70 @@ describe("certified hint-pack runtime", () => {
       }]
     };
 
-    expect(applyCertifiedHintPack(observed, pack).fields[0]).toMatchObject({
+    const applied = applyCertifiedHintPack(observed, pack);
+    expect(applied.fields.map(({ label }) => label)).toEqual([
+      "Work Authorization",
+      "Preferred First Name"
+    ]);
+    expect(applied.fields[0]).toMatchObject({
       semanticHint: "basics.name",
       semanticSource: "certified_hint"
     });
     expect(classifyRepeatedActions(observed, pack)).toEqual([
       { actionId: "add-employment", section: "work" }
+    ]);
+  });
+
+  it("orders fields with plaintext aliases for source-controlled packs", () => {
+    const pack: CertifiedHintPack = {
+      ...djiHintPack,
+      sectionRules: [{
+        section: "work",
+        headingAliases: ["Employment History"],
+        fieldOrderAliases: [["Work Authorization"], ["Preferred First Name"]]
+      }],
+      fieldRules: [],
+      actionRules: []
+    };
+    const observed = snapshot("https://jobs.example.test/apply", [{
+      label: "Preferred First Name",
+      sectionHint: "work"
+    }, {
+      label: "Work Authorization",
+      sectionHint: "work"
+    }]);
+
+    expect(applyCertifiedHintPack(observed, pack).fields.map(({ label }) => label)).toEqual([
+      "Work Authorization",
+      "Preferred First Name"
+    ]);
+  });
+
+  it.each([
+    ["plaintext", (value: string) => value],
+    ["ATS-reference", textReference]
+  ] as const)("orders %s laboratory fields normalized to the campus snapshot section", (_kind, alias) => {
+    const pack: CertifiedHintPack = {
+      ...djiHintPack,
+      sectionRules: [{
+        section: "laboratory",
+        headingAliases: [alias("实验室经历")],
+        fieldOrderAliases: [[alias("实验室名称")], [alias("开始时间")]]
+      }],
+      fieldRules: [],
+      actionRules: []
+    };
+    const observed = snapshot("https://jobs.example.test/apply", [{
+      label: "开始时间",
+      sectionHint: "campus"
+    }, {
+      label: "实验室名称",
+      sectionHint: "campus"
+    }]);
+
+    expect(applyCertifiedHintPack(observed, pack).fields.map(({ label }) => label)).toEqual([
+      "实验室名称",
+      "开始时间"
     ]);
   });
 });
@@ -118,7 +182,7 @@ function textReference(value: string): string {
 
 function snapshot(
   url: string,
-  fields: Array<{ label: string; sectionHint: "education" | "work" }>
+  fields: Array<{ label: string; sectionHint: "campus" | "education" | "work" }>
 ): FormSnapshot {
   return {
     id: "snapshot-runtime",

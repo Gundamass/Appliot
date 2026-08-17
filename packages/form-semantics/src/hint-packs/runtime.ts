@@ -3,7 +3,8 @@ import { certifiedTextEquals, certifiedTextIncludes } from "./text-reference.js"
 
 export function applyCertifiedHintPack(snapshot: FormSnapshot, pack: CertifiedHintPack): FormSnapshot {
   if (pack.lifecycleStatus !== "certified") return snapshot;
-  return { ...snapshot, fields: snapshot.fields.map((field) => annotate(field, pack)) };
+  const annotated = snapshot.fields.map((field) => annotate(field, pack));
+  return { ...snapshot, fields: orderFields(annotated, pack) };
 }
 
 export function classifyRepeatedActions(
@@ -42,4 +43,30 @@ function annotate(field: FormField, pack: CertifiedHintPack): FormField {
       certification: "certified"
     }
   };
+}
+
+function orderFields(fields: FormField[], pack: CertifiedHintPack): FormField[] {
+  const ordered = [...fields];
+  for (const rule of pack.sectionRules) {
+    if (rule.fieldOrderAliases.length === 0) continue;
+    const sectionHint = rule.section === "laboratory" ? "campus" : rule.section;
+    const positions = fields.flatMap((field, index) => field.sectionHint === sectionHint ? [index] : []);
+    const ranked = positions.map((position, index) => ({ field: fields[position]!, index }))
+      .sort((left, right) => {
+        const rankDifference = fieldRank(rule.fieldOrderAliases, left.field.label)
+          - fieldRank(rule.fieldOrderAliases, right.field.label);
+        return rankDifference || left.index - right.index;
+      });
+    positions.forEach((position, index) => {
+      ordered[position] = ranked[index]!.field;
+    });
+  }
+  return ordered;
+}
+
+function fieldRank(fieldOrderAliases: readonly (readonly string[])[], label: string): number {
+  const index = fieldOrderAliases.findIndex((aliases) =>
+    aliases.some((alias) => certifiedTextIncludes(label, alias))
+  );
+  return index < 0 ? fieldOrderAliases.length : index;
 }
