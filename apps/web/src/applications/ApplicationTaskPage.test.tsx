@@ -1,4 +1,4 @@
-import type { ApplicationAutofillPhase, ApplicationExecutionProgress, ApplicationTask, ApplicationTaskEvent, ApplicationTaskProgressEvent, ChallengeKind } from "@resume/contracts";
+import type { AdapterReviewSummary, ApplicationAutofillPhase, ApplicationExecutionProgress, ApplicationTask, ApplicationTaskEvent, ApplicationTaskProgressEvent, ChallengeKind, HintPackDefinition } from "@resume/contracts";
 import { render, screen, waitFor } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { describe, expect, it, vi } from "vitest";
@@ -88,6 +88,30 @@ function deferred<T>() {
   return { promise, resolve };
 }
 
+function adapterReviewSummary(): AdapterReviewSummary {
+  const definition: HintPackDefinition = {
+    schemaVersion: 1,
+    packId: "example-ats",
+    version: "1.0.0",
+    match: { sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/apply"] }], stages: ["application_form"], requiredTextSignals: [], pageFingerprintHashes: [] },
+    sectionRules: [],
+    fieldRules: [{ ruleId: "name", profilePath: "basics.name", labelAliases: ["ats:sha256:24:fixture"], sections: ["basics"], controlTypes: ["text"], confidence: 1 }],
+    actionRules: [],
+    fixtures: [{ fixtureId: "fixture-basic", expectedProfilePaths: ["basics.name"] }]
+  };
+  return {
+    proposal: {
+      proposalId: "proposal-1", taskId: task.id, lifecycleStatus: "candidate", provider: "fixture-provider", model: "fixture-model", promptVersion: "hint-proposal-v1",
+      inputHash: "a".repeat(64), outputHash: "b".repeat(64), definition, unsupportedBoundaries: [], rejectedActions: [], createdAt: "2026-08-17T00:00:00.000Z"
+    },
+    replayReports: [{
+      reportId: "report-1", proposalId: "proposal-1", fixtureId: "fixture-basic", status: "passed", assertions: [{ code: "zero_submit", passed: true, detail: "redacted:assertion:zero_submit:passed:report-passed" }],
+      submissionCount: 0, inputHash: "c".repeat(64), createdAt: "2026-08-17T00:01:00.000Z"
+    }],
+    lifecycleStatus: "replay_verified", aiReviewUnavailable: true, writeBlocked: true
+  };
+}
+
 describe("ApplicationTaskPage", () => {
   it("explains that observing waits for the user to reach the resume form", async () => {
     const waitingTask = { ...task, state: "observing_page" as const, commands: ["cancel", "open_browser"] as ApplicationTask["commands"] };
@@ -110,6 +134,49 @@ describe("ApplicationTaskPage", () => {
 
     expect(screen.getByText("上次状态：等待 ATS 适配审核")).toBeVisible();
     expect(screen.queryByRole("button", { name: "适配包已认证，重新观察" })).not.toBeInTheDocument();
+  });
+
+  it("requires certification before exposing a fresh observe command for an unknown ATS", async () => {
+    const user = userEvent.setup();
+    const review = adapterReviewSummary();
+    const command = vi.fn().mockResolvedValue(task);
+    const decide = vi.fn().mockResolvedValue({
+      ...review,
+      lifecycleStatus: "certified" as const,
+      humanDecision: {
+        reviewId: "review-1", proposalId: "proposal-1", decision: "certify" as const, reviewer: "local-user",
+        aiReviewUnavailable: true, acknowledgedAiUnavailable: true, createdAt: "2026-08-17T00:03:00.000Z"
+      }
+    });
+    const adapterReviewTask: ApplicationTask = {
+      ...task,
+      state: "awaiting_adapter_review",
+      commands: ["cancel", "open_browser", "resume_after_adapter_certification"],
+      adapterReview: review
+    };
+    render(<ApplicationTaskPage
+      taskId={task.id}
+      api={{
+        get: vi.fn().mockResolvedValue(adapterReviewTask),
+        command,
+        adapterReview: {
+          get: vi.fn().mockResolvedValue(review), replay: vi.fn().mockResolvedValue(review), requestAiReview: vi.fn().mockResolvedValue(review),
+          revise: vi.fn().mockResolvedValue(review), decide, retire: vi.fn().mockResolvedValue(undefined)
+        }
+      }}
+      connectEvents={eventHarness().connect}
+    />);
+
+    expect(await screen.findByRole("heading", { name: "当前网站尚无认证适配包" })).toBeVisible();
+    expect(screen.queryByRole("button", { name: "适配包已认证，重新观察" })).not.toBeInTheDocument();
+    await user.click(screen.getByRole("checkbox", { name: "我已确认 AI 审阅不可用，仍由人工承担最终判断" }));
+    await user.click(screen.getByRole("button", { name: "认证此版本" }));
+    expect(decide).toHaveBeenCalledWith("proposal-1", {
+      decision: "certify", aiReviewUnavailable: true, acknowledgedAiUnavailable: true
+    });
+
+    await user.click(await screen.findByRole("button", { name: "适配包已认证，重新观察" }));
+    expect(command).toHaveBeenCalledWith(task.id, { type: "resume_after_adapter_certification" });
   });
 
   it("opens review evidence without exposing profile field-source controls", async () => {

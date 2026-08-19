@@ -24,6 +24,25 @@ const coverage: ApplicationFieldCoverage = {
   ]
 };
 
+it("shows the immutable certified pack provenance without proposal or model data", async () => {
+  const user = userEvent.setup();
+  const certifiedCoverage: ApplicationFieldCoverage = {
+    total: 1, ready: 1, review: 0, missing: 0, failed: 0, unsupported: 0, filled: 0,
+    fields: [{
+      fieldId: "school", label: "毕业院校", semantic: "education[0].institution", status: "ready", source: "certified_hint", confidence: 0.93,
+      reason: "认证提示包已完成字段匹配", evidence: [],
+      semanticProvenance: { packId: "example-ats", packVersion: "1.2.3", confidence: 0.93, certification: "certified" }
+    }]
+  };
+  render(<FieldCoveragePanel coverage={certifiedCoverage} />);
+
+  await user.click(screen.getByText("查看填写明细"));
+
+  expect(screen.getByText("认证 ATS 提示包")).toBeVisible();
+  expect(screen.getByText("example-ats@1.2.3 · 已认证 · 93%")).toBeVisible();
+  expect(screen.queryByText(/proposal-|deepseek|sha256:/iu)).not.toBeInTheDocument();
+});
+
 it("keeps one compact filling-details disclosure with failures and RAG misses", async () => {
   const user = userEvent.setup();
   render(<FieldCoveragePanel coverage={coverage} />);

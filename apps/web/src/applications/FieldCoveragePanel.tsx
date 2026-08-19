@@ -60,7 +60,12 @@ function CoverageItem({ item }: { item: ApplicationFieldAssessment }) {
     </header>
     <dl className="field-coverage-details">
       <div><dt>系统理解</dt><dd>{item.semantic ?? "尚未识别到对应档案字段"}</dd></div>
-      <div><dt>匹配方式</dt><dd>{sourceLabel(item.source)}</dd></div>
+      <div><dt>匹配方式</dt><dd>
+        <span>{sourceLabel(item.source)}</span>
+        {item.source === "certified_hint" && item.semanticProvenance && <small className="field-coverage-provenance">
+          {item.semanticProvenance.packId}@{item.semanticProvenance.packVersion} · 已认证 · {Math.round(item.semanticProvenance.confidence * 100)}%
+        </small>}
+      </dd></div>
       <div><dt>{item.status === "missing" || item.status === "failed" ? "处理结果" : "审核提示"}</dt><dd>{displayReason(item)}</dd></div>
     </dl>
     <EvidenceList evidence={item.evidence} />
@@ -97,6 +102,7 @@ function displayReason(item: ApplicationFieldAssessment): string {
 
 function sourceLabel(source: ApplicationFieldAssessment["source"]): string {
   if (source === "dji_catalog") return "大疆字段目录";
+  if (source === "certified_hint") return "认证 ATS 提示包";
   if (source === "exact") return "精确匹配";
   if (source === "semantic") return "语义匹配";
   if (source === "user") return "用户确认";

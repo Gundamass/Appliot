@@ -1236,3 +1236,77 @@ main { margin: 0 auto; max-width: 1440px; padding: 0 28px 56px; }
   .application-shell .field-coverage-details > div { gap: 3px; grid-template-columns: minmax(0, 1fr); }
   .application-shell .task-actions .button { flex: 1 1 100%; justify-content: center; }
 }
+
+.application-shell .adapter-review-panel {
+  background: var(--workbench-surface);
+  border: 1px solid var(--workbench-line);
+  border-radius: 8px;
+  display: grid;
+  gap: 12px;
+  min-width: 0;
+  padding: 16px;
+}
+
+.application-shell .adapter-review-header {
+  align-items: flex-start;
+  background: #f2f8f5;
+  border: 1px solid #d4e8df;
+  border-radius: 7px;
+  display: flex;
+  gap: 12px;
+  justify-content: space-between;
+  padding: 14px;
+}
+
+.application-shell .adapter-review-header > div { display: grid; gap: 4px; min-width: 0; }
+.application-shell .adapter-review-header > div > span,
+.application-shell .adapter-review-section-heading span { color: var(--workbench-muted); font-size: 11px; font-weight: 750; }
+.application-shell .adapter-review-header h3 { color: var(--workbench-ink); font-size: 16px; margin: 0; }
+.application-shell .adapter-review-header p,
+.application-shell .adapter-review-help { color: var(--workbench-muted); font-size: 12px; line-height: 1.5; margin: 0; }
+.application-shell .adapter-review-header > svg { color: var(--workbench-accent); flex: 0 0 auto; margin-top: 2px; }
+
+.application-shell .adapter-review-section { border-top: 1px solid var(--workbench-line); display: grid; gap: 10px; padding-top: 14px; }
+.application-shell .adapter-review-section-heading { align-items: center; display: flex; gap: 12px; justify-content: space-between; }
+.application-shell .adapter-review-section-heading > div { display: grid; gap: 2px; min-width: 0; }
+.application-shell .adapter-review-section-heading h4 { color: var(--workbench-ink); font-size: 14px; margin: 0; }
+.application-shell .adapter-review-section-heading > strong { border-radius: 999px; font-size: 11px; padding: 4px 8px; white-space: nowrap; }
+.application-shell .adapter-review-section-heading > strong.passed { background: #e7f4ee; color: #23664f; }
+.application-shell .adapter-review-section-heading > strong.pending { background: #f2f5f4; color: #53615d; }
+.application-shell .adapter-review-section-heading > strong.warning { background: var(--workbench-warning-soft); color: #8c5825; }
+
+.application-shell .adapter-review-checks,
+.application-shell .adapter-review-findings { display: grid; gap: 6px; list-style: none; margin: 0; padding: 0; }
+.application-shell .adapter-review-checks li { align-items: flex-start; display: flex; gap: 7px; min-width: 0; }
+.application-shell .adapter-review-checks li > svg { flex: 0 0 auto; margin-top: 2px; }
+.application-shell .adapter-review-checks li.passed > svg { color: #398166; }
+.application-shell .adapter-review-checks li.failed > svg { color: #a84e45; }
+.application-shell .adapter-review-checks li > span { display: grid; gap: 2px; min-width: 0; }
+.application-shell .adapter-review-checks strong { color: var(--workbench-ink); font-size: 12px; }
+.application-shell .adapter-review-checks small { color: var(--workbench-muted); font-size: 11px; line-height: 1.4; overflow-wrap: anywhere; }
+.application-shell .adapter-review-findings li { border-left: 3px solid #aeb9b5; display: grid; gap: 2px; padding: 5px 0 5px 9px; }
+.application-shell .adapter-review-findings li.info { border-left-color: #75a993; }
+.application-shell .adapter-review-findings li.warning { border-left-color: var(--workbench-warning); }
+.application-shell .adapter-review-findings li.error { border-left-color: #a84e45; }
+.application-shell .adapter-review-findings strong { color: var(--workbench-ink); font-size: 11px; }
+.application-shell .adapter-review-findings span { color: #4b5d57; font-size: 12px; line-height: 1.45; overflow-wrap: anywhere; }
+.application-shell .adapter-review-empty { color: var(--workbench-muted); font-size: 12px; margin: 0; }
+.application-shell .adapter-review-section > .button { justify-self: start; }
+.application-shell .adapter-review-actions { display: flex; flex-wrap: wrap; gap: 8px; }
+.application-shell .adapter-review-acknowledgement { align-items: flex-start; color: #4b5d57; display: flex; font-size: 12px; gap: 8px; line-height: 1.45; }
+.application-shell .adapter-review-acknowledgement input { flex: 0 0 auto; margin-top: 2px; }
+.application-shell .adapter-review-mappings { display: grid; gap: 8px; }
+.application-shell .adapter-review-mappings label { display: grid; gap: 4px; }
+.application-shell .adapter-review-mappings label > span { color: var(--workbench-muted); font-size: 11px; font-weight: 700; }
+.application-shell .adapter-review-mappings input { background: #fff; border: 1px solid #cbd8d3; border-radius: 5px; color: var(--workbench-ink); font-size: 12px; min-height: 34px; padding: 7px 9px; width: 100%; }
+.application-shell .adapter-review-mappings input:focus { border-color: var(--workbench-accent); box-shadow: 0 0 0 2px rgba(31, 130, 101, 0.12); outline: 0; }
+.application-shell .field-coverage-provenance { color: #23664f; display: block; font-size: 11px; font-weight: 700; margin-top: 3px; }
+
+@media (max-width: 520px) {
+  .application-shell .adapter-review-panel { padding: 13px; }
+  .application-shell .adapter-review-header { padding: 12px; }
+  .application-shell .adapter-review-actions,
+  .application-shell .adapter-review-section > .button { width: 100%; }
+  .application-shell .adapter-review-actions .button { flex: 1 1 100%; justify-content: center; }
+  .application-shell .adapter-review-section-heading { align-items: flex-start; flex-direction: column; gap: 5px; }
+}

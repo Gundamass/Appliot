@@ -38,6 +38,15 @@ describe("ApplicationReviewInbox", () => {
     expect(screen.queryByRole("button", { name: /提交/ })).not.toBeInTheDocument();
   });
 
+  it("lists ATS adapter certification tasks for human review", () => {
+    const candidate = task("4", "awaiting_adapter_review", "adapter-review");
+    render(<ApplicationReviewInbox tasks={[candidate]} onOpenTask={vi.fn()} onDeleteTask={vi.fn()} />);
+
+    expect(screen.getByText(candidate.applicationUrl)).toBeVisible();
+    expect(screen.getByText("等待 ATS 适配认证")).toBeVisible();
+    expect(screen.getByText("认证前不会向真实页面写入字段或执行提交。")).toBeVisible();
+  });
+
   it("uses the persisted name as the card heading and falls back to the host for historical tasks", () => {
     const namedTask = task("1", "needs_questions", "questions", "大疆 Java 后端实习");
     const historicalTask = task("2", "review_locked", "review");

@@ -1,13 +1,19 @@
 import {
+  AdapterReviewSummarySchema,
   ApplicationCommandSchema,
   ApplicationTaskInputSchema,
   ApplicationTaskSchema,
   ErrorResponseSchema,
+  HintPackDefinitionSchema,
   type ApplicationCommand,
   type ApplicationRecoveryCommand,
   type ApplicationTask,
-  type ApplicationTaskInput
+  type ApplicationTaskInput,
+  type AdapterReviewSummary,
+  type HintPackDefinition,
+  type HumanCertificationDecision
 } from "@resume/contracts";
+import { z } from "zod";
 
 export class ApplicationApiError extends Error {
   constructor(message: string, readonly code?: string, readonly taskId?: string) {
@@ -18,6 +24,19 @@ export class ApplicationApiError extends Error {
 
 export type { ApplicationRecoveryCommand } from "@resume/contracts";
 
+export type AdapterDecisionInput = Pick<HumanCertificationDecision, "decision" | "aiReviewUnavailable" | "acknowledgedAiUnavailable"> & {
+  notes?: string;
+};
+
+export interface AdapterReviewApi {
+  get(proposalId: string): Promise<AdapterReviewSummary>;
+  replay(proposalId: string): Promise<AdapterReviewSummary>;
+  requestAiReview(proposalId: string): Promise<AdapterReviewSummary>;
+  revise(proposalId: string, definition: HintPackDefinition): Promise<AdapterReviewSummary>;
+  decide(proposalId: string, input: AdapterDecisionInput): Promise<AdapterReviewSummary>;
+  retire(packId: string, version: string, reason: string): Promise<void>;
+}
+
 export interface ApplicationApi {
   list(): Promise<ApplicationTask[]>;
   create(input: ApplicationTaskInput): Promise<ApplicationTask>;
@@ -25,10 +44,12 @@ export interface ApplicationApi {
   delete?(taskId: string): Promise<void>;
   command(taskId: string, command: ApplicationCommand): Promise<ApplicationTask>;
   recover(taskId: string, command: ApplicationRecoveryCommand): Promise<ApplicationTask>;
+  adapterReview?: AdapterReviewApi;
 }
 
 export function createApplicationApi(baseUrl = ""): ApplicationApi {
   const taskPath = (taskId: string) => `${baseUrl}/api/applications/${encodeURIComponent(taskId)}`;
+  const proposalPath = (proposalId: string) => `${baseUrl}/api/ats-adapters/proposals/${encodeURIComponent(proposalId)}`;
   return {
     async list() {
       return ApplicationTaskSchema.array().parse(await request(`${baseUrl}/api/applications`, { method: "GET" }));
@@ -62,9 +83,51 @@ export function createApplicationApi(baseUrl = ""): ApplicationApi {
         headers: { "Content-Type": "application/json" },
         body: JSON.stringify({ type: command })
       }));
+    },
+    adapterReview: {
+      async get(proposalId) {
+        return AdapterReviewSummarySchema.parse(await request(proposalPath(proposalId), { method: "GET" }));
+      },
+      async replay(proposalId) {
+        return AdapterReviewSummarySchema.parse(await request(`${proposalPath(proposalId)}/replay`, { method: "POST" }));
+      },
+      async requestAiReview(proposalId) {
+        return AdapterReviewSummarySchema.parse(await request(`${proposalPath(proposalId)}/ai-review`, { method: "POST" }));
+      },
+      async revise(proposalId, definition) {
+        const payload = HintPackDefinitionSchema.parse(definition);
+        return AdapterReviewSummarySchema.parse(await request(`${proposalPath(proposalId)}/revise`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }));
+      },
+      async decide(proposalId, input) {
+        const payload = AdapterDecisionInputSchema.parse(input);
+        return AdapterReviewSummarySchema.parse(await request(`${proposalPath(proposalId)}/decision`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(payload)
+        }));
+      },
+      async retire(packId, version, reason) {
+        await request(`${baseUrl}/api/ats-adapters/packs/${encodeURIComponent(packId)}/${encodeURIComponent(version)}/retire`, {
+          method: "POST",
+          headers: { "Content-Type": "application/json" },
+          body: JSON.stringify(RetireInputSchema.parse({ reason }))
+        });
+      }
     }
   };
 }
+
+const AdapterDecisionInputSchema = z.object({
+  decision: z.enum(["certify", "reject", "revise"]),
+  aiReviewUnavailable: z.boolean(),
+  acknowledgedAiUnavailable: z.boolean(),
+  notes: z.string().max(4000).optional()
+}).strict();
+const RetireInputSchema = z.object({ reason: z.string().min(1).max(1000) }).strict();
 
 async function request(url: string, init: RequestInit): Promise<unknown> {
   const response = await fetch(url, init);

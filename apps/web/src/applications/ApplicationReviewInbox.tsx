@@ -16,6 +16,7 @@ const REVIEW_STATES = new Set<ApplicationTaskState>([
   "waiting_for_login",
   "needs_questions",
   "awaiting_content_review",
+  "awaiting_adapter_review",
   "review_locked",
   "failed"
 ]);
@@ -24,6 +25,7 @@ const STATE_META: Partial<Record<ApplicationTaskState, { title: string; descript
   waiting_for_login: { title: "等待登录", description: "请在受控浏览器完成登录后继续。", icon: LogIn },
   needs_questions: { title: "需要补充资料", description: "页面仍有无法安全匹配的字段。", icon: MessageSquareText },
   awaiting_content_review: { title: "等待内容审核", description: "岗位微调内容需要你确认后才能采用。", icon: ClipboardCheck },
+  awaiting_adapter_review: { title: "等待 ATS 适配认证", description: "认证前不会向真实页面写入字段或执行提交。", icon: ShieldCheck },
   review_locked: { title: "等待最终审核", description: "填写已停止在提交前，请检查招聘页面。", icon: ShieldCheck },
   failed: { title: "任务需要处理", description: "自动流程已暂停，可进入任务查看恢复方式。", icon: CircleAlert }
 };

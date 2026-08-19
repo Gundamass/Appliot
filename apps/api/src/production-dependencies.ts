@@ -428,6 +428,7 @@ export function createProductionDependencies(
       ...(structuredProvider === undefined ? {} : { selfEvaluationModelProvider: structuredProvider }),
       ...(embeddingSearch === undefined ? {} : { embeddingSearch }),
       applicationService,
+      adapterReviewService,
       browserOwnershipLease,
       taskEvents,
       onProfileUpdated: () => applicationService.refreshFromProfile(),
