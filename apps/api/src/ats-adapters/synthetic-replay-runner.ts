@@ -12,6 +12,7 @@ import type {
   ReplayReport
 } from "@resume/contracts";
 import { ReplayReportSchema } from "@resume/contracts";
+import { certifiedTextEquals, certifiedTextIncludes } from "@resume/form-semantics";
 import {
   startSyntheticAts,
   type StartSyntheticAtsOptions,
@@ -219,7 +220,7 @@ function findReplayField(snapshot: FormSnapshot, proposal: AiHintPackProposal, p
   if (rule === undefined) return undefined;
   return snapshot.fields.find((field) => rule.controlTypes.includes(field.type)
     && (rule.sections.length === 0 || (field.sectionHint !== undefined && rule.sections.includes(field.sectionHint)))
-    && rule.labelAliases.some((alias) => normalize(alias) === normalize(field.label)));
+    && rule.labelAliases.some((alias) => certifiedTextEquals(field.label, alias)));
 }
 
 function sameReplayValues(
@@ -244,14 +245,14 @@ function findReplayRepeatedActions(
   const seenActions = new Set<string>();
   return snapshot.actions.flatMap((action) => proposal.definition.actionRules.flatMap((rule) => {
     if (rule.kind !== "add_repeated_entry"
-      || !rule.verbs.some((verb) => normalizedIncludes(action.text, verb))
+      || !rule.verbs.some((verb) => certifiedTextIncludes(action.text, verb))
       || (action.class !== "intermediate_navigation" && action.class !== "intermediate_save")) {
       return [];
     }
     const context = `${action.context ?? ""} ${action.text}`;
     const section = proposal.definition.sectionRules.find((candidate) => expectedSections.has(candidate.section)
       && rule.sections.includes(candidate.section as typeof rule.sections[number])
-      && candidate.headingAliases.some((heading) => normalizedIncludes(context, heading)))?.section;
+      && candidate.headingAliases.some((heading) => certifiedTextIncludes(context, heading)))?.section;
     if (section === undefined || seenActions.has(action.id)) return [];
     seenActions.add(action.id);
     return [{ action, section }];
@@ -310,14 +311,6 @@ function assertion(code: ReplayAssertion["code"], passed: boolean, detail: strin
 function traceIsSanitized(trace: Record<string, unknown>): boolean {
   return Object.entries(trace).every(([key, value]) => /^[a-zA-Z][a-zA-Z0-9]*$/u.test(key)
     && (typeof value === "string" || typeof value === "number"));
-}
-
-function normalize(value: string): string {
-  return value.normalize("NFKC").replace(/\s+/gu, " ").trim().toLocaleLowerCase();
-}
-
-function normalizedIncludes(value: string, expected: string): boolean {
-  return normalize(value).includes(normalize(expected));
 }
 
 function sectionForProfilePath(profilePath: string): string | undefined {

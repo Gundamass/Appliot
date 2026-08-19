@@ -334,6 +334,9 @@ function fieldAssessment(
     fieldId: field.id,
     label: field.label,
     ...input,
+    ...(input.source === "certified_hint" && field.semanticProvenance !== undefined
+      ? { semanticProvenance: field.semanticProvenance }
+      : {}),
     evidence: input.evidence ?? []
   };
 }

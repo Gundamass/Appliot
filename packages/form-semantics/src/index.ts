@@ -24,7 +24,11 @@ export {
   type HintPackResolution
 } from "./hint-packs/registry.js";
 export { applyCertifiedHintPack, classifyRepeatedActions } from "./hint-packs/runtime.js";
-export { certifiedTextReference } from "./hint-packs/text-reference.js";
+export {
+  certifiedTextEquals,
+  certifiedTextIncludes,
+  certifiedTextReference
+} from "./hint-packs/text-reference.js";
 export { djiHintPack, DJI_FIELD_RULES } from "./hint-packs/dji-pack.js";
 export { mokahrHintPack, MOKAHR_ACTION_RULES, MOKAHR_SECTIONS } from "./hint-packs/mokahr-pack.js";
 export {

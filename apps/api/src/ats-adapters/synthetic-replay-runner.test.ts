@@ -1,4 +1,5 @@
 import type { AiHintPackProposal } from "@resume/contracts";
+import { certifiedTextReference } from "@resume/form-semantics";
 import { describe, expect, it, vi } from "vitest";
 import {
   startSyntheticAts,
@@ -110,6 +111,29 @@ describe("SyntheticReplayRunner", () => {
       submissionCount: 0
     });
     expect(replay.reports[0]?.assertions.every((assertion) => assertion.passed)).toBe(true);
+  }, 60_000);
+
+  it("replays persisted ATS text references without exposing the original labels", async () => {
+    let capturedServer: SyntheticAtsServer | undefined;
+    const runner = new SyntheticReplayRunner({
+      async startSyntheticAts() {
+        capturedServer = await startSyntheticAts();
+        return capturedServer;
+      }
+    });
+    const referenced = proposal();
+    referenced.definition.fieldRules[0]!.labelAliases = [certifiedTextReference("Full name")];
+    referenced.definition.fieldRules[1]!.labelAliases = [certifiedTextReference("School")];
+
+    const replay = await runner.run(referenced);
+    const state = capturedServer?.state(replay.taskId);
+
+    expect(state?.runtime.values).toMatchObject({
+      name: "MARKER_basics_name",
+      school: "MARKER_education_0_institution"
+    });
+    expect(state?.submissionCount).toBe(0);
+    expect(replay.reports[0]).toMatchObject({ status: "passed", submissionCount: 0 });
   }, 60_000);
 
   it("fails closed before opening a synthetic browser when deterministic validation fails", async () => {

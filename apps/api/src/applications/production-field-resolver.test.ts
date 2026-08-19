@@ -42,4 +42,60 @@ describe("生产字段解析器", () => {
     });
     expect(resolveField).not.toHaveBeenCalled();
   });
+
+  it("将认证提示包溯源写入字段覆盖记录", async () => {
+    const resolver = createProductionFieldResolver({
+      semanticResolver: {
+        async resolve() {
+          return {
+            status: "mapped" as const,
+            semantic: "education[0].institution",
+            source: "exact_alias" as const,
+            confidence: 1
+          };
+        }
+      },
+      ragService: {
+        async resolveField() {
+          return {
+            status: "verified_auto" as const,
+            value: "Fixture University",
+            confidence: 1,
+            evidence: []
+          } as never;
+        }
+      },
+      profileRepository: {
+        resolveForTask: () => ({
+          scope: "profile",
+          value: "Fixture University",
+          evidence: []
+        }) as never
+      }
+    });
+
+    await expect(resolver("task-1", {
+      ...field,
+      label: "毕业院校",
+      semanticHint: "education[0].institution",
+      semanticSource: "certified_hint",
+      semanticProvenance: {
+        packId: "dji-campus",
+        packVersion: "1.0.0",
+        confidence: 1,
+        certification: "certified"
+      }
+    })).resolves.toMatchObject({
+      status: "verified",
+      assessment: {
+        source: "certified_hint",
+        semanticProvenance: {
+          packId: "dji-campus",
+          packVersion: "1.0.0",
+          confidence: 1,
+          certification: "certified"
+        }
+      }
+    });
+  });
 });

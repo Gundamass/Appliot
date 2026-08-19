@@ -5,7 +5,13 @@ import { join } from "node:path";
 import { expect, test } from "@playwright/test";
 import { ActionPolicy } from "../../packages/action-policy/src/index.js";
 import { createRagService } from "../../packages/rag/src/index.js";
-import { classifyRepeatedActions, mokahrHintPack } from "../../packages/form-semantics/src/index.js";
+import type { CertifiedHintPack } from "../../packages/contracts/src/index.js";
+import {
+  certifiedTextReference,
+  classifyRepeatedActions,
+  createHintPackRegistry,
+  mokahrHintPack
+} from "../../packages/form-semantics/src/index.js";
 import { createApplicationService } from "../../apps/api/src/applications/application-service.js";
 import { createCheckpointRepository } from "../../apps/api/src/applications/checkpoint-repository.js";
 import { planRepeatedSectionActions } from "../../apps/api/src/applications/repeated-section-planner.js";
@@ -42,11 +48,39 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
   const browser = new BrowserSessionManager({ profileDir: join(directory, "profile"), headless: true, fileResolver: async () => resumePath });
   await browser.start(key.toString("base64url"));
   const checkpoints = createCheckpointRepository(database);
+  const certifiedMokahrUrl = "https://app.mokahr.com/certified-mokahr/application";
+  const asCertifiedMokahrSnapshot = <T extends { url: string }>(snapshot: T): T => ({
+    ...snapshot,
+    url: certifiedMokahrUrl
+  });
+  const certifiedMokahrPack: CertifiedHintPack = {
+    ...mokahrHintPack,
+    packId: "mokahr-certified-e2e",
+    match: {
+      ...mokahrHintPack.match,
+      sites: [{ hostSuffix: "mokahr.com", pathPrefixes: ["/certified-mokahr"] }]
+    },
+    fieldRules: [{
+      ruleId: "phone",
+      profilePath: "basics.phone",
+      labelAliases: [certifiedTextReference("手机号码")],
+      sections: [],
+      controlTypes: ["text"],
+      confidence: 1
+    }]
+  };
   const service = createApplicationService({
     checkpoints,
-    browser: { observe: (id) => browser.observe(id), execute: (command, epoch) => browser.execute(command, epoch) },
+    browser: {
+      observe: async (id) => asCertifiedMokahrSnapshot(await browser.observe(id)),
+      execute: async (command, epoch) => {
+        const result = await browser.execute(command, epoch);
+        return { ...result, snapshot: asCertifiedMokahrSnapshot(result.snapshot) };
+      }
+    },
     async resolveField(id, field) {
       const semantic = field.semanticHint?.includes(".") ? field.semanticHint : `application.${field.semanticHint || "jobSpecific"}`;
+      const source = field.semanticSource === "certified_hint" ? "certified_hint" as const : "exact" as const;
       const decision = await rag.resolveField({ taskId: id, fieldId: field.id, semantic, label: field.label, type: field.type === "textarea" ? "textarea" : "text", validators: field.required ? ["required"] : [] });
       return {
         status: decision.status === "verified_auto" || decision.status === "needs_review" ? "verified" : decision.status,
@@ -56,7 +90,10 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
           label: field.label,
           semantic,
           status: decision.status === "verified_auto" ? "ready" as const : decision.status === "needs_review" ? "review" as const : "missing" as const,
-          source: "exact" as const,
+          source,
+          ...(source !== "certified_hint" || field.semanticProvenance === undefined
+            ? {}
+            : { semanticProvenance: field.semanticProvenance }),
           confidence: decision.confidence,
           reason: decision.status === "verified_auto" ? "字段映射和资料值均已通过验证" : "字段需要进一步确认",
           evidence: decision.evidence
@@ -67,7 +104,20 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
     },
     approve: (request, snapshot) => policy.approve(request, snapshot, { valid: snapshot.errors.length === 0 }).token,
     resolveFileId: () => "resume.pdf",
-    listProfileFacts: () => repository.listActive()
+    listProfileFacts: () => repository.listActive(),
+    hintPackRegistry: createHintPackRegistry({
+      builtIns: [mokahrHintPack],
+      local: () => [certifiedMokahrPack],
+      isRetired: () => false
+    }),
+    adapterReviewService: {
+      async prepare() {
+        throw new Error("certified_mokahr_fixture_must_not_request_adapter_review");
+      },
+      retire() {
+        throw new Error("certified_mokahr_fixture_must_not_retire_active_pack");
+      }
+    }
   });
   try {
     const url = `${server.baseUrl}/mokahr?taskId=${encodeURIComponent(taskId)}`;
@@ -85,11 +135,20 @@ test("uploads PDF, fills Mokahr experience sections from production RAG, and nev
         ? planRepeatedSectionActions(
             checkpoint.snapshot,
             repository.listActive(),
-            classifyRepeatedActions(checkpoint.snapshot, mokahrHintPack)
+            classifyRepeatedActions(checkpoint.snapshot, certifiedMokahrPack)
           )
         : []
     }, null, 2)).toBe("review_locked");
     expect(service.fieldCoverage(taskId)).toMatchObject({ missing: 0, review: 0, filled: 7 });
+    expect(service.fieldCoverage(taskId)?.fields).toContainEqual(expect.objectContaining({
+      label: "手机号码",
+      source: "certified_hint",
+      semanticProvenance: expect.objectContaining({
+        packId: "mokahr-certified-e2e",
+        packVersion: "1.0.0",
+        certification: "certified"
+      })
+    }));
     expect(server.state(taskId)).toMatchObject({
       uploadCount: 1,
       submissionCount: 0,

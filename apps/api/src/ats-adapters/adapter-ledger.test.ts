@@ -188,6 +188,18 @@ describe("createAdapterLedger", () => {
     expect(ledger.certify("proposal-1").provenance.aiReviewId).toBeUndefined();
   });
 
+  it("persists a valid UUID review identifier with an eight-digit segment", () => {
+    const ledger = createAdapterLedger(database);
+    ledger.createProposal(proposal());
+    ledger.recordReplay([replay("fixture-one"), replay("fixture-two")]);
+
+    expect(() => ledger.recordHumanDecision(humanDecision({
+      reviewId: "12345678-1234-4234-8234-123456789012",
+      aiReviewUnavailable: true,
+      acknowledgedAiUnavailable: true
+    }))).not.toThrow();
+  });
+
   it("rejects non-structured AI records and excludes rejected fingerprints from active lookup", () => {
     const ledger = createAdapterLedger(database);
     const candidate = proposal();

@@ -52,6 +52,9 @@ const identifierStringKeys = new Set([
   "proposalId", "taskId", "parentProposalId", "packId", "provider", "model",
   "ruleId", "reportId", "reviewId", "code", "reviewer"
 ]);
+const opaqueUuidIdentifierKeys = new Set([
+  "proposalId", "taskId", "parentProposalId", "reportId", "reviewId"
+]);
 const matchingTextStringKeys = new Set([
   "requiredTextSignals", "headingAliases", "fieldOrderAliases", "labelAliases", "verbs"
 ]);
@@ -63,6 +66,7 @@ const prohibitedArtifactTokens = new Set([
   "bearer", "password", "currentvalue", "noderef", "approvaltoken", "approvalkey"
 ]);
 const identifierPattern = /^[A-Za-z0-9][A-Za-z0-9._-]{0,127}$/u;
+const uuidPattern = /^[0-9a-f]{8}-[0-9a-f]{4}-[1-8][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/iu;
 const modelIdentifierPattern = /^[A-Za-z0-9][A-Za-z0-9._/-]{0,119}$/u;
 const packIdPattern = /^[a-z0-9][a-z0-9-]{2,63}$/u;
 const semverPattern = /^\d+\.\d+\.\d+$/u;
@@ -93,7 +97,10 @@ function isSanitizedPersistenceValue(value: unknown, key?: string): boolean {
 function isAllowedString(key: string, value: string): boolean {
   if (schemaConstrainedStringKeys.has(key)) return true;
   if (key === "model") return modelIdentifierPattern.test(value) && !hasExplicitArtifact(value);
-  if (identifierStringKeys.has(key)) return identifierPattern.test(value) && !hasExplicitArtifact(value);
+  if (identifierStringKeys.has(key)) {
+    return identifierPattern.test(value)
+      && ((opaqueUuidIdentifierKeys.has(key) && uuidPattern.test(value)) || !hasExplicitArtifact(value));
+  }
   if (key === "hostSuffix") return hostSuffixPattern.test(value);
   if (key === "pathPrefixes") return pathPrefixPattern.test(value);
   if (key === "expectedProfilePaths") return semanticPathPattern.test(value);

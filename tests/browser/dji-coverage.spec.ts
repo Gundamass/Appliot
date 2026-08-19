@@ -134,7 +134,24 @@ test("大疆风格字段完成精确填写、追问补全并停在提交前", as
       JSON.stringify({ coverage: initialTask.fieldCoverage.fields, observedFields }, null, 2)
     ).toMatchObject({ missing: 1, review: 1, filled: 3 });
     expect(initialTask.fieldCoverage.fields).toContainEqual(expect.objectContaining({
-      label: "毕业院校", status: "filled", source: "dji_catalog"
+      label: "毕业院校",
+      status: "filled",
+      source: "certified_hint",
+      semanticProvenance: expect.objectContaining({
+        certification: "certified",
+        packId: "dji-campus",
+        packVersion: "1.0.0"
+      })
+    }));
+    expect(initialTask.fieldCoverage.fields).toContainEqual(expect.objectContaining({
+      label: "项目名称",
+      status: "filled",
+      source: "certified_hint",
+      semanticProvenance: expect.objectContaining({
+        certification: "certified",
+        packId: "dji-campus",
+        packVersion: "1.0.0"
+      })
     }));
     expect(initialTask.fieldCoverage.fields).toContainEqual(expect.objectContaining({
       label: "研究方向", status: "review", confidence: 0
@@ -196,9 +213,9 @@ test("字段匹配面板在窄屏可展开且不暴露提交操作", async ({ pa
     fieldCoverage: {
       total: 5, ready: 0, review: 1, missing: 1, unsupported: 0, filled: 3,
       fields: [
-        assessment({ id: "school", label: "毕业院校" }, "ready", "dji_catalog", 1, "页面回读确认填写成功", "education[0].institution"),
-        assessment({ id: "project", label: "项目名称" }, "ready", "dji_catalog", 1, "页面回读确认填写成功", "projects[0].name"),
-        assessment({ id: "award", label: "获奖级别" }, "ready", "dji_catalog", 1, "页面回读确认填写成功", "awards[0].level"),
+        assessment({ id: "school", label: "毕业院校" }, "ready", "certified_hint", 1, "页面回读确认填写成功", "education[0].institution", djiProvenance()),
+        assessment({ id: "project", label: "项目名称" }, "ready", "certified_hint", 1, "页面回读确认填写成功", "projects[0].name", djiProvenance()),
+        assessment({ id: "award", label: "获奖级别" }, "ready", "certified_hint", 1, "页面回读确认填写成功", "awards[0].level", djiProvenance()),
         assessment({ id: "major", label: "专业方向" }, "review", "semantic", 0.72, "存在多个语义接近的候选字段", "application.majorDirection"),
         assessment({ id: "unknown", label: "未命名字段" }, "missing", "none", 0, "档案中没有可安全使用的已确认资料")
       ].map((field) => field.status === "ready" ? { ...field, status: "filled" } : field)
@@ -218,6 +235,9 @@ test("字段匹配面板在窄屏可展开且不暴露提交操作", async ({ pa
     await expect(page.getByRole("heading", { name: "字段填写明细" })).toBeVisible();
     await expect(page.getByText("专业方向", { exact: true })).toBeVisible();
     await expect(page.getByText("未命名字段", { exact: true })).toBeVisible();
+    const certifiedHintMetadata = page.getByText(/dji-campus@1\.0\.0/u);
+    await expect(certifiedHintMetadata).toHaveCount(3);
+    await expect(certifiedHintMetadata.first()).toBeVisible();
     expect(await page.evaluate(() => document.documentElement.scrollWidth > document.documentElement.clientWidth)).toBe(false);
     await expect(page.getByRole("button", { name: /提交|发送申请/ })).toHaveCount(0);
   } finally {
@@ -228,19 +248,35 @@ test("字段匹配面板在窄屏可展开且不暴露提交操作", async ({ pa
 function assessment(
   field: { id: string; label: string },
   status: "ready" | "review" | "missing" | "unsupported",
-  source: "dji_catalog" | "semantic" | "user" | "none",
+  source: "certified_hint" | "semantic" | "user" | "none",
   confidence: number,
   reason: string,
-  semantic?: string
+  semantic?: string,
+  semanticProvenance?: {
+    certification: "certified";
+    confidence: number;
+    packId: string;
+    packVersion: string;
+  }
 ) {
   return {
     fieldId: field.id,
     label: field.label,
     ...(semantic === undefined ? {} : { semantic }),
+    ...(semanticProvenance === undefined ? {} : { semanticProvenance }),
     status,
     source,
     confidence,
     reason,
     evidence: []
+  };
+}
+
+function djiProvenance() {
+  return {
+    certification: "certified" as const,
+    confidence: 1,
+    packId: "dji-campus",
+    packVersion: "1.0.0"
   };
 }
