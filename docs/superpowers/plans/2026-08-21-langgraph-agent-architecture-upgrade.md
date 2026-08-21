@@ -4,9 +4,9 @@
 
 **Goal:** Replace the fragmented XState/service orchestration with one auditable LangGraph runtime while preserving resume parsing, evidence grounding, ATS matching, controlled Playwright filling, challenge handoff, and the permanent ban on automatic submission.
 
-**Architecture:** The API owns a typed LangGraph main graph and three bounded subgraphs: resume ingestion, job matching, and application execution. Existing deterministic domain services remain behind restricted ports; graph state stores references and decisions, SQLite stores checkpoints/business records/traces, and every model or side-effect boundary emits a redacted audit event. The OCR HTTP contract becomes runtime-neutral so PyTorch remains the production baseline while a MindSpore Lite backend is evaluated behind an explicit rollout gate.
+**Architecture:** The API owns a typed LangGraph main graph and three bounded subgraphs: resume ingestion, job matching, and application execution. Existing deterministic domain services remain behind restricted ports; graph state stores references and decisions, SQLite stores checkpoints, business records, traces, and a LangSmith export outbox, and every model or side-effect boundary emits a redacted audit event. LangSmith is an optional observation/evaluation sink; local TraceSink remains authoritative and the OCR HTTP contract stays runtime-neutral so PyTorch remains the production baseline while a MindSpore Lite backend is evaluated behind an explicit rollout gate.
 
-**Tech Stack:** TypeScript 5.8.3, Node.js >=24.14.1, `@langchain/langgraph` 1.4.12, `@langchain/langgraph-checkpoint` 1.1.5, `@langchain/core` 1.2.9, Zod 3.25.76, SQLite/better-sqlite3 11.10.0, Vitest 3.2.4, Python 3.12, FastAPI, PyTorch 2.6, optional externally packaged MindSpore Lite runtime, Playwright 1.53.1.
+**Tech Stack:** TypeScript 5.8.3, Node.js >=24.14.1, `@langchain/langgraph` 1.4.12, `@langchain/langgraph-checkpoint` 1.1.5, `@langchain/core` 1.2.9, `langsmith` 0.9.0, Zod 3.25.76, SQLite/better-sqlite3 11.10.0, Vitest 3.2.4, Python 3.12, FastAPI, PyTorch 2.6, optional externally packaged MindSpore Lite runtime, Playwright 1.53.1.
 
 ## Global Constraints
 
@@ -18,6 +18,8 @@
 - Challenge detection invalidates the execution epoch before the graph records an interrupt.
 - Checkpoint payloads contain small state and object IDs, not PDF bytes, page images, full resume text, access tokens, or raw secrets.
 - Audit records contain hashes, IDs, counts, confidence, bounded reasons, and error codes; direct phone, email, ID-number, address, resume text, and model prompts are rejected before persistence.
+- LangSmith is disabled by default and receives only a versioned allowlist projection; raw resume text, prompts, DOM, evidence quotes, form values, secrets, and internal database primary keys never leave the local runtime.
+- Trace and LangSmith outbox rows are committed in one SQLite transaction; LangSmith outages, rate limits, and authentication failures never block graph execution or checkpoint recovery.
 - PyTorch OCR remains production default until the MindSpore Lite candidate passes the same golden corpus and deployment-manifest checks.
 - Extraction accuracy, Recall@3, field readback success, latency, and mis-submission metrics are published only from versioned evaluation output.
 
@@ -27,7 +29,7 @@
 
 | Phase | Independently testable result | Rollback boundary |
 |---|---|---|
-| 1. Foundation | Typed state, restricted tools, redacted traces, persistent LangGraph checkpoints | No production route uses the graph |
+| 1. Foundation | Typed state, restricted tools, redacted traces, LangSmith outbox, persistent LangGraph checkpoints | No production route uses the graph |
 | 2. Read-only subgraphs | Resume ingestion and job matching run through LangGraph with existing domain services | Route calls return to existing coordinators |
 | 3. Controlled application graph | New tasks use LangGraph for observe/fill/readback/interrupt/final review | New-task routing flag returns to XState before task creation |
 | 4. Single-authority cutover | XState is removed after legacy-task drain and parity tests | Deploy previous release; graph checkpoints remain append-only |
@@ -42,6 +44,8 @@
 - Modify `packages/contracts/src/index.ts`: export graph contracts.
 - Create `apps/api/src/agent/trace-sink.ts`: redaction-enforcing `TraceSink` and SQLite implementation.
 - Create `apps/api/src/agent/tool-registry.ts`: closed registry of read/model/side-effect tools.
+- Create `apps/api/src/agent/langsmith-outbox.ts`: allowlist projection, retry state, and dead-letter handling.
+- Create `apps/api/src/agent/langsmith-exporter.ts`: injected LangSmith client adapter with no-network default.
 - Create `apps/api/src/agent/sqlite-checkpointer.ts`: LangGraph `BaseCheckpointSaver` implementation over the existing SQLite connection.
 - Create `apps/api/src/agent/state.ts`: LangGraph annotations and reducers.
 - Create `apps/api/src/agent/main-graph.ts`: main graph routing and shared interrupt handling.
@@ -72,6 +76,7 @@
 - Modify `services/ocr-worker/src/resume_ocr_worker/config.py`, `app.py`, and `model.py`.
 - Modify `packages/profile-domain/src/pdf/remote-ocr-engine.ts`: validate runtime and optional block geometry.
 - Create `evals/agent/manifest.schema.json`, `evals/agent/run-evals.ts`, and fixed fixture manifests.
+- Create `evals/agent/langsmith-review.test.ts`: privacy, correlation, failure-isolation, and local/remote event parity tests.
 
 ---
 
@@ -282,6 +287,123 @@ Expected: PASS and a second `migrateDatabase(database)` call changes no schema o
 ```bash
 rtk git add apps/api/src/agent/trace-sink.ts apps/api/src/agent/trace-sink.test.ts apps/api/src/agent/tool-registry.ts apps/api/src/agent/tool-registry.test.ts apps/api/src/db/migrate.ts apps/api/src/db/migrate.test.ts
 rtk git commit -m "feat: add redacted agent audit and restricted tools"
+```
+
+### Task 2A: Add the Optional LangSmith Review Outbox
+
+**Files:**
+- Modify: `apps/api/package.json`
+- Modify: `pnpm-lock.yaml`
+- Create: `apps/api/src/agent/langsmith-outbox.ts`
+- Create: `apps/api/src/agent/langsmith-outbox.test.ts`
+- Create: `apps/api/src/agent/langsmith-exporter.ts`
+- Create: `apps/api/src/agent/langsmith-exporter.test.ts`
+- Modify: `apps/api/src/agent/trace-sink.ts`
+- Modify: `apps/api/src/agent/trace-sink.test.ts`
+- Modify: `apps/api/src/db/migrate.ts`
+- Modify: `apps/api/src/db/migrate.test.ts`
+- Modify: `apps/api/src/config.ts`
+- Modify: `apps/api/src/config.test.ts`
+
+**Interfaces:**
+- Consumes: the parsed `AuditTraceInput` and SQLite transaction helper from Task 2.
+- Produces: `projectLangSmithEvent(input): LangSmithReviewEvent`, `LangSmithOutbox.enqueue`, `LangSmithOutbox.claim`, `LangSmithOutbox.markSent`, `LangSmithOutbox.markFailed`, and `LangSmithExporter.flushOnce`.
+
+- [ ] **Step 1: Write failing privacy, transaction, and failure-isolation tests**
+
+```ts
+it("writes the local trace and allowlisted outbox projection in one transaction", () => {
+  const sink = createSqliteTraceSink(database, { langSmithEnabled: true });
+  const id = sink.record({
+    runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
+    outcome: "accepted", reasonCode: "grounded", evidenceIds: ["evidence-1"],
+    contentHash: "a".repeat(64)
+  });
+  expect(sink.list("run-1")).toHaveLength(1);
+  expect(listOutbox(database, "run-1")).toEqual([
+    expect.objectContaining({ traceId: id, status: "pending" })
+  ]);
+});
+
+it.each(["张三", "13800138000", "person@example.com", "<div>resume</div>"])(
+  "rejects sensitive export value %s", (value) => {
+    expect(() => projectLangSmithEvent({
+      runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
+      outcome: "accepted", reasonCode: "grounded", summary: value
+    })).toThrow("trace_pii_rejected");
+  }
+);
+
+it("keeps graph execution independent from LangSmith outage", async () => {
+  const exporter = createLangSmithExporter({
+    client: { createRun: vi.fn().mockRejectedValue(new Error("timeout")) },
+    outbox: createOutbox(database)
+  });
+  await expect(exporter.flushOnce()).resolves.toMatchObject({ sent: 0, retried: 1 });
+});
+```
+
+- [ ] **Step 2: Run focused tests and confirm the modules and migration are absent**
+
+Run: `rtk corepack pnpm --filter @resume/api test -- src/agent/langsmith-outbox.test.ts src/agent/langsmith-exporter.test.ts src/agent/trace-sink.test.ts`
+
+Expected: FAIL because the exporter/outbox modules and their tables are absent.
+
+- [ ] **Step 3: Add the outbox schema and allowlist projection**
+
+Add this idempotent schema in `migrateDatabase`:
+
+```sql
+CREATE TABLE IF NOT EXISTS langsmith_trace_outbox (
+  id TEXT PRIMARY KEY,
+  trace_id TEXT NOT NULL UNIQUE,
+  run_id_hash TEXT NOT NULL,
+  payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+  status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'sent', 'dead_letter')),
+  attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+  next_attempt_at TEXT NOT NULL,
+  remote_run_id TEXT,
+  last_error_code TEXT,
+  created_at TEXT NOT NULL,
+  updated_at TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS langsmith_trace_outbox_ready_idx
+  ON langsmith_trace_outbox(status, next_attempt_at);
+```
+
+Extend `TraceSink.record` so the parsed local trace row and its `LangSmithReviewEvent` projection are inserted by the same SQLite transaction. The projection may contain only `runIdHash`, `parentRunIdHash`, `graphVersion`, `nodeName`, `nodeVersion`, `eventType`, `toolName`, `outcome`, `reasonCode`, `confidence`, `candidateCount`, `evidenceCount`, `durationMs`, `errorCode`, and `createdAt`. It must not copy arbitrary `outputSummary`, prompts, evidence quotes, browser payloads, or business primary keys.
+
+- [ ] **Step 4: Implement disabled-by-default configuration and injected exporter**
+
+Add to `apps/api/src/config.ts`:
+
+```ts
+langsmith: {
+  enabled: boolean;
+  apiKey?: string;
+  endpoint?: string;
+  project: string;
+  maxAttempts: number;
+}
+```
+
+Parse `LANGSMITH_TRACING_ENABLED` as `false` unless it is exactly `"true"`; require a non-empty API key and endpoint only when enabled. `createLangSmithExporter` must accept an injected client implementing `createRun(event)` and `updateRun(remoteRunId, event)`, so unit tests never call the network. The production adapter may use `langsmith` 0.9.0, but the graph depends only on the injected interface.
+
+- [ ] **Step 5: Implement bounded retry and deletion behavior**
+
+`flushOnce` claims a bounded batch using a transaction, sends only pending projections, and marks each item `sent` with its remote run ID on success. On timeout, rate limit, or authentication failure it increments `attempts`, stores a bounded error code, and schedules exponential backoff. After `maxAttempts`, mark the row `dead_letter`; do not retry forever and do not block graph execution. Replays use `traceId` as the idempotency key and never reload raw business objects. Deleting a local task removes unsent outbox rows and calls the injected remote-delete port only for stored remote IDs.
+
+- [ ] **Step 6: Verify privacy, migration, and failure isolation**
+
+Run: `rtk corepack pnpm --filter @resume/api test -- src/agent/langsmith-outbox.test.ts src/agent/langsmith-exporter.test.ts src/agent/trace-sink.test.ts src/db/migrate.test.ts src/config.test.ts`
+
+Expected: PASS for atomic trace/outbox writes, strict PII rejection, disabled-by-default startup, idempotent migrations, bounded retry, dead-letter transition, and graph independence from LangSmith failure.
+
+- [ ] **Step 7: Commit**
+
+```bash
+rtk git add apps/api/package.json pnpm-lock.yaml apps/api/src/agent apps/api/src/db/migrate.ts apps/api/src/db/migrate.test.ts apps/api/src/config.ts apps/api/src/config.test.ts
+rtk git commit -m "feat: add optional LangSmith review outbox"
 ```
 
 ### Task 3: Add the Persistent SQLite LangGraph Checkpointer
@@ -520,7 +642,7 @@ Expected: FAIL with missing job-matching subgraph.
 
 - [ ] **Step 3: Implement nodes and constrain advisor inputs**
 
-Use nodes `observe_ats -> select_adapter -> apply_filter_plan -> extract_postings -> match_candidates -> persist_results`. ATS adapters alone may convert site snapshots to `JobPosting`; unsupported snapshots end with `adapter_contract_mismatch`. Keep education, major, and years outcomes as `satisfied | conflict | unknown`. Run Trigram and Dense retrieval independently, merge deterministically, score with `scoreJobMatch`, and call DeepSeek only for unknown outcomes with at most three supplied evidence IDs. Parse advisor output through `validateAdvisory`; malformed or unavailable model responses become `UNKNOWN_ADVISORY` without changing deterministic ranking. Emit counts and version IDs through the unified `TraceSink`, while retaining `BoundedJobMatchTraceBuffer` as a compatibility view during this phase.
+Use nodes `observe_ats -> select_adapter -> apply_filter_plan -> extract_postings -> match_candidates -> persist_results`. ATS adapters alone may convert site snapshots to `JobPosting`; unsupported snapshots end with `adapter_contract_mismatch`. Keep education, major, and years outcomes as `satisfied | conflict | unknown`. Run Trigram and Dense retrieval independently, merge deterministically, and score with `scoreJobMatch`. Call DeepSeek only for unknown outcomes with at most three supplied evidence IDs. In this migration phase parse the result through `validateAdvisory` and keep it advisory-only; malformed or unavailable responses become `UNKNOWN_ADVISORY` without changing deterministic ranking. A later Top-K semantic rerank is allowed only as a separately versioned experiment after the evaluation gate proves it improves ranking without overriding hard conflicts. Emit counts and version IDs through the unified `TraceSink`, while retaining `BoundedJobMatchTraceBuffer` as a compatibility view during this phase.
 
 - [ ] **Step 4: Run matching regressions**
 
@@ -824,8 +946,10 @@ rtk git commit -m "feat: add runtime-neutral OCR backends"
 - Create: `evals/agent/job-matching.jsonl`
 - Create: `evals/agent/form-readback.jsonl`
 - Create: `evals/agent/ocr-parity.jsonl`
+- Create: `evals/agent/langsmith-review.jsonl`
 - Create: `evals/agent/run-evals.ts`
 - Create: `evals/agent/run-evals.test.ts`
+- Create: `evals/agent/langsmith-review.test.ts`
 - Create: `evals/agent/README.md`
 - Modify: `package.json`
 - Create: `docs/superpowers/evaluations/.gitkeep`
@@ -854,7 +978,7 @@ Run: `rtk corepack pnpm vitest run evals/agent/run-evals.test.ts`
 
 Expected: FAIL because `run-evals.ts` does not exist.
 
-- [ ] **Step 3: Implement fixed manifests and report generation**
+- [ ] **Step 3: Implement fixed manifests, LangSmith review cases, and report generation**
 
 Each JSONL row must contain `caseId`, `suiteVersion`, input fixture/object IDs, expected IDs/labels, and privacy classification; raw candidate PII is forbidden. Implement exact metrics:
 
@@ -866,6 +990,8 @@ Each JSONL row must contain `caseId`, `suiteVersion`, input fixture/object IDs, 
 - OCR character accuracy = `1 - character_edit_distance / reference_character_count`.
 - OCR parity regression = candidate accuracy minus PyTorch baseline accuracy on the identical corpus.
 
+Add `evals/agent/langsmith-review.jsonl` with only versioned case IDs, input hashes and expected labels. Implement `evals/agent/langsmith-review.test.ts` to verify that a local Trace sequence and its LangSmith projection preserve run/node/tool parentage, event order, graph/model/tool versions and terminal outcome; inject names, phone numbers, email addresses, prompts, DOM fragments and evidence quotes and require export rejection. Use an injected fake LangSmith client to test timeout, rate-limit, auth failure, duplicate flush and dead-letter behavior. The evaluation report must record `langsmithEnabled`, outbox sent/retried/dead-letter counts, privacy rejection count, and local-versus-remote correlation mismatches.
+
 Write reports under `docs/superpowers/evaluations/<dataset-hash>/` and include git commit, dataset SHA-256, graph version, adapter versions, model revisions, OCR runtime, case counts, failures, and confidence intervals. Never overwrite a report directory whose dataset hash already exists.
 
 - [ ] **Step 4: Add release commands and run the complete gate**
@@ -876,9 +1002,9 @@ Add root script:
 "eval:agent": "tsx evals/agent/run-evals.ts"
 ```
 
-Run: `rtk corepack pnpm vitest run evals/agent/run-evals.test.ts`
+Run: `rtk corepack pnpm vitest run evals/agent/run-evals.test.ts evals/agent/langsmith-review.test.ts`
 
-Expected: PASS for denominator, hashing, determinism, privacy validation, and submit detection.
+Expected: PASS for denominator, hashing, determinism, local-only privacy validation, LangSmith correlation, failure isolation, and submit detection.
 
 Run: `rtk corepack pnpm test`
 
@@ -919,6 +1045,11 @@ rtk git commit -m "test: add reproducible agent evaluation gates"
 - [ ] NodeRef, snapshot ID, approval token, execution epoch, double-readback, and full-page audit tests pass unchanged or stronger.
 - [ ] Final-review pages are terminal review locks; no graph edge or registered tool can submit.
 - [ ] Trace records reject unknown keys and contain no direct PII, prompts, resume text, tokens, or browser HTML.
+- [ ] Trace and LangSmith outbox rows are committed atomically; LangSmith is disabled by default and has no network client when disabled.
+- [ ] LangSmith receives only allowlisted hashes, IDs, counts, versions, confidence, durations, bounded reasons, and error codes.
+- [ ] PII, prompts, DOM, evidence quotes, form values, secrets, and business primary keys are rejected before export.
+- [ ] LangSmith timeout, rate limit, authentication failure, duplicate delivery, and dead-letter behavior do not affect graph execution or Checkpoint recovery.
+- [ ] Local Trace and LangSmith projections preserve parentage, ordering, versions, and terminal outcomes for the same run.
 - [ ] Existing ATS adapters remain the only HTML-to-`JobPosting` boundary.
 - [ ] Dense/model outages degrade to deterministic matching without turning `unknown` into `conflict`.
 - [ ] PyTorch OCR remains deployable and behaviorally compatible after backend extraction.
@@ -929,4 +1060,4 @@ rtk git commit -m "test: add reproducible agent evaluation gates"
 
 ## Execution Order
 
-Execute Tasks 1-4 first as the foundation. Tasks 5 and 6 may then run in parallel because both are read-oriented and depend only on the foundation. Task 7 follows the foundation and receives a dedicated safety review. Task 8 starts only after Tasks 5-7 pass parity suites. Task 9 may run in parallel with Tasks 5-7 because the HTTP compatibility contract isolates it. Task 10 runs last and is the release gate for architecture and resume metrics.
+Execute Tasks 1-2A first as the foundation. Task 3 then adds persistent checkpoints; Task 4 follows with graph routing. Tasks 5 and 6 may then run in parallel because both are read-oriented and depend only on the foundation. Task 7 follows the foundation and receives a dedicated safety review. Task 8 starts only after Tasks 5-7 pass parity suites. Task 9 may run in parallel with Tasks 5-7 because the HTTP compatibility contract isolates it. Task 10 runs last and is the release gate for architecture, LangSmith privacy, and resume metrics.
