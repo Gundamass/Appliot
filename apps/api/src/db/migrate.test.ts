@@ -180,6 +180,18 @@ describe("migrateDatabase", () => {
     database.close();
   });
 
+  it("creates agent trace persistence idempotently", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'agent_trace_events'").get())
+      .toEqual({ name: "agent_trace_events" });
+    expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'agent_trace_events_run_sequence_idx'").get())
+      .toEqual({ name: "agent_trace_events_run_sequence_idx" });
+    database.close();
+  });
+
   it("upgrades legacy task cleanup triggers to remove all task-scoped data", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

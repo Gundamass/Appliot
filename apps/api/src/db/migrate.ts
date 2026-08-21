@@ -287,6 +287,22 @@ export function migrateDatabase(database: SqliteDatabase): void {
       created_at TEXT NOT NULL,
       PRIMARY KEY (index_id, fact_id)
     );
+
+    CREATE TABLE IF NOT EXISTS agent_trace_events (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      node TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      reason_code TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL,
+      UNIQUE (run_id, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS agent_trace_events_run_sequence_idx
+      ON agent_trace_events(run_id, sequence);
   `);
 
   const taskColumns = database.prepare("PRAGMA table_info(application_tasks)").all() as Array<{ name: string }>;
