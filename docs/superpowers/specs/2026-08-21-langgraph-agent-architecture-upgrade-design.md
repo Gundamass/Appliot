@@ -11,6 +11,7 @@
 - 当前 OCR Worker 使用 Transformers/PyTorch 运行固定版本的 DeepSeek OCR 模型；MindSpore Lite 是目标推理后端之一，通过稳定的 OCR Tool 协议替换，不与 LangGraph 迁移强绑定。
 - 当前岗位匹配已有 Trigram、Dense 检索、规则评分和受限模型 Advisory；目标架构将其纳入岗位匹配子图，并补齐岗位要求结构化和统一评测。
 - 当前投递流程由 XState 与 `ApplicationService` 编排；目标架构最终由 LangGraph 取代 XState，而 Playwright Browser Worker、NodeRef、Action Policy、双稳定回读和提交拦截继续保留。
+- 当前仓库尚未接入 LangSmith；目标架构将其作为默认关闭的脱敏观测与评测出口，本地 TraceSink 始终是审计事实源。
 - 文中准确率、Recall@3、回读成功率和零误提交率必须由固定数据集及评测脚本产生，不能只由架构设计推导。
 
 ## 2. 背景与问题
@@ -109,8 +110,12 @@ flowchart TD
 
     G --> CP["LangGraph Checkpoint Store"]
     G --> ES["Evidence/Profile Store"]
-    G --> TS["TraceSink"]
+    G --> TS["本地 TraceSink"]
     G --> HI["Human-in-the-loop"]
+
+    TS --> RD["Trace Redactor"]
+    RD --> OB["LangSmith Outbox"]
+    OB -. "可选异步导出" .-> LS["LangSmith 链路审查与评测"]
 
     BT --> AP["Action Policy"]
     AP --> BW
@@ -125,6 +130,7 @@ flowchart TD
 - 维护任务级 `runId`、`threadId`、用户和资料版本。
 - 协调人工中断、取消和终态状态。
 - 关联 Checkpoint、Evidence、Trace 和业务实体。
+- 生成稳定的运行、节点和工具关联 ID，供本地审计与 LangSmith 脱敏轨迹对齐。
 
 ### 6.2 子图边界
 
@@ -618,9 +624,58 @@ interface TraceEvent {
 - 本地原始审计需要单独加密密钥和保留期限。
 - Bad Case 导出默认不包含原始 PDF、完整页面文本和浏览器存储状态。
 
+允许写入 Trace 的 `reasonCode`、`outcome`、节点名和工具名必须来自版本化枚举，不接受自由文本。其他字符串在持久化前统一经过 PII 检测；发现手机号、邮箱、证件号、地址或姓名模式时拒绝写入并生成本地安全事件。自由文本只允许保存不可逆内容哈希或经过人工审批的脱敏摘要。
+
+### 14.4 LangSmith 链路审查
+
+LangSmith 是可选的链路观测与评测出口，不是业务状态源、Checkpoint Store 或审计事实源。本地 Trace 事件与对应的脱敏 Outbox 记录在同一 SQLite 事务中写入，再由独立导出器异步发送白名单字段。LangSmith 不可用、限流或鉴权失败时，LangGraph 继续执行，本地 Trace 和 Checkpoint 行为不变。
+
+```ts
+interface LangSmithReviewEvent {
+  runIdHash: string;
+  parentRunIdHash?: string;
+  graphVersion: string;
+  nodeName: TraceNodeName;
+  nodeVersion: string;
+  eventType: TraceEvent["eventType"];
+  toolName?: RegisteredToolName;
+  outcome: TraceOutcome;
+  reasonCode: TraceReasonCode;
+  confidence?: number;
+  candidateCount?: number;
+  evidenceCount?: number;
+  durationMs: number;
+  errorCode?: TraceErrorCode;
+  createdAt: string;
+}
+```
+
+LangSmith 中允许审查：
+
+- 主图、子图、节点和 Tool 的父子调用关系。
+- 节点耗时、Tool 成功率、重试、降级和错误码。
+- 模型名称、Prompt 版本、候选数量、选择结果 ID 哈希和置信度。
+- Interrupt 类型、人工恢复耗时和恢复后路由，不记录人工填写的原始值。
+- Graph、Adapter、模型和 Prompt 版本之间的离线评测对比。
+
+LangSmith 中禁止出现：
+
+- 原始简历、PDF 页面、OCR 文本、岗位全文、DOM、截图和浏览器存储状态。
+- 原始 Prompt、模型完整响应、Evidence Quote、人工回答和表单字段值。
+- 姓名、手机号、邮箱、证件号、地址、Cookie、Token、API Key 和内部数据库主键。
+
+### 14.5 导出控制与保留策略
+
+- `LANGSMITH_TRACING_ENABLED` 默认关闭；未配置密钥时不得创建网络客户端。
+- 导出器使用有界 Outbox、指数退避和最大重试次数；超过期限后进入本地 dead-letter 状态，不阻塞业务。
+- 每个导出事件携带本地 Trace ID 哈希，实现跨系统关联但不暴露本地主键。
+- Outbox payload 在入库前完成白名单投影和 PII 检测，重试时不得重新读取原始业务对象。
+- LangSmith 项目按环境隔离，开发、测试和生产不得混用；生产保留期限短于本地审计期限。
+- 删除本地任务时，按保留策略清除 Outbox，并通过已保存的远端 Run ID 请求删除对应 LangSmith 轨迹。
+
 ## 15. Checkpoint 与数据一致性
 
-存储分为四类：
+存储分为五类：
 
 | 存储 | 内容 | 一致性要求 |
 |---|---|---|
@@ -628,6 +683,7 @@ interface TraceEvent {
 | 业务仓储 | 档案、岗位、匹配结果、任务 | 使用版本号和幂等键 |
 | Evidence Store | 文档块、引用、坐标、哈希 | 内容寻址，不可静默覆盖 |
 | Trace Store | 追加式运行事件 | 只追加，允许异步落盘 |
+| LangSmith Outbox | 已脱敏的白名单事件、重试和远端 Run ID | 先于网络发送持久化，不包含原始业务内容 |
 
 所有外部副作用使用幂等键：
 
@@ -651,6 +707,8 @@ runId + nodeName + nodeAttempt + operationId
 | 回读不一致 | 有限安全重试；页面变化或重复项操作不自动重试 |
 | Challenge | 立即熔断并转人工 |
 | 最终审核页 | 持久化中断，永不自动提交 |
+| LangSmith 不可用或限流 | 保留本地 Trace，Outbox 有界重试；不影响图执行、恢复或最终状态 |
+| LangSmith payload 未通过脱敏校验 | 拒绝导出并记录本地安全事件，不回退为发送原始内容 |
 
 ## 17. 目录与模块边界
 
@@ -661,6 +719,11 @@ apps/api/src/agent/
   graph.ts
   state.ts
   interrupts.ts
+  observability/
+    trace-sink.ts
+    trace-redactor.ts
+    langsmith-exporter.ts
+    langsmith-outbox.ts
   resume-ingestion/
   job-matching/
   application/
@@ -690,7 +753,8 @@ apps/browser-worker/
 ### 阶段 1：契约和可观测性基座
 
 - 定义 Graph State、ToolResult、HumanInterrupt、EvidenceReference 和 TraceEvent Schema。
-- 建立 LangGraph Checkpoint 与统一 TraceSink。
+- 建立 LangGraph Checkpoint、统一 TraceSink、脱敏 Outbox 与可选 LangSmith 导出器。
+- 使用字段白名单和 PII 拒绝测试验证 LangSmith 永远不接收原始简历、Prompt、DOM 或证据全文。
 - 为现有 PDF、检索和 Browser Worker 提供 Tool Adapter。
 - 不改变当前线上任务行为。
 
@@ -766,6 +830,14 @@ apps/browser-worker/
 
 “核心事实准确率 92%”“Recall@3 85%”“一次性回读成功率 94%”“零误提交”只有在固定数据集、指标定义和原始报告可复现时才能对外使用。
 
+### 19.5 LangSmith 链路审查测试
+
+- 使用固定脱敏事件验证主图、子图、节点、Tool、Interrupt 和错误之间的父子关系。
+- 注入姓名、手机号、邮箱、证件号、地址、Prompt、DOM 和 Evidence Quote，验证导出器全部拒绝。
+- 模拟 LangSmith 超时、限流、鉴权失败和重复响应，验证业务执行不受影响且 Outbox 不重复创建远端 Run。
+- 对比本地 Trace 序列和 LangSmith 脱敏轨迹，验证事件数量、顺序、版本和终态一致。
+- LangSmith Dataset 只接收版本化 Case ID、输入对象哈希和期望标签；本地评测报告仍是对外指标的唯一依据。
+
 ## 20. 验收标准
 
 ### 20.1 架构验收
@@ -775,6 +847,7 @@ apps/browser-worker/
 - 所有模型输出在进入图状态前通过 Schema 和候选边界校验。
 - 所有浏览器写操作都经过不可绕过的 Action Policy。
 - Checkpoint 可以恢复人工中断和非终态故障，不重复执行已确认副作用。
+- 关闭或中断 LangSmith 后，图执行结果、Checkpoint 和本地 Trace 与启用时一致。
 
 ### 20.2 功能回归
 
@@ -791,6 +864,8 @@ apps/browser-worker/
 - 过期、重放、节点不匹配或快照不匹配的授权令牌均被拒绝。
 - 原生表单提交、脚本提交、提交按钮和未知终态操作均无法通过自动化执行。
 - 脱敏 Trace 导出不包含完整敏感字段或原始文档内容。
+- LangSmith 导出仅包含白名单字段，PII 检测失败时拒绝发送而不是降级发送。
+- LangSmith 无法访问浏览器 Tool、业务仓储、Evidence Store 和 Checkpoint Store。
 
 ## 21. 关键架构结论
 
@@ -799,6 +874,6 @@ apps/browser-worker/
 3. ATS Adapter 负责网站差异，统一岗位协议负责隔离下游匹配逻辑。
 4. RAG 负责找到证据，规则与 Schema 负责决定证据能否用于填写。
 5. Playwright Browser Worker 继续是唯一浏览器副作用执行边界。
-6. TraceSink 记录可审查结论和来源，不记录隐藏思维过程。
-7. 最终提交通过图、策略和 Worker 三层禁止，始终由用户完成。
-
+6. 本地 TraceSink 是审计事实源；LangSmith 只接收脱敏后的链路元数据，用于调用链审查和版本评测。
+7. LangSmith 故障不影响任务执行和恢复，也不能访问原始简历、Prompt、DOM 或证据全文。
+8. 最终提交通过图、策略和 Worker 三层禁止，始终由用户完成。
