@@ -6,10 +6,10 @@ export interface ToolContext {
   taskId: string;
 }
 
-export type ToolHandler<Input = unknown, Output = unknown> =
+export type ToolHandler<Input = never, Output = unknown> =
   (input: Input, context: ToolContext) => Output | Promise<Output>;
 
-export interface ToolDefinition<Input = unknown, Output = unknown> {
+export interface ToolDefinition<Input = never, Output = unknown> {
   readonly handler: ToolHandler<Input, Output>;
   readonly allowedCallers: readonly ToolCaller[];
 }
@@ -38,7 +38,12 @@ export function createRestrictedToolRegistry(
   for (const [name, registration] of Object.entries(registrations)) {
     const definition = isToolDefinition(registration)
       ? registration
-      : { handler: registration, allowedCallers: graphOnlyTools.has(name) ? ["graph"] : ["graph", "model"] };
+      : {
+        handler: registration,
+        allowedCallers: graphOnlyTools.has(name)
+          ? ["graph"] as const
+          : ["graph", "model"] as const
+      };
     if (definition.allowedCallers.length === 0) throw new Error(`tool_definition_invalid:${name}`);
     definitions.set(name, Object.freeze({
       handler: definition.handler,
@@ -52,7 +57,7 @@ export function createRestrictedToolRegistry(
       if (definition === undefined || !definition.allowedCallers.includes(context.caller)) {
         throw new Error("tool_not_allowed");
       }
-      return await definition.handler(input, context) as Output;
+      return await (definition.handler as ToolHandler<unknown, Output>)(input, context);
     },
     names: () => Object.freeze([...definitions.keys()])
   });

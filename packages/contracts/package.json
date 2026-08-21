@@ -4,5 +4,5 @@
   "type": "module",
   "exports": { ".": "./src/index.ts" },
   "scripts": { "test": "vitest run", "typecheck": "tsc --noEmit -p ../../tsconfig.json" },
-  "dependencies": { "zod": "3.25.67" }
+  "dependencies": { "zod": "3.25.76" }
 }

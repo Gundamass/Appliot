@@ -234,6 +234,14 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
   }
 
   if (coreErrors.length > 0) throw new ConfigurationError([...new Set(coreErrors)]);
+  if (!langsmithResult.success) throw new ConfigurationError(["LANGSMITH_CONFIGURATION"]);
+  const langsmith: LangSmithConfig = {
+    enabled: langsmithResult.data.enabled,
+    project: langsmithResult.data.project,
+    maxAttempts: langsmithResult.data.maxAttempts,
+    ...(langsmithResult.data.apiKey === undefined ? {} : { apiKey: langsmithResult.data.apiKey }),
+    ...(langsmithResult.data.endpoint === undefined ? {} : { endpoint: langsmithResult.data.endpoint })
+  };
   return {
     databaseFile,
     host: "127.0.0.1",
@@ -241,6 +249,6 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     ...(deepseek ? { deepseek } : {}),
     ...(embedding ? { embedding } : {}),
     ...(ocr ? { ocr } : {}),
-    langsmith: langsmithResult.data
+    langsmith
   };
 }
