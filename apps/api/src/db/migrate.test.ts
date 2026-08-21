@@ -201,6 +201,52 @@ describe("migrateDatabase", () => {
     database.close();
   });
 
+  it("creates isolated LangGraph checkpoint and pending-write tables idempotently", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    expect(database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name IN ('agent_checkpoints', 'agent_checkpoint_writes')
+      ORDER BY name
+    `).all()).toEqual([
+      { name: "agent_checkpoint_writes" },
+      { name: "agent_checkpoints" }
+    ]);
+    expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'index' AND name = 'agent_checkpoints_thread_namespace_id_idx'").get())
+      .toEqual({ name: "agent_checkpoints_thread_namespace_id_idx" });
+    expect(database.prepare("PRAGMA foreign_key_list(agent_checkpoint_writes)").all())
+      .toContainEqual(expect.objectContaining({
+        from: "thread_id", table: "agent_checkpoints", on_delete: "CASCADE"
+      }));
+    database.close();
+  });
+
+  it("upgrades an earlier checkpoint table with the metadata serializer type", () => {
+    const database = new Database(":memory:");
+    database.exec(`
+      CREATE TABLE agent_checkpoints (
+        thread_id TEXT NOT NULL,
+        checkpoint_ns TEXT NOT NULL,
+        checkpoint_id TEXT NOT NULL,
+        parent_checkpoint_id TEXT,
+        type TEXT NOT NULL,
+        checkpoint_blob BLOB NOT NULL,
+        metadata_blob BLOB NOT NULL,
+        created_at TEXT NOT NULL,
+        PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+      );
+    `);
+
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    expect(database.prepare("PRAGMA table_info(agent_checkpoints)").all())
+      .toContainEqual(expect.objectContaining({ name: "metadata_type" }));
+    database.close();
+  });
+
   it("upgrades legacy task cleanup triggers to remove all task-scoped data", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

@@ -319,7 +319,41 @@ export function migrateDatabase(database: SqliteDatabase): void {
     );
     CREATE INDEX IF NOT EXISTS langsmith_trace_outbox_ready_idx
       ON langsmith_trace_outbox(status, next_attempt_at);
+
+    CREATE TABLE IF NOT EXISTS agent_checkpoints (
+      thread_id TEXT NOT NULL,
+      checkpoint_ns TEXT NOT NULL,
+      checkpoint_id TEXT NOT NULL,
+      parent_checkpoint_id TEXT,
+      type TEXT NOT NULL,
+      metadata_type TEXT NOT NULL DEFAULT 'json',
+      checkpoint_blob BLOB NOT NULL,
+      metadata_blob BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+    );
+    CREATE INDEX IF NOT EXISTS agent_checkpoints_thread_namespace_id_idx
+      ON agent_checkpoints(thread_id, checkpoint_ns, checkpoint_id);
+
+    CREATE TABLE IF NOT EXISTS agent_checkpoint_writes (
+      thread_id TEXT NOT NULL,
+      checkpoint_ns TEXT NOT NULL,
+      checkpoint_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      write_index INTEGER NOT NULL,
+      channel TEXT NOT NULL,
+      type TEXT NOT NULL,
+      value_blob BLOB NOT NULL,
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, write_index),
+      FOREIGN KEY (thread_id, checkpoint_ns, checkpoint_id)
+        REFERENCES agent_checkpoints(thread_id, checkpoint_ns, checkpoint_id) ON DELETE CASCADE
+    );
   `);
+
+  const agentCheckpointColumns = database.prepare("PRAGMA table_info(agent_checkpoints)").all() as Array<{ name: string }>;
+  if (!agentCheckpointColumns.some((column) => column.name === "metadata_type")) {
+    database.exec("ALTER TABLE agent_checkpoints ADD COLUMN metadata_type TEXT NOT NULL DEFAULT 'json'");
+  }
 
   const taskColumns = database.prepare("PRAGMA table_info(application_tasks)").all() as Array<{ name: string }>;
   if (!taskColumns.some((column) => column.name === "name")) {
