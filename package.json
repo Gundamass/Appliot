@@ -7,6 +7,7 @@
     "node": ">=24.14.1"
   },
   "scripts": {
+    "dev": "corepack pnpm -r --parallel --stream --filter @resume/api --filter @resume/web dev",
     "test": "corepack pnpm -r test",
     "test:e2e": "node scripts/run-playwright.mjs test",
     "typecheck": "tsc --noEmit",

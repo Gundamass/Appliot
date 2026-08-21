@@ -3,7 +3,7 @@
   "private": true,
   "type": "module",
   "scripts": {
-    "test": "vitest run",
+    "test": "vitest run --maxWorkers=1 --minWorkers=1 --fileParallelism=false",
     "typecheck": "tsc --noEmit -p ../../tsconfig.json",
     "build": "tsc --noEmit -p ../../tsconfig.json"
   },

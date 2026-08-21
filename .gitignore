@@ -3,6 +3,7 @@ node_modules.pre-task2-native-backup/
 node_modules.pre-wrapper-*/
 dist/
 .env*
+!.env.example
 data/
 playwright-report/
 test-results/

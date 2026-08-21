@@ -5,7 +5,7 @@ import type { FormSnapshot, NodeRef } from "@resume/contracts";
 import type { Page } from "playwright-core";
 import { afterEach, describe, expect, it } from "vitest";
 import { installDomRuntime, readDomRuntime } from "./dom-runtime.js";
-import { NodeRegistry } from "./node-registry.js";
+import { NodeRegistry, PreparedNode } from "./node-registry.js";
 import { BrowserSessionManager } from "./session-manager.js";
 
 const sessions: Array<{ manager: BrowserSessionManager; profileDir: string }> = [];
@@ -103,7 +103,14 @@ describe("NodeRegistry", () => {
     await registry.release();
   });
 
-  it("returns stable errors for continuous mutation and invalidation", async () => {
+  it("returns control_unstable when every stability read observes a mutation", async () => {
+    const prepared = continuouslyMutatingNode();
+
+    await expect(prepared.waitForStableWindow(30, 100, () => true))
+      .rejects.toMatchObject({ code: "control_unstable" });
+  });
+
+  it("returns execution_invalidated before waiting", async () => {
     const page = await createPage("resume-node-unstable-");
     await page.setContent(`<form><input id="target" aria-label="Target"></form>`);
     await installDomRuntime(page);
@@ -114,15 +121,6 @@ describe("NodeRegistry", () => {
     });
     const prepared = await registry.prepare(ref, ref.observedAt, "field");
 
-    await page.locator("#target").evaluate((target) => {
-      let version = 0;
-      (window as unknown as { mutationTimer?: number }).mutationTimer = window.setInterval(() => {
-        target.setAttribute("aria-label", `Target ${version++}`);
-      }, 10);
-    });
-    await expect(prepared.waitForStableWindow(30, 100, () => true))
-      .rejects.toMatchObject({ code: "control_unstable" });
-    await page.evaluate(() => clearInterval((window as unknown as { mutationTimer?: number }).mutationTimer));
     await expect(prepared.waitForStableWindow(30, 100, () => false))
       .rejects.toMatchObject({ code: "execution_invalidated" });
     await registry.release();
@@ -167,4 +165,27 @@ async function createPage(prefix: string): Promise<Page> {
   await manager.start(Buffer.alloc(32, 1).toString("base64url"));
   sessions.push({ manager, profileDir });
   return (manager as unknown as { page: Page }).page;
+}
+
+function continuouslyMutatingNode(): PreparedNode {
+  const ref: NodeRef = { documentId: "document-1", nodeId: "node-1", observedAt: 0 };
+  return new PreparedNode(
+    {
+      waitForTimeout: async (milliseconds: number) => new Promise<void>((resolve) => {
+        setTimeout(resolve, Math.min(milliseconds, 5));
+      })
+    } as Page,
+    {
+      evaluate: async () => ({
+        connected: true,
+        documentId: ref.documentId,
+        nodeId: ref.nodeId,
+        roleMatches: true,
+        lastRelevantMutationAt: Date.now(),
+        value: undefined
+      })
+    } as never,
+    ref,
+    "field"
+  );
 }
