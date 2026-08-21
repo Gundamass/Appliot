@@ -58,4 +58,16 @@ describe("SQLite TraceSink", () => {
     expect(sink.list("run-a")[0]?.sequence).toBe(1);
     expect(sink.list("run-b")[0]?.sequence).toBe(1);
   });
+
+  it("writes a LangSmith projection atomically when enabled", () => {
+    const database = createDatabase();
+    const sink = createSqliteTraceSink(database, { langSmithEnabled: true });
+    const id = sink.record({
+      runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
+      outcome: "accepted", reasonCode: "grounded", evidenceIds: ["evidence-1"]
+    });
+
+    expect(database.prepare("SELECT trace_id, status FROM langsmith_trace_outbox").all())
+      .toEqual([{ trace_id: id, status: "pending" }]);
+  });
 });

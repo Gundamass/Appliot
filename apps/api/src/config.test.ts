@@ -19,6 +19,7 @@ describe("API configuration", () => {
       databaseFile: "data/resume-assistant.sqlite",
       host: "127.0.0.1",
       port: 43120,
+      langsmith: { enabled: false, project: "resume-assistant", maxAttempts: 3 },
       deepseek: {
         apiKey: "test-key",
         baseUrl: "https://api.deepseek.com",
@@ -28,6 +29,29 @@ describe("API configuration", () => {
         timeoutMs: 60_000,
         maxRetries: 2
       }
+    });
+  });
+
+  it("keeps LangSmith disabled by default and validates credentials only when enabled", () => {
+    expect(loadConfig({}).langsmith).toEqual({
+      enabled: false,
+      project: "resume-assistant",
+      maxAttempts: 3
+    });
+    expect(() => loadConfig({ LANGSMITH_TRACING_ENABLED: "true" }))
+      .toThrow("LANGSMITH_API_KEY");
+    expect(loadConfig({
+      LANGSMITH_TRACING_ENABLED: "true",
+      LANGSMITH_API_KEY: "test-key",
+      LANGSMITH_ENDPOINT: "https://api.smith.langchain.com",
+      LANGSMITH_PROJECT: "agent-review",
+      LANGSMITH_MAX_ATTEMPTS: "5"
+    }).langsmith).toEqual({
+      enabled: true,
+      apiKey: "test-key",
+      endpoint: "https://api.smith.langchain.com",
+      project: "agent-review",
+      maxAttempts: 5
     });
   });
 

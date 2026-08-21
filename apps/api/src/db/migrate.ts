@@ -303,6 +303,22 @@ export function migrateDatabase(database: SqliteDatabase): void {
     );
     CREATE INDEX IF NOT EXISTS agent_trace_events_run_sequence_idx
       ON agent_trace_events(run_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS langsmith_trace_outbox (
+      id TEXT PRIMARY KEY,
+      trace_id TEXT NOT NULL UNIQUE,
+      run_id_hash TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'sent', 'dead_letter')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      next_attempt_at TEXT NOT NULL,
+      remote_run_id TEXT,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS langsmith_trace_outbox_ready_idx
+      ON langsmith_trace_outbox(status, next_attempt_at);
   `);
 
   const taskColumns = database.prepare("PRAGMA table_info(application_tasks)").all() as Array<{ name: string }>;

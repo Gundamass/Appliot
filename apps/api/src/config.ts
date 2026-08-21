@@ -27,6 +27,14 @@ export interface RemoteOcrAdapterConfig {
   timeoutMs: number;
 }
 
+export interface LangSmithConfig {
+  enabled: boolean;
+  apiKey?: string;
+  endpoint?: string;
+  project: string;
+  maxAttempts: number;
+}
+
 export interface ApiConfig {
   databaseFile: string;
   host: "127.0.0.1";
@@ -34,6 +42,7 @@ export interface ApiConfig {
   deepseek?: DeepSeekAdapterConfig;
   embedding?: RemoteEmbeddingAdapterConfig;
   ocr?: RemoteOcrAdapterConfig;
+  langsmith: LangSmithConfig;
 }
 
 export class ConfigurationError extends Error {
@@ -100,6 +109,22 @@ const ocrSchema = z.object({
   timeoutMs: positiveInteger
 });
 
+const langsmithSchema = z.object({
+  enabled: z.boolean(),
+  apiKey: nonEmptyString.optional(),
+  endpoint: url.optional(),
+  project: nonEmptyString,
+  maxAttempts: positiveInteger.refine((value) => value <= 10)
+}).superRefine((value, context) => {
+  if (!value.enabled) return;
+  if (value.apiKey === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["apiKey"], message: "required" });
+  }
+  if (value.endpoint === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["endpoint"], message: "required" });
+  }
+});
+
 function invalidVariables(result: z.SafeParseError<unknown>, variables: Record<string, string>): string[] {
   const names = result.error.issues.map((issue) => issue.path[0]).filter((name): name is string => typeof name === "string");
   return [...new Set(names.map((name) => variables[name] ?? name))];
@@ -113,6 +138,23 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
   const portResult = tcpPort.safeParse(env.API_PORT ?? "43120");
   const port = portResult.success ? portResult.data : 0;
   if (!portResult.success) coreErrors.push("API_PORT");
+
+  const langsmithEnabled = env.LANGSMITH_TRACING_ENABLED === "true";
+  const langsmithResult = langsmithSchema.safeParse({
+    enabled: langsmithEnabled,
+    ...(env.LANGSMITH_API_KEY === undefined ? {} : { apiKey: env.LANGSMITH_API_KEY }),
+    ...(env.LANGSMITH_ENDPOINT === undefined ? {} : { endpoint: env.LANGSMITH_ENDPOINT }),
+    project: env.LANGSMITH_PROJECT ?? "resume-assistant",
+    maxAttempts: env.LANGSMITH_MAX_ATTEMPTS ?? "3"
+  });
+  if (!langsmithResult.success) {
+    coreErrors.push(...invalidVariables(langsmithResult, {
+      apiKey: "LANGSMITH_API_KEY",
+      endpoint: "LANGSMITH_ENDPOINT",
+      project: "LANGSMITH_PROJECT",
+      maxAttempts: "LANGSMITH_MAX_ATTEMPTS"
+    }));
+  }
 
   const hasDeepSeek = Object.keys(env).some((name) => name.startsWith("DEEPSEEK_"));
   let deepseek: DeepSeekAdapterConfig | undefined;
@@ -198,6 +240,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     port,
     ...(deepseek ? { deepseek } : {}),
     ...(embedding ? { embedding } : {}),
-    ...(ocr ? { ocr } : {})
+    ...(ocr ? { ocr } : {}),
+    langsmith: langsmithResult.data
   };
 }

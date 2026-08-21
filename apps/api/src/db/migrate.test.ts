@@ -192,6 +192,15 @@ describe("migrateDatabase", () => {
     database.close();
   });
 
+  it("creates the LangSmith outbox schema idempotently", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    migrateDatabase(database);
+    expect(database.prepare("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'langsmith_trace_outbox'").get())
+      .toEqual({ name: "langsmith_trace_outbox" });
+    database.close();
+  });
+
   it("upgrades legacy task cleanup triggers to remove all task-scoped data", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
