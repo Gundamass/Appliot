@@ -16,6 +16,14 @@ describe("agent graph contracts", () => {
     })).toThrow();
   });
 
+  it("accepts bounded tool trace metadata", () => {
+    expect(AuditTraceInputSchema.parse({
+      runId: "run-1", taskId: "task-1", node: "conversation_execute_read", kind: "tool_call",
+      toolName: "list_recommendations", outcome: "completed", reasonCode: "tool_completed",
+      durationMs: 12, errorCode: "tool_timeout"
+    })).toMatchObject({ toolName: "list_recommendations", durationMs: 12, errorCode: "tool_timeout" });
+  });
+
   it("requires the interrupt id when work resumes", () => {
     expect(HumanResumeSchema.parse({ interruptId: "int-1", action: "confirm", values: {} }).action)
       .toBe("confirm");

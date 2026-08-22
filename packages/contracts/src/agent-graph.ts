@@ -60,8 +60,10 @@ export const AuditTraceInputSchema = z.object({
   kind: z.enum(["node", "tool_call", "model_decision", "interrupt", "checkpoint", "safety_block"]),
   outcome: z.string().max(80), reasonCode: z.string().max(80),
   confidence: z.number().min(0).max(1).optional(), candidateIds: z.array(z.string()).max(100).optional(),
-  evidenceIds: z.array(z.string()).max(100).optional(), durationMs: z.number().nonnegative().optional(),
-  counts: z.record(z.number().int().nonnegative()).optional(), contentHash: z.string().optional()
+  evidenceIds: z.array(z.string()).max(100).optional(), durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
+  counts: z.record(z.number().int().nonnegative()).optional(), contentHash: z.string().optional(),
+  toolName: z.string().regex(/^[a-z0-9_:-]{1,80}$/u).optional(),
+  errorCode: z.string().regex(/^[a-z0-9_:-]{1,80}$/u).optional()
 }).strict();
 
 export type GraphStatus = z.infer<typeof GraphStatusSchema>;
