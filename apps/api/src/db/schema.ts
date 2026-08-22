@@ -270,3 +270,39 @@ export const factEmbeddings = sqliteTable("fact_embeddings", {
   check("fact_embeddings_fact_revision_positive", sql`${table.factRevision} > 0`),
   check("fact_embeddings_vector_json_valid", sql`json_valid(${table.vectorJson})`)
 ]);
+
+export const conversationSessions = sqliteTable("conversation_sessions", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
+export const conversationMessages = sqliteTable("conversation_messages", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => conversationSessions.id, { onDelete: "cascade" }),
+  sequence: integer("sequence").notNull(),
+  role: text("role").notNull(),
+  text: text("text").notNull(),
+  cardsJson: text("cards_json").notNull(),
+  intentJson: text("intent_json"),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  unique("conversation_messages_session_sequence_unique").on(table.sessionId, table.sequence),
+  index("conversation_messages_session_id_idx").on(table.sessionId),
+  check("conversation_messages_sequence_positive", sql`${table.sequence} > 0`),
+  check("conversation_messages_role_valid", sql`${table.role} IN ('user', 'assistant')`),
+  check("conversation_messages_cards_json_valid", sql`json_valid(${table.cardsJson}) AND json_type(${table.cardsJson}) = 'array'`),
+  check("conversation_messages_intent_json_valid", sql`${table.intentJson} IS NULL OR json_valid(${table.intentJson})`)
+]);
+
+export const conversationContexts = sqliteTable("conversation_contexts", {
+  sessionId: text("session_id").primaryKey().references(() => conversationSessions.id, { onDelete: "cascade" }),
+  version: integer("version").notNull().default(0),
+  contextJson: text("context_json").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  index("conversation_contexts_session_id_idx").on(table.sessionId),
+  check("conversation_contexts_version_nonnegative", sql`${table.version} >= 0`),
+  check("conversation_contexts_json_valid", sql`json_valid(${table.contextJson}) AND json_type(${table.contextJson}) = 'object'`)
+]);
