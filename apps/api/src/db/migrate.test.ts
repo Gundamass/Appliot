@@ -3,6 +3,46 @@ import { describe, expect, it } from "vitest";
 import { migrateDatabase } from "./migrate.js";
 
 describe("migrateDatabase", () => {
+  it("creates conversation persistence tables and indexes idempotently", () => {
+    const database = new Database(":memory:");
+
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    expect(database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name LIKE 'conversation_%'
+      ORDER BY name
+    `).all()).toEqual([
+      { name: "conversation_contexts" },
+      { name: "conversation_messages" },
+      { name: "conversation_sessions" }
+    ]);
+    expect(database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'index' AND name LIKE 'conversation_%'
+      ORDER BY name
+    `).all()).toEqual(expect.arrayContaining([
+      { name: "conversation_messages_session_sequence_unique" },
+      { name: "conversation_messages_session_id_idx" },
+      { name: "conversation_contexts_session_id_idx" }
+    ]));
+    expect(database.prepare("PRAGMA foreign_key_list(conversation_messages)").all())
+      .toContainEqual(expect.objectContaining({ from: "session_id", table: "conversation_sessions", on_delete: "CASCADE" }));
+    expect(database.prepare("PRAGMA foreign_key_list(conversation_contexts)").all())
+      .toContainEqual(expect.objectContaining({ from: "session_id", table: "conversation_sessions", on_delete: "CASCADE" }));
+    expect(() => database.prepare(`
+      INSERT INTO conversation_sessions (id, title, created_at, updated_at)
+      VALUES ('session-1', 'Test', '2026-08-22T00:00:00.000Z', '2026-08-22T00:00:00.000Z')
+    `).run()).not.toThrow();
+    expect(() => database.prepare(`
+      INSERT INTO conversation_messages
+        (id, session_id, sequence, role, text, cards_json, intent_json, created_at)
+      VALUES ('message-1', 'session-1', 1, 'assistant', 'hello', 'not-json', NULL, '2026-08-22T00:00:00.000Z')
+    `).run()).toThrow();
+    database.close();
+  });
+
   it("creates job matching persistence tables and indexes idempotently", () => {
     const database = new Database(":memory:");
 

@@ -369,6 +369,37 @@ export function migrateDatabase(database: SqliteDatabase): void {
       FOREIGN KEY (thread_id, checkpoint_ns, checkpoint_id)
         REFERENCES agent_checkpoints(thread_id, checkpoint_ns, checkpoint_id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS conversation_sessions (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+      text TEXT NOT NULL,
+      cards_json TEXT NOT NULL CHECK (json_valid(cards_json) AND json_type(cards_json) = 'array'),
+      intent_json TEXT CHECK (intent_json IS NULL OR json_valid(intent_json)),
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS conversation_messages_session_sequence_unique
+      ON conversation_messages(session_id, sequence);
+    CREATE INDEX IF NOT EXISTS conversation_messages_session_id_idx
+      ON conversation_messages(session_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS conversation_contexts (
+      session_id TEXT PRIMARY KEY REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL CHECK (version >= 0),
+      context_json TEXT NOT NULL CHECK (json_valid(context_json) AND json_type(context_json) = 'object'),
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS conversation_contexts_session_id_idx
+      ON conversation_contexts(session_id);
   `);
 
   const agentCheckpointColumns = database.prepare("PRAGMA table_info(agent_checkpoints)").all() as Array<{ name: string }>;
