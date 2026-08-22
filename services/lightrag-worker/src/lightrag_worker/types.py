@@ -81,6 +81,7 @@ class RetrievalHit:
 class EvidenceReference:
     evidence_id: str
     document_id: str
+    posting_id: str | None
     page: int | None
     block_id: str | None
     quote_hash: str
@@ -106,4 +107,3 @@ class ContextRetriever(Protocol):
         top_k: int,
     ) -> Sequence[RetrievalHit]:
         ...
-

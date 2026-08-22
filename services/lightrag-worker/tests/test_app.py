@@ -64,6 +64,41 @@ def request_payload():
     }
 
 
+def job_request_payload():
+    text = "Kubernetes platform engineering"
+    record = {
+        "text": text,
+        "metadata": {
+            "tenantScope": "tenant-a",
+            "documentId": "job-document-a",
+            "postingId": "posting-a",
+            "profileRevision": None,
+            "page": None,
+            "blockId": "requirements",
+            "evidenceId": "job-evidence-a",
+            "contentHash": content_hash(text),
+            "indexVersion": "job-r4",
+        },
+    }
+    manifest_payload = [{
+        "evidenceId": "job-evidence-a",
+        "contentHash": content_hash(text),
+        "indexVersion": "job-r4",
+    }]
+    return {
+        "indexName": "job_requirements",
+        "tenantScope": "tenant-a",
+        "indexVersion": "job-r4",
+        "manifest": {
+            "recordCount": 1,
+            "contentHash": hashlib.sha256(
+                json.dumps(manifest_payload, separators=(",", ":"), sort_keys=True).encode("utf-8")
+            ).hexdigest(),
+        },
+        "records": [record],
+    }
+
+
 def test_authenticated_context_only_api_validates_scope_and_request_limits():
     manager = IndexManager(FakeContextRetriever())
     client = TestClient(create_app(manager, WorkerSettings(api_token=TOKEN)))
@@ -122,6 +157,41 @@ def test_authenticated_context_only_api_validates_scope_and_request_limits():
     assert too_many.status_code == 422
 
 
+def test_retrieval_rejects_cross_index_scope_filters_before_index_lookup():
+    manager = IndexManager(FakeContextRetriever())
+    client = TestClient(create_app(manager, WorkerSettings(api_token=TOKEN)))
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    invalid_profile = client.post("/v1/retrieve", headers=headers, json={
+        "query": "container platform",
+        "scope": "profile",
+        "tenantScope": "tenant-a",
+        "topK": 3,
+    })
+    invalid_profile_posting = client.post("/v1/retrieve", headers=headers, json={
+        "query": "container platform",
+        "scope": "profile",
+        "tenantScope": "tenant-a",
+        "profileRevision": 3,
+        "postingId": "posting-a",
+        "topK": 3,
+    })
+    invalid_job = client.post("/v1/retrieve", headers=headers, json={
+        "query": "container platform",
+        "scope": "job",
+        "tenantScope": "tenant-a",
+        "profileRevision": 3,
+        "topK": 3,
+    })
+
+    assert invalid_profile.status_code == 422
+    assert invalid_profile.json() == {"code": "retrieval_request_invalid"}
+    assert invalid_profile_posting.status_code == 422
+    assert invalid_profile_posting.json() == {"code": "retrieval_request_invalid"}
+    assert invalid_job.status_code == 422
+    assert invalid_job.json() == {"code": "retrieval_request_invalid"}
+
+
 def test_health_delete_and_stale_versions_are_bounded_to_the_active_index():
     manager = IndexManager(FakeContextRetriever())
     client = TestClient(create_app(manager, WorkerSettings(api_token=TOKEN)))
@@ -155,6 +225,31 @@ def test_health_delete_and_stale_versions_are_bounded_to_the_active_index():
     })
     assert deleted.status_code == 200
     assert deleted.json() == {"manifest": empty_manifest}
+
+
+def test_job_retrieval_returns_explicit_posting_identity():
+    manager = IndexManager(FakeContextRetriever())
+    client = TestClient(create_app(manager, WorkerSettings(api_token=TOKEN)))
+    headers = {"Authorization": f"Bearer {TOKEN}"}
+
+    assert client.post("/v1/indexes/upsert", headers=headers, json=job_request_payload()).status_code == 200
+
+    retrieved = client.post("/v1/retrieve", headers=headers, json={
+        "query": "Kubernetes platform engineering",
+        "scope": "job",
+        "tenantScope": "tenant-a",
+        "topK": 3,
+    })
+
+    assert retrieved.status_code == 200
+    assert retrieved.json()["evidence"] == [{
+        "evidenceId": "job-evidence-a",
+        "documentId": "job-document-a",
+        "postingId": "posting-a",
+        "blockId": "requirements",
+        "quoteHash": content_hash("Kubernetes platform engineering"),
+        "score": 0.9,
+    }]
 
 
 def test_production_app_requires_explicit_model_configuration_or_an_injected_runtime(tmp_path):

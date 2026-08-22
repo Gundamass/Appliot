@@ -33,7 +33,7 @@ interface ExtractionServicePort {
 }
 
 interface MatcherServicePort {
-  match(sessionId: string, postings: JobMatchAggregate["postings"]): Promise<unknown>;
+  match(sessionId: string): Promise<unknown>;
 }
 
 interface JobMatchServiceDependencies {
@@ -205,7 +205,7 @@ export function createJobMatchService(dependencies: JobMatchServiceDependencies)
       const guard = JobMatchMutationGuardSchema.parse(rawGuard);
       const current = requireMutation(dependencies.repository, sessionId, guard, ["awaiting_job_selection", "matching_jobs"]);
       dependencies.repository.markResultsStale(sessionId);
-      await dependencies.matcher.match(sessionId, dependencies.repository.get(sessionId, { required: true }).postings);
+      await dependencies.matcher.match(sessionId);
       dependencies.repository.mutate(sessionId, current.version, (session) => ({
         ...session,
         state: "awaiting_job_selection",

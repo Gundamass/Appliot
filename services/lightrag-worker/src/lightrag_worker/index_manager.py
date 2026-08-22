@@ -220,6 +220,12 @@ class IndexManager:
             raise ValueError("retrieval_request_invalid")
         if query.index_version is not None and not self._identifier(query.index_version):
             raise ValueError("retrieval_request_invalid")
+        if (
+            query.scope == "profile" and (query.profile_revision is None or query.posting_id is not None)
+        ) or (
+            query.scope == "job" and query.profile_revision is not None
+        ):
+            raise ValueError("retrieval_request_invalid")
 
     def _validate_index_identity(self, index_name: str, tenant_scope: str, index_version: str) -> None:
         if index_name not in ("profile_evidence", "job_requirements"):
@@ -289,6 +295,7 @@ class IndexManager:
             results.append(EvidenceReference(
                 evidence_id=record.metadata.evidence_id,
                 document_id=record.metadata.document_id,
+                posting_id=record.metadata.posting_id,
                 page=record.metadata.page,
                 block_id=record.metadata.block_id,
                 quote_hash=record.metadata.content_hash,

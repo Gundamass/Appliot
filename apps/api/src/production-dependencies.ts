@@ -30,6 +30,7 @@ import { BrowserWorkerClient } from "./browser/worker-client.js";
 import { BrowserOwnershipLease } from "./browser/browser-ownership-lease.js";
 import { createFactEmbeddingSearch } from "./rag/fact-embedding-search.js";
 import { createRestrictedToolRegistry, type RestrictedToolRegistry } from "./agent/tool-registry.js";
+import { createSqliteTraceSink } from "./agent/trace-sink.js";
 import { type AdapterHealthRegistry, type AppDependencies } from "./app.js";
 import type { ApiConfig } from "./config.js";
 import { createSqliteDatabase } from "./db/client.js";
@@ -43,6 +44,7 @@ import { createAdapterHealthRegistry, ObservedStructuredModelProvider } from "./
 import { BoundedEmbeddingTraceBuffer } from "./observability/embedding-trace.js";
 import { createExtractionCoordinator } from "./job-matching/extraction-coordinator.js";
 import { createJobMatchRepository, type JobMatchRepository } from "./job-matching/job-match-repository.js";
+import { createStructuredJobMatchAdvisor } from "./job-matching/structured-job-match-advisor.js";
 import { createJobMatchService } from "./job-matching/job-match-service.js";
 import { createMatchCoordinator } from "./job-matching/match-coordinator.js";
 import {
@@ -89,6 +91,7 @@ export function createProductionDependencies(
   };
   try {
     migrateDatabase(database);
+    const agentTraceSink = createSqliteTraceSink(database);
     const profileRepository = createProfileRepository(database);
     const documentRepository = createDocumentRepository(database);
     const originalsDirectory = resolve(dirname(resolve(config.databaseFile)), "originals");
@@ -170,6 +173,9 @@ export function createProductionDependencies(
     const structuredProvider = baseStructuredProvider === undefined
       ? undefined
       : new ObservedStructuredModelProvider(baseStructuredProvider, adapterHealth);
+    const jobMatchAdvisor = structuredProvider === undefined
+      ? undefined
+      : createStructuredJobMatchAdvisor(structuredProvider);
     const ocrEngine = config.ocr === undefined
       ? undefined
       : new RemoteOcrEngine(config.ocr, adapters);
@@ -366,6 +372,11 @@ export function createProductionDependencies(
     const matchCoordinator = createMatchCoordinator({
       repository: jobMatchRepository,
       profileFacts: profileRepository,
+      adapters: jobAdapters,
+      traceSink: agentTraceSink,
+      trace: jobMatchTrace,
+      toolRegistry: agentToolRegistry,
+      ...(jobMatchAdvisor === undefined ? {} : { advisor: jobMatchAdvisor }),
       ...(embeddingSearch === undefined ? {} : { embeddingSearch })
     });
     const jobMatchService = createJobMatchService({

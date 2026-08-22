@@ -17,6 +17,7 @@ const WorkerResponseSchema = z.object({
   evidence: z.array(z.object({
     evidenceId: z.string().min(1).max(200),
     documentId: z.string().min(1).max(200),
+    postingId: z.string().min(1).max(200).optional(),
     page: z.number().int().positive().optional(),
     blockId: z.string().min(1).max(200).optional(),
     quoteHash: z.string().regex(HASH),
@@ -31,6 +32,7 @@ export interface EvidenceRetrievalPort {
     evidence: Array<{
       evidenceId: string;
       documentId: string;
+      postingId?: string;
       page?: number;
       blockId?: string;
       quoteHash: string;
@@ -179,8 +181,8 @@ function validatePayload(
   if (
     response.scope.kind !== input.scope
     || response.scope.tenantScope !== tenantScope
-    || input.profileRevision !== undefined && response.scope.profileRevision !== input.profileRevision
-    || input.postingId !== undefined && response.scope.postingId !== input.postingId
+    || response.scope.profileRevision !== input.profileRevision
+    || response.scope.postingId !== input.postingId
     || input.indexVersion !== undefined && response.retrievalVersion !== input.indexVersion
   ) {
     throw new LightRagRetrievalError("retrieval_scope_mismatch", false);
@@ -189,6 +191,8 @@ function validatePayload(
     response.evidence.length > input.topK
     || response.evidence.some((item) => !Number.isFinite(item.score) || item.score < 0 || item.score > 1)
     || new Set(response.evidence.map((item) => item.evidenceId)).size !== response.evidence.length
+    || input.scope === "job" && response.evidence.some((item) => item.postingId === undefined)
+    || input.scope === "profile" && response.evidence.some((item) => item.postingId !== undefined)
   ) {
     throw new LightRagRetrievalError("retrieval_invalid_response", false);
   }
@@ -198,6 +202,7 @@ function validatePayload(
     evidence: response.evidence.map((item) => ({
       evidenceId: item.evidenceId,
       documentId: item.documentId,
+      ...item.postingId === undefined ? {} : { postingId: item.postingId },
       ...item.page === undefined ? {} : { page: item.page },
       ...item.blockId === undefined ? {} : { blockId: item.blockId },
       quoteHash: item.quoteHash,
@@ -255,6 +260,8 @@ function validateInput(input: unknown): EvidenceRetrievalRequest {
     || profileRevision !== undefined && (typeof profileRevision !== "number" || !Number.isInteger(profileRevision) || profileRevision < 1)
     || postingId !== undefined && !nonEmpty(postingId)
     || indexVersion !== undefined && !nonEmpty(indexVersion)
+    || scope === "profile" && (profileRevision === undefined || postingId !== undefined)
+    || scope === "job" && profileRevision !== undefined
   ) {
     throw new LightRagRetrievalError("retrieval_invalid_response", false);
   }

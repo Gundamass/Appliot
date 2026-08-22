@@ -1,10 +1,14 @@
 import type {
   JobExpectationSnapshot,
+  JobMatchResult,
   JobPosting,
   JobRequirement,
   ProfileFact
 } from "@resume/contracts";
+import { mokaJobAdapter } from "@resume/job-matching";
 import { describe, expect, it, vi } from "vitest";
+import type { TraceSink } from "../agent/trace-sink.js";
+import { BoundedJobMatchTraceBuffer } from "../observability/job-match-trace.js";
 import type { JobMatchAggregate, JobMatchRepository } from "./job-match-repository.js";
 import { createMatchCoordinator } from "./match-coordinator.js";
 
@@ -63,6 +67,8 @@ function aggregate(postings: JobPosting[]): JobMatchAggregate {
     executionEpoch: 1,
     createdAt: "2026-08-16T00:00:00.000Z",
     updatedAt: "2026-08-16T00:00:00.000Z",
+    source: "moka",
+    adapterVersion: "moka-job-v1",
     expectation,
     postings,
     results: [],
@@ -77,20 +83,32 @@ function harness(options: {
   advise?: ReturnType<typeof vi.fn>;
 }) {
   const saveResults = vi.fn();
+  let current = aggregate(options.postings);
   const repository: Pick<JobMatchRepository, "get" | "saveResults"> = {
-    get: vi.fn(() => aggregate(options.postings)) as JobMatchRepository["get"],
-    saveResults
+    get: vi.fn(() => current) as JobMatchRepository["get"],
+    saveResults: vi.fn((_sessionId: string, results: JobMatchResult[]) => {
+      current = { ...current, results };
+      saveResults(_sessionId, results);
+    })
   };
   const advisor = { advise: options.advise ?? vi.fn() };
+  const traceSink: TraceSink = {
+    record: vi.fn(() => "trace-1"),
+    list: vi.fn(() => [])
+  };
+  const trace = new BoundedJobMatchTraceBuffer();
   const coordinator = createMatchCoordinator({
     repository,
     profileFacts: { listForTask: vi.fn(() => options.facts ?? []) },
+    adapters: [mokaJobAdapter],
+    traceSink,
+    trace,
     ...(options.embeddingSearch === undefined
       ? {}
       : { embeddingSearch: { search: options.embeddingSearch } }),
     advisor
   });
-  return { coordinator, saveResults, advisor };
+  return { coordinator, saveResults, advisor, traceSink, trace };
 }
 
 describe("MatchCoordinator", () => {
@@ -178,5 +196,22 @@ describe("MatchCoordinator", () => {
 
     expect(output.recommended.map((item) => item.postingId)).toEqual(["normal"]);
     expect(output.conflicts.map((item) => item.postingId)).toEqual(["conflict"]);
+  });
+
+  it("delegates matching to the graph subgraph and mirrors its audit events", async () => {
+    const req = requirement("java", "skill", "java");
+    const value = harness({
+      postings: [posting([req])],
+      facts: [fact("java-fact", "java")]
+    });
+
+    const output = await value.coordinator.match("session-1", [posting([req])]);
+
+    expect(output.recommended.map((item) => item.postingId)).toEqual(["posting-1"]);
+    expect(value.traceSink.record).toHaveBeenCalledWith(expect.objectContaining({
+      node: "rank_and_persist",
+      reasonCode: "job_matches_persisted"
+    }));
+    expect(value.trace.snapshot().map((event) => event.stage)).toContain("rank_and_persist");
   });
 });

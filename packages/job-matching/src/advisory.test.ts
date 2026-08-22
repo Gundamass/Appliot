@@ -1,5 +1,5 @@
 import type { JobRequirement } from "@resume/contracts";
-import { describe, expect, it } from "vitest";
+import { describe, expect, expectTypeOf, it } from "vitest";
 import { UNKNOWN_ADVISORY, validateAdvisory } from "./advisory.js";
 
 const requirement: JobRequirement = {
@@ -11,6 +11,16 @@ const requirement: JobRequirement = {
 };
 
 describe("validateAdvisory", () => {
+  it("exposes only outcomes that semantic arbitration may produce", () => {
+    const advisory = validateAdvisory(requirement, ["e1"], {
+      outcome: "satisfied",
+      confidence: 0.95,
+      evidenceIds: ["e1"]
+    });
+
+    expectTypeOf(advisory.outcome).toEqualTypeOf<"satisfied" | "unknown">();
+  });
+
   it("accepts a high-confidence advisory limited to retrieved evidence", () => {
     expect(validateAdvisory(requirement, ["e1", "e2", "e3"], {
       outcome: "satisfied",

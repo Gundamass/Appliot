@@ -1,5 +1,6 @@
 import { createHash } from "node:crypto";
 import type { JobSource } from "@resume/contracts";
+import type { TraceSink } from "../agent/trace-sink.js";
 
 export interface JobMatchTraceInput {
   sessionId: string;
@@ -28,6 +29,31 @@ export interface JobMatchTraceEvent {
 
 export interface JobMatchTraceSink {
   record(event: JobMatchTraceInput): void;
+}
+
+export function createJobMatchTraceMirror(primary: TraceSink, compatibility?: JobMatchTraceSink): TraceSink {
+  if (compatibility === undefined) return primary;
+  return {
+    record(input) {
+      const id = primary.record(input);
+      try {
+        compatibility.record({
+          sessionId: input.taskId,
+          stage: input.node,
+          ...(input.counts === undefined ? {} : { counts: input.counts }),
+          ...(input.durationMs === undefined ? {} : { durationMs: input.durationMs }),
+          ...(input.contentHash === undefined ? {} : { contentHash: input.contentHash }),
+          ...(input.outcome === "failed" || input.kind === "safety_block" ? { errorCode: input.reasonCode } : {})
+        });
+      } catch {
+        // A compatibility view must not alter the authoritative audit path.
+      }
+      return id;
+    },
+    list(runId) {
+      return primary.list(runId);
+    }
+  };
 }
 
 export class BoundedJobMatchTraceBuffer implements JobMatchTraceSink {

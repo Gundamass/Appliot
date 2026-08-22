@@ -158,6 +158,7 @@ def create_app(manager: IndexManager, settings: WorkerSettings) -> FastAPI:
                 {
                     "evidenceId": item.evidence_id,
                     "documentId": item.document_id,
+                    **({"postingId": item.posting_id} if item.posting_id is not None else {}),
                     **({"page": item.page} if item.page is not None else {}),
                     **({"blockId": item.block_id} if item.block_id is not None else {}),
                     "quoteHash": item.quote_hash,

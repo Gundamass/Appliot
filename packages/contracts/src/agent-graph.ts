@@ -23,13 +23,21 @@ export const ResumeIngestionStateSchema = z.object({
   pageSources: z.array(z.enum(["pdf", "ocr"])).optional(), candidateFactIds: z.array(z.string()).optional(),
   acceptedFactIds: z.array(z.string()).optional(), publishedProfileRevision: z.number().int().positive().optional()
 }).strict();
+export const JobRequirementAdvisoryStateSchema = z.object({
+  outcome: z.enum(["satisfied", "unknown"]),
+  confidence: z.number().min(0).max(1),
+  evidenceIds: z.array(z.string().min(1)).max(3)
+}).strict();
 export const JobMatchingStateSchema = z.object({
   sessionId: z.string(), postingIds: z.array(z.string()).optional(),
   recommendedResultIds: z.array(z.string()).optional(), conflictResultIds: z.array(z.string()).optional(),
   adapterVersion: z.string().optional(), scoringVersion: z.literal("job-match-v1").optional(),
   retrievalProvider: z.enum(["lightrag", "deterministic_fallback"]).optional(),
   retrievalVersion: z.string().optional(), retrievalHealthy: z.boolean().optional(),
-  fallbackUsed: z.boolean().optional()
+  fallbackUsed: z.boolean().optional(), embeddingHealthy: z.boolean().optional(),
+  advisories: z.array(z.object({
+    postingId: z.string().min(1), requirementId: z.string().min(1), advisory: JobRequirementAdvisoryStateSchema
+  }).strict()).max(100).optional()
 }).strict();
 export const ApplicationExecutionStateSchema = z.object({
   applicationUrl: z.string().url(), snapshotId: z.string().optional(), executionEpoch: z.number().int().nonnegative(),
@@ -62,6 +70,7 @@ export type HumanInterrupt = z.infer<typeof HumanInterruptSchema>;
 export type HumanResume = z.infer<typeof HumanResumeSchema>;
 export type GraphError = z.infer<typeof GraphErrorSchema>;
 export type ResumeIngestionState = z.infer<typeof ResumeIngestionStateSchema>;
+export type JobRequirementAdvisoryState = z.infer<typeof JobRequirementAdvisoryStateSchema>;
 export type JobMatchingState = z.infer<typeof JobMatchingStateSchema>;
 export type ApplicationExecutionState = z.infer<typeof ApplicationExecutionStateSchema>;
 export type AgentGraphState = z.infer<typeof AgentGraphStateSchema>;
