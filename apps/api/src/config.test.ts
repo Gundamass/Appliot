@@ -105,6 +105,28 @@ describe("API configuration", () => {
     });
   });
 
+  it("loads a local LightRAG retrieval worker only from its complete configuration group", () => {
+    expect(loadConfig({
+      LIGHTRAG_RETRIEVAL_API_TOKEN: "lightrag-test-token",
+      LIGHTRAG_RETRIEVAL_BASE_URL: "http://127.0.0.1:43122",
+      LIGHTRAG_RETRIEVAL_TENANT_SCOPE: "tenant-a",
+      LIGHTRAG_RETRIEVAL_TIMEOUT_MS: "15000"
+    }).lightRag).toEqual({
+      apiToken: "lightrag-test-token",
+      baseUrl: "http://127.0.0.1:43122",
+      tenantScope: "tenant-a",
+      timeoutMs: 15_000
+    });
+    expect(loadConfig({}).lightRag).toBeUndefined();
+    expect(() => loadConfig({ LIGHTRAG_RETRIEVAL_BASE_URL: "http://127.0.0.1:43122" }))
+      .toThrow("LIGHTRAG_RETRIEVAL_API_TOKEN");
+    expect(() => loadConfig({
+      LIGHTRAG_RETRIEVAL_API_TOKEN: "lightrag-test-token",
+      LIGHTRAG_RETRIEVAL_BASE_URL: "http://example.test:43122",
+      LIGHTRAG_RETRIEVAL_TENANT_SCOPE: "tenant-a"
+    })).toThrow("LIGHTRAG_RETRIEVAL_BASE_URL");
+  });
+
   it("allows absent remote groups but rejects partial groups without reflecting secrets", () => {
     expect(loadConfig({}).embedding).toBeUndefined();
     expect(loadConfig({}).ocr).toBeUndefined();

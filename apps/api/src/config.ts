@@ -27,6 +27,13 @@ export interface RemoteOcrAdapterConfig {
   timeoutMs: number;
 }
 
+export interface LightRagRetrievalAdapterConfig {
+  apiToken: string;
+  baseUrl: string;
+  tenantScope: string;
+  timeoutMs: number;
+}
+
 export interface LangSmithConfig {
   enabled: boolean;
   apiKey?: string;
@@ -42,6 +49,7 @@ export interface ApiConfig {
   deepseek?: DeepSeekAdapterConfig;
   embedding?: RemoteEmbeddingAdapterConfig;
   ocr?: RemoteOcrAdapterConfig;
+  lightRag?: LightRagRetrievalAdapterConfig;
   langsmith: LangSmithConfig;
 }
 
@@ -106,6 +114,13 @@ const ocrSchema = z.object({
   baseUrl: loopbackTunnelUrl(43121),
   model: z.literal("deepseek-ai/DeepSeek-OCR-2"),
   modelRevision: z.literal("aaa02f3811945a91062062994c5c4a3f4c0af2b0"),
+  timeoutMs: positiveInteger
+});
+
+const lightRagSchema = z.object({
+  apiToken: nonEmptyString,
+  baseUrl: loopbackTunnelUrl(43122),
+  tenantScope: nonEmptyString.max(200),
   timeoutMs: positiveInteger
 });
 
@@ -233,6 +248,27 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     }
   }
 
+  const hasLightRag = Object.keys(env).some((name) => name.startsWith("LIGHTRAG_RETRIEVAL_"));
+  let lightRag: LightRagRetrievalAdapterConfig | undefined;
+  if (hasLightRag) {
+    const result = lightRagSchema.safeParse({
+      apiToken: env.LIGHTRAG_RETRIEVAL_API_TOKEN,
+      baseUrl: env.LIGHTRAG_RETRIEVAL_BASE_URL,
+      tenantScope: env.LIGHTRAG_RETRIEVAL_TENANT_SCOPE,
+      timeoutMs: env.LIGHTRAG_RETRIEVAL_TIMEOUT_MS ?? "15000"
+    });
+    if (!result.success) {
+      coreErrors.push(...invalidVariables(result, {
+        apiToken: "LIGHTRAG_RETRIEVAL_API_TOKEN",
+        baseUrl: "LIGHTRAG_RETRIEVAL_BASE_URL",
+        tenantScope: "LIGHTRAG_RETRIEVAL_TENANT_SCOPE",
+        timeoutMs: "LIGHTRAG_RETRIEVAL_TIMEOUT_MS"
+      }));
+    } else {
+      lightRag = result.data;
+    }
+  }
+
   if (coreErrors.length > 0) throw new ConfigurationError([...new Set(coreErrors)]);
   if (!langsmithResult.success) throw new ConfigurationError(["LANGSMITH_CONFIGURATION"]);
   const langsmith: LangSmithConfig = {
@@ -249,6 +285,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     ...(deepseek ? { deepseek } : {}),
     ...(embedding ? { embedding } : {}),
     ...(ocr ? { ocr } : {}),
+    ...(lightRag ? { lightRag } : {}),
     langsmith
   };
 }

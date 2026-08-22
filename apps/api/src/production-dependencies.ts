@@ -29,6 +29,7 @@ import { createTaskEventBus } from "./applications/task-events.js";
 import { BrowserWorkerClient } from "./browser/worker-client.js";
 import { BrowserOwnershipLease } from "./browser/browser-ownership-lease.js";
 import { createFactEmbeddingSearch } from "./rag/fact-embedding-search.js";
+import { createRestrictedToolRegistry, type RestrictedToolRegistry } from "./agent/tool-registry.js";
 import { type AdapterHealthRegistry, type AppDependencies } from "./app.js";
 import type { ApiConfig } from "./config.js";
 import { createSqliteDatabase } from "./db/client.js";
@@ -44,6 +45,12 @@ import { createExtractionCoordinator } from "./job-matching/extraction-coordinat
 import { createJobMatchRepository, type JobMatchRepository } from "./job-matching/job-match-repository.js";
 import { createJobMatchService } from "./job-matching/job-match-service.js";
 import { createMatchCoordinator } from "./job-matching/match-coordinator.js";
+import {
+  createLightRagEvidenceRetrievalClient,
+  LightRagRetrievalError,
+  type EvidenceRetrievalPort,
+  type EvidenceRetrievalRequest
+} from "./job-matching/lightrag-retrieval-client.js";
 import { BoundedJobMatchTraceBuffer } from "./observability/job-match-trace.js";
 
 type ProductionBrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
@@ -52,6 +59,7 @@ type ProductionBrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "e
 
 export interface ProductionAdapterDependencies {
   fetch?: typeof globalThis.fetch;
+  evidenceRetrievalFallback?: EvidenceRetrievalPort;
   browserClient?: ProductionBrowserClient;
   browserClientFactory?: () => Promise<ProductionBrowserClient>;
 }
@@ -62,6 +70,8 @@ export interface ProductionDependencies extends AppDependencies {
   jobMatchService: ReturnType<typeof createJobMatchService>;
   jobMatchTrace: BoundedJobMatchTraceBuffer;
   browserOwnershipLease: BrowserOwnershipLease;
+  evidenceRetrieval: EvidenceRetrievalPort;
+  agentToolRegistry: RestrictedToolRegistry;
 }
 
 export function createProductionDependencies(
@@ -217,6 +227,18 @@ export function createProductionDependencies(
       repository: profileRepository,
       ...(embeddingSearch === undefined ? {} : { embeddingSearch })
     });
+    const evidenceRetrieval: EvidenceRetrievalPort = config.lightRag === undefined
+      ? unavailableEvidenceRetrieval
+      : createLightRagEvidenceRetrievalClient(config.lightRag, {
+          ...(adapters.fetch === undefined ? {} : { fetch: adapters.fetch }),
+          ...(adapters.evidenceRetrievalFallback === undefined ? {} : { fallback: adapters.evidenceRetrievalFallback })
+        });
+    const agentToolRegistry = createRestrictedToolRegistry({
+      retrieve_job_evidence: {
+        allowedCallers: ["graph"],
+        handler: (input) => evidenceRetrieval.retrieve(input as EvidenceRetrievalRequest)
+      }
+    });
     const resolveApplicationField = createProductionFieldResolver({
       semanticResolver: fieldSemanticResolver,
       ragService,
@@ -370,6 +392,8 @@ export function createProductionDependencies(
       jobMatchRepository,
       jobMatchService,
       jobMatchTrace,
+      evidenceRetrieval,
+      agentToolRegistry,
       profileRepository,
       originalDocumentStore: createLocalOriginalDocumentStore(originalsDirectory),
       avatarStore: createLocalAvatarStore(originalsDirectory),
@@ -412,5 +436,11 @@ export function createProductionDependencies(
 }
 
 function noop(): void {}
+
+const unavailableEvidenceRetrieval: EvidenceRetrievalPort = Object.freeze({
+  async retrieve() {
+    throw new LightRagRetrievalError("retrieval_unavailable", true);
+  }
+});
 
 export { createProductionFieldResolver, fieldPathForApplicationAnswer } from "./applications/production-field-resolver.js";
