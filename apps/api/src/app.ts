@@ -22,6 +22,8 @@ import type { TaskEventBus } from "./applications/task-events.js";
 import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
 import { registerJobMatchRoutes } from "./job-matching/routes.js";
 import type { createJobMatchService } from "./job-matching/job-match-service.js";
+import { registerConversationRoutes } from "./conversations/conversation-routes.js";
+import type { ConversationService } from "./conversations/conversation-service.js";
 
 export type { AdapterHealthRegistry } from "./health/adapter-health.js";
 
@@ -40,6 +42,7 @@ export interface AppDependencies {
   adapterHealth: AdapterHealthRegistry;
   applicationService?: ApplicationService;
   jobMatchService?: ReturnType<typeof createJobMatchService>;
+  conversationService?: ConversationService;
   taskEvents?: TaskEventBus;
   applicationSseHeartbeatMs?: number;
   close?(): void | Promise<void>;
@@ -93,6 +96,9 @@ export async function createApp(dependencies: CreateAppDependencies) {
   }
   if (dependencies.jobMatchService) {
     registerJobMatchRoutes(app, { service: dependencies.jobMatchService });
+  }
+  if (dependencies.conversationService) {
+    registerConversationRoutes(app, { service: dependencies.conversationService });
   }
   return app;
 }

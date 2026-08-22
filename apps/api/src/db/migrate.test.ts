@@ -14,9 +14,11 @@ describe("migrateDatabase", () => {
       WHERE type = 'table' AND name LIKE 'conversation_%'
       ORDER BY name
     `).all()).toEqual([
+      { name: "conversation_confirmations" },
       { name: "conversation_contexts" },
       { name: "conversation_messages" },
-      { name: "conversation_sessions" }
+      { name: "conversation_sessions" },
+      { name: "conversation_turns" }
     ]);
     expect(database.prepare(`
       SELECT name FROM sqlite_master
@@ -25,7 +27,9 @@ describe("migrateDatabase", () => {
     `).all()).toEqual(expect.arrayContaining([
       { name: "conversation_messages_session_sequence_unique" },
       { name: "conversation_messages_session_id_idx" },
-      { name: "conversation_contexts_session_id_idx" }
+      { name: "conversation_contexts_session_id_idx" },
+      { name: "conversation_confirmations_conversation_status_idx" },
+      { name: "conversation_turns_conversation_request_unique" }
     ]));
     expect(database.prepare("PRAGMA foreign_key_list(conversation_messages)").all())
       .toContainEqual(expect.objectContaining({ from: "session_id", table: "conversation_sessions", on_delete: "CASCADE" }));

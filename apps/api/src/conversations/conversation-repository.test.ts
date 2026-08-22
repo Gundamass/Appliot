@@ -4,6 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
+import { ConversationConfirmationSchema } from "@resume/contracts";
 import { migrateDatabase } from "../db/migrate.js";
 import { createConversationRepository } from "./conversation-repository.js";
 
@@ -126,6 +127,29 @@ describe("conversation repository", () => {
       message: userMessage("missing-session", "orphan")
     })).toThrow("conversation_not_found");
     expect(() => repository.getContext("missing-session")).toThrow("conversation_not_found");
+    database.close();
+  });
+
+  it("persists confirmation tokens and consumes each token once", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createConversationRepository(database);
+    const session = repository.createConversation();
+    const confirmation = ConversationConfirmationSchema.parse({
+      confirmationId: "confirmation-1",
+      action: "start_application",
+      target: {
+        kind: "recommendation",
+        sessionId: "match-1",
+        resultId: "result-1",
+        postingContentHash: "hash-1"
+      }
+    });
+
+    repository.putConfirmation(session.id, confirmation);
+    expect(repository.peekConfirmation(session.id, confirmation.confirmationId)).toEqual(confirmation);
+    expect(repository.consumeConfirmation(session.id, confirmation.confirmationId)).toEqual(confirmation);
+    expect(repository.consumeConfirmation(session.id, confirmation.confirmationId)).toBeUndefined();
     database.close();
   });
 });

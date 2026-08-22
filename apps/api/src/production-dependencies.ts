@@ -61,6 +61,9 @@ import {
   type EvidenceRetrievalRequest
 } from "./job-matching/lightrag-retrieval-client.js";
 import { BoundedJobMatchTraceBuffer } from "./observability/job-match-trace.js";
+import { createConversationGraph } from "./conversations/conversation-graph.js";
+import { createConversationRepository } from "./conversations/conversation-repository.js";
+import { createConversationService, type ConversationService } from "./conversations/conversation-service.js";
 
 type ProductionBrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
   & Partial<Pick<BrowserWorkerClient,
@@ -81,6 +84,7 @@ export interface ProductionDependencies extends AppDependencies {
   browserOwnershipLease: BrowserOwnershipLease;
   evidenceRetrieval: EvidenceRetrievalPort;
   agentToolRegistry: RestrictedToolRegistry;
+  conversationService: ConversationService;
 }
 
 export function createProductionDependencies(
@@ -102,6 +106,7 @@ export function createProductionDependencies(
     const agentCheckpointer = new SqliteAgentCheckpointer(database);
     const profileRepository = createProfileRepository(database);
     const documentRepository = createDocumentRepository(database);
+    const conversationRepository = createConversationRepository(database);
     const originalsDirectory = resolve(dirname(resolve(config.databaseFile)), "originals");
     const approvalKey = randomBytes(32);
     const actionPolicy = new ActionPolicy(approvalKey);
@@ -478,6 +483,30 @@ export function createProductionDependencies(
       trace: jobMatchTrace,
       prepareApplicationTask: (input) => applicationService.start(input)
     });
+    const conversationGraph = createConversationGraph({
+      jobMatchRepository,
+      applicationTasks: taskRepository,
+      applicationService,
+      jobMatchService,
+      checkpointer: agentCheckpointer,
+      traceSink: agentTraceSink,
+      ...(structuredProvider === undefined ? {} : { modelProvider: structuredProvider }),
+      confirmationStore: {
+        put(conversationId, confirmation) {
+          conversationRepository.putConfirmation(conversationId, confirmation);
+        },
+        peek(conversationId, confirmationId) {
+          return conversationRepository.peekConfirmation(conversationId, confirmationId);
+        },
+        consume(conversationId, confirmationId) {
+          return conversationRepository.consumeConfirmation(conversationId, confirmationId);
+        }
+      }
+    });
+    const conversationService = createConversationService({
+      repository: conversationRepository,
+      graph: conversationGraph
+    });
 
     return {
       database,
@@ -487,6 +516,7 @@ export function createProductionDependencies(
       jobMatchTrace,
       evidenceRetrieval,
       agentToolRegistry,
+      conversationService,
       profileRepository,
       originalDocumentStore: createLocalOriginalDocumentStore(originalsDirectory),
       avatarStore: createLocalAvatarStore(originalsDirectory),

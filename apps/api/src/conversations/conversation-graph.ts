@@ -62,9 +62,9 @@ export interface ConversationGraphDependencies extends ConversationToolDependenc
 }
 
 export interface ConversationConfirmationStore {
-  put(value: ConversationConfirmation): void;
-  peek(id: string): ConversationConfirmation | undefined;
-  consume(id: string): ConversationConfirmation | undefined;
+  put(conversationId: string, value: ConversationConfirmation): void;
+  peek(conversationId: string, id: string): ConversationConfirmation | undefined;
+  consume(conversationId: string, id: string): ConversationConfirmation | undefined;
 }
 
 export interface ConversationGraphOutput {
@@ -219,7 +219,7 @@ async function classifyIntent(
   state: GraphState
 ): Promise<Partial<GraphState>> {
   if (state.inputKind === "confirmation") {
-    const pending = confirmations.peek(state.confirmationId!);
+    const pending = confirmations.peek(state.conversationId, state.confirmationId!);
     if (pending === undefined) {
       return {
         intent: unknownIntent(),
@@ -271,7 +271,7 @@ function resolveTarget(
 ): Partial<GraphState> {
   const intent = state.intent ?? unknownIntent();
   if (state.inputKind === "confirmation") {
-    const pending = confirmations.peek(state.confirmationId!);
+    const pending = confirmations.peek(state.conversationId, state.confirmationId!);
     if (pending === undefined) return { resolutionError: "confirmation_invalid" };
     const target = resolveRecommendationByIds(dependencies, pending.target.sessionId, pending.target.resultId);
     if (target.error !== undefined || target.value === undefined) {
@@ -399,7 +399,7 @@ async function prepareSideEffect(
   state: GraphState
 ): Promise<Partial<GraphState>> {
   if (state.inputKind === "confirmation") {
-    const pending = confirmations.consume(state.confirmationId!);
+    const pending = confirmations.consume(state.conversationId, state.confirmationId!);
     if (pending === undefined) {
       return {
         cards: [],
@@ -476,7 +476,7 @@ async function prepareSideEffect(
       postingContentHash: state.target.postingContentHash
     }
   };
-  confirmations.put(confirmation);
+  confirmations.put(state.conversationId, confirmation);
   const card = ConversationCardSchema.parse({
     type: "confirmation",
     action: "start_application",
@@ -761,12 +761,13 @@ function replaceValue<T>(_left: T, right: T): T {
 
 function createMemoryConfirmationStore(): ConversationConfirmationStore {
   const values = new Map<string, ConversationConfirmation>();
+  const key = (conversationId: string, confirmationId: string) => `${conversationId}\u0000${confirmationId}`;
   return {
-    put(value) { values.set(value.confirmationId, value); },
-    peek(id) { return values.get(id); },
-    consume(id) {
-      const value = values.get(id);
-      if (value !== undefined) values.delete(id);
+    put(conversationId, value) { values.set(key(conversationId, value.confirmationId), value); },
+    peek(conversationId, id) { return values.get(key(conversationId, id)); },
+    consume(conversationId, id) {
+      const value = values.get(key(conversationId, id));
+      if (value !== undefined) values.delete(key(conversationId, id));
       return value;
     }
   };

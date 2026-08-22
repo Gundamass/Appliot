@@ -1,11 +1,15 @@
 import { randomUUID } from "node:crypto";
 import {
+  ConversationConfirmationSchema,
   ConversationContextSchema,
   ConversationMessageSchema,
   ConversationSessionSchema,
+  ConversationTurnResponseSchema,
+  type ConversationConfirmation,
   type ConversationContext,
   type ConversationMessage,
-  type ConversationSession
+  type ConversationSession,
+  type ConversationTurnResponse
 } from "@resume/contracts";
 import type { SqliteDatabase } from "../db/client.js";
 
@@ -20,6 +24,28 @@ export interface ConversationRepository {
   }): ConversationMessage;
   getContext(id: string): ConversationContext;
   updateContext(id: string, expectedVersion: number, next: ConversationContext): ConversationContext;
+  getTurn(conversationId: string, requestId: string): ConversationTurnRecord | undefined;
+  appendTurn(input: {
+    conversationId: string;
+    requestId: string;
+    inputText: string;
+    userMessage: ConversationMessage;
+    assistantMessage: ConversationMessage;
+    expectedSequence: number;
+    expectedContextVersion: number;
+    context: ConversationContext;
+    response: ConversationTurnResponse;
+  }): ConversationTurnRecord;
+  putConfirmation(conversationId: string, confirmation: ConversationConfirmation): void;
+  peekConfirmation(conversationId: string, confirmationId: string): ConversationConfirmation | undefined;
+  consumeConfirmation(conversationId: string, confirmationId: string): ConversationConfirmation | undefined;
+}
+
+export interface ConversationTurnRecord {
+  requestId: string;
+  inputText: string;
+  response: ConversationTurnResponse;
+  createdAt: string;
 }
 
 interface SessionRow {
@@ -45,6 +71,23 @@ interface ContextRow {
   version: number;
   context_json: string;
   updated_at: string;
+}
+
+interface TurnRow {
+  conversation_id: string;
+  request_id: string;
+  input_text: string;
+  response_json: string;
+  created_at: string;
+}
+
+interface ConfirmationRow {
+  confirmation_id: string;
+  conversation_id: string;
+  payload_json: string;
+  status: "pending" | "consumed";
+  created_at: string;
+  consumed_at: string | null;
 }
 
 const DEFAULT_CONVERSATION_TITLE = "New conversation";
@@ -79,6 +122,30 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
     UPDATE conversation_contexts
     SET version = ?, context_json = ?, updated_at = ?
     WHERE session_id = ? AND version = ?
+  `);
+  const findTurn = database.prepare(`
+    SELECT * FROM conversation_turns
+    WHERE conversation_id = ? AND request_id = ?
+  `);
+  const insertTurn = database.prepare(`
+    INSERT INTO conversation_turns
+      (conversation_id, request_id, input_text, response_json, created_at)
+    VALUES (?, ?, ?, ?, ?)
+  `);
+  const findConfirmation = database.prepare(`
+    SELECT * FROM conversation_confirmations
+    WHERE confirmation_id = ?
+  `);
+  const insertConfirmation = database.prepare(`
+    INSERT INTO conversation_confirmations
+      (confirmation_id, conversation_id, payload_json, status, created_at, consumed_at)
+    VALUES (?, ?, ?, 'pending', ?, NULL)
+    ON CONFLICT(confirmation_id) DO NOTHING
+  `);
+  const consumeConfirmationRow = database.prepare(`
+    UPDATE conversation_confirmations
+    SET status = 'consumed', consumed_at = ?
+    WHERE confirmation_id = ? AND conversation_id = ? AND status = 'pending'
   `);
 
   const createTransaction = database.transaction((session: ConversationSession, context: ConversationContext) => {
@@ -150,6 +217,87 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
     return context;
   });
 
+  const appendTurnTransaction = database.transaction((input: {
+    conversationId: string;
+    requestId: string;
+    inputText: string;
+    userMessage: ConversationMessage;
+    assistantMessage: ConversationMessage;
+    expectedSequence: number;
+    expectedContextVersion: number;
+    context: ConversationContext;
+    response: ConversationTurnResponse;
+  }): ConversationTurnRecord => {
+    requireSession(findSession.get(input.conversationId) as SessionRow | undefined);
+    validateRequestId(input.requestId);
+    const existing = findTurn.get(input.conversationId, input.requestId) as TurnRow | undefined;
+    if (existing !== undefined) {
+      if (existing.input_text !== input.inputText) throw new Error("conversation_idempotency_conflict");
+      return fromTurnRow(existing);
+    }
+    if (!Number.isSafeInteger(input.expectedSequence) || input.expectedSequence < 0) {
+      throw new Error("conversation_sequence_conflict");
+    }
+    const nextSequence = (nextSequenceStatement.get(input.conversationId) as { sequence: number }).sequence;
+    if (nextSequence !== input.expectedSequence + 1) {
+      throw new Error("conversation_sequence_conflict");
+    }
+    if (input.userMessage.sessionId !== input.conversationId
+      || input.assistantMessage.sessionId !== input.conversationId
+      || input.userMessage.role !== "user"
+      || input.assistantMessage.role !== "assistant"
+      || input.userMessage.sequence !== nextSequence
+      || input.assistantMessage.sequence !== nextSequence + 1) {
+      throw new Error("conversation_sequence_conflict");
+    }
+    const context = ConversationContextSchema.parse(input.context);
+    const storedContext = findContext.get(input.conversationId) as ContextRow | undefined;
+    if (storedContext === undefined || storedContext.version !== input.expectedContextVersion) {
+      throw new Error("conversation_context_conflict");
+    }
+    if (context.version !== input.expectedContextVersion + 1) {
+      throw new Error("conversation_context_version_invalid");
+    }
+    const response = ConversationTurnResponseSchema.parse(input.response);
+    if (response.context.version !== context.version) throw new Error("conversation_context_conflict");
+    if (response.message.id !== input.assistantMessage.id) throw new Error("conversation_message_mismatch");
+    insertStoredMessage(input.userMessage);
+    insertStoredMessage(input.assistantMessage);
+    if (updateContextRow.run(
+      context.version,
+      JSON.stringify(context),
+      new Date().toISOString(),
+      input.conversationId,
+      input.expectedContextVersion
+    ).changes !== 1) {
+      throw new Error("conversation_context_conflict");
+    }
+    touchSession.run(new Date().toISOString(), input.conversationId);
+    insertTurn.run(input.conversationId, input.requestId, input.inputText, JSON.stringify(response), new Date().toISOString());
+    return {
+      requestId: input.requestId,
+      inputText: input.inputText,
+      response,
+      createdAt: new Date().toISOString()
+    };
+  });
+
+  const nextSequenceStatement = nextSequence;
+
+  function insertStoredMessage(message: ConversationMessage): void {
+    const parsed = ConversationMessageSchema.parse(message);
+    insertMessage.run(
+      parsed.id,
+      parsed.sessionId,
+      parsed.sequence,
+      parsed.role,
+      parsed.text,
+      JSON.stringify(parsed.cards),
+      parsed.intent === undefined ? null : JSON.stringify(parsed.intent),
+      parsed.createdAt
+    );
+  }
+
   return {
     createConversation() {
       const timestamp = new Date().toISOString();
@@ -190,6 +338,55 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
 
     updateContext(id, expectedVersion, next) {
       return updateContextTransaction(id, expectedVersion, next);
+    },
+
+    getTurn(conversationId, requestId) {
+      requireSession(findSession.get(conversationId) as SessionRow | undefined);
+      validateRequestId(requestId);
+      const row = findTurn.get(conversationId, requestId) as TurnRow | undefined;
+      return row === undefined ? undefined : fromTurnRow(row);
+    },
+
+    appendTurn(input) {
+      return appendTurnTransaction(input);
+    },
+
+    putConfirmation(conversationId, confirmation) {
+      requireSession(findSession.get(conversationId) as SessionRow | undefined);
+      const parsed = ConversationConfirmationSchema.parse(confirmation);
+      insertConfirmation.run(
+        parsed.confirmationId,
+        conversationId,
+        JSON.stringify(parsed),
+        new Date().toISOString()
+      );
+      const row = findConfirmation.get(parsed.confirmationId) as ConfirmationRow | undefined;
+      if (row === undefined || row.conversation_id !== conversationId) {
+        throw new Error("conversation_confirmation_conflict");
+      }
+      const existing = ConversationConfirmationSchema.parse(parseJson(row.payload_json, "conversation_confirmation_corrupt"));
+      if (JSON.stringify(existing) !== JSON.stringify(parsed)) {
+        throw new Error("conversation_confirmation_conflict");
+      }
+    },
+
+    peekConfirmation(conversationId, confirmationId) {
+      requireSession(findSession.get(conversationId) as SessionRow | undefined);
+      const row = findConfirmation.get(confirmationId) as ConfirmationRow | undefined;
+      if (row === undefined || row.conversation_id !== conversationId || row.status !== "pending") return undefined;
+      return ConversationConfirmationSchema.parse(parseJson(row.payload_json, "conversation_confirmation_corrupt"));
+    },
+
+    consumeConfirmation(conversationId, confirmationId) {
+      requireSession(findSession.get(conversationId) as SessionRow | undefined);
+      const consumed = database.transaction(() => {
+        const row = findConfirmation.get(confirmationId) as ConfirmationRow | undefined;
+        if (row === undefined || row.conversation_id !== conversationId || row.status !== "pending") return undefined;
+        const confirmation = ConversationConfirmationSchema.parse(parseJson(row.payload_json, "conversation_confirmation_corrupt"));
+        if (consumeConfirmationRow.run(new Date().toISOString(), confirmationId, conversationId).changes !== 1) return undefined;
+        return confirmation;
+      })();
+      return consumed;
     }
   };
 }
@@ -226,6 +423,15 @@ function fromContextRow(row: ContextRow): ConversationContext {
   return context;
 }
 
+function fromTurnRow(row: TurnRow): ConversationTurnRecord {
+  return {
+    requestId: row.request_id,
+    inputText: row.input_text,
+    response: ConversationTurnResponseSchema.parse(parseJson(row.response_json, "conversation_turn_corrupt")),
+    createdAt: row.created_at
+  };
+}
+
 function parseJson(value: string, errorCode: string): unknown {
   try {
     return JSON.parse(value) as unknown;
@@ -237,4 +443,10 @@ function parseJson(value: string, errorCode: string): unknown {
 function requireSession(row: SessionRow | undefined): SessionRow {
   if (!row) throw new Error("conversation_not_found");
   return row;
+}
+
+function validateRequestId(value: string): void {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 256) {
+    throw new Error("conversation_request_invalid");
+  }
 }

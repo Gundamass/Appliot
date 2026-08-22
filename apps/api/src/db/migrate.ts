@@ -400,6 +400,28 @@ export function migrateDatabase(database: SqliteDatabase): void {
     );
     CREATE INDEX IF NOT EXISTS conversation_contexts_session_id_idx
       ON conversation_contexts(session_id);
+
+    CREATE TABLE IF NOT EXISTS conversation_turns (
+      conversation_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      request_id TEXT NOT NULL,
+      input_text TEXT NOT NULL,
+      response_json TEXT NOT NULL CHECK (json_valid(response_json) AND json_type(response_json) = 'object'),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (conversation_id, request_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS conversation_turns_conversation_request_unique
+      ON conversation_turns(conversation_id, request_id);
+
+    CREATE TABLE IF NOT EXISTS conversation_confirmations (
+      confirmation_id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json) AND json_type(payload_json) = 'object'),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'consumed')),
+      created_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS conversation_confirmations_conversation_status_idx
+      ON conversation_confirmations(conversation_id, status, created_at);
   `);
 
   const agentCheckpointColumns = database.prepare("PRAGMA table_info(agent_checkpoints)").all() as Array<{ name: string }>;
