@@ -7,12 +7,14 @@ export interface StoredApplicationTask {
   applicationUrl: string;
   createdAt: string;
   updatedAt: string;
+  orchestrator: ApplicationTaskOrchestrator;
   profileRevisionApplied: number;
   profileSyncStatus: ProfileSyncStatus;
   profileSyncError?: string;
 }
 
 export type ProfileSyncStatus = "current" | "pending" | "failed";
+export type ApplicationTaskOrchestrator = "xstate-v1" | "langgraph-v1";
 
 export interface ApplicationTaskRepository {
   create(input: { id: string; name?: string; applicationUrl: string }): StoredApplicationTask;
@@ -31,6 +33,7 @@ interface TaskRow {
   application_url: string;
   created_at: string;
   updated_at: string;
+  orchestrator: ApplicationTaskOrchestrator;
   profile_revision_applied: number;
   profile_sync_status: ProfileSyncStatus;
   profile_sync_error: string | null;
@@ -38,8 +41,8 @@ interface TaskRow {
 
 export function createApplicationTaskRepository(database: SqliteDatabase): ApplicationTaskRepository {
   const insert = database.prepare(`
-    INSERT INTO application_tasks (id, name, application_url, created_at, updated_at)
-    VALUES (?, ?, ?, ?, ?)
+    INSERT INTO application_tasks (id, name, application_url, created_at, updated_at, orchestrator)
+    VALUES (?, ?, ?, ?, ?, 'langgraph-v1')
   `);
   const find = database.prepare("SELECT * FROM application_tasks WHERE id = ?");
   const findAll = database.prepare("SELECT * FROM application_tasks ORDER BY created_at DESC, id ASC");
@@ -59,7 +62,7 @@ export function createApplicationTaskRepository(database: SqliteDatabase): Appli
     const name = input.name ?? suggestApplicationTaskName(input.applicationUrl);
     insert.run(input.id, name, input.applicationUrl, timestamp, timestamp);
     return {
-      ...input, name, createdAt: timestamp, updatedAt: timestamp,
+      ...input, name, createdAt: timestamp, updatedAt: timestamp, orchestrator: "langgraph-v1",
       profileRevisionApplied: 0, profileSyncStatus: "current"
     };
   };
@@ -111,6 +114,7 @@ function fromRow(row: TaskRow): StoredApplicationTask {
     applicationUrl: row.application_url,
     createdAt: row.created_at,
     updatedAt: row.updated_at,
+    orchestrator: row.orchestrator,
     profileRevisionApplied: row.profile_revision_applied,
     profileSyncStatus: row.profile_sync_status,
     ...(row.profile_sync_error === null ? {} : { profileSyncError: row.profile_sync_error })

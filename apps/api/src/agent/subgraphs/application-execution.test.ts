@@ -307,6 +307,31 @@ describe("application execution subgraph", () => {
     expect(tools.buildPlan).not.toHaveBeenCalled();
   });
 
+  it("forwards a generated content draft to the local review store before interrupting", async () => {
+    const page = snapshot({ fields: [field({ id: "self-evaluation", label: "Self evaluation" })] });
+    const onContentReview = vi.fn();
+    const graph = createApplicationExecutionSubgraph({
+      tools: toolsFixture({ page, resolution: batch(page, "content_review") }).tools,
+      traceSink: traceCollector().traceSink,
+      now: () => new Date("2026-08-22T00:00:00.000Z"),
+      onContentReview
+    });
+
+    await graph({ state: state() });
+
+    expect(onContentReview).toHaveBeenCalledWith(expect.objectContaining({
+      taskId,
+      interrupt: expect.objectContaining({ kind: "content_review", id: expect.any(String) }),
+      review: expect.objectContaining({
+        fieldId: "self-evaluation",
+        fieldLabel: "Self evaluation",
+        original: "draft",
+        draft: "draft",
+        status: "needs_review"
+      })
+    }));
+  });
+
   it("executes only a non-final navigation and then locks final review", async () => {
     const application = snapshot({
       fields: [],
@@ -346,6 +371,53 @@ describe("application execution subgraph", () => {
       (value as unknown as { type?: unknown }).type
     );
     expect(executedTypes).not.toContain("submit");
+  });
+
+  it("audits the current page before an intermediate navigation", async () => {
+    const application = snapshot({
+      fields: [],
+      actions: [{
+        id: "action-next",
+        text: "Continue",
+        class: "intermediate_navigation",
+        nodeRef: nodeRef("node-action-next")
+      }]
+    });
+    const review = snapshot({ id: "snapshot-review", stage: "review" as const, fields: [] });
+    const next = {
+      type: "click_intermediate" as const,
+      taskId,
+      snapshotId: application.id,
+      actionId: "action-next",
+      nodeRef: nodeRef("node-action-next"),
+      executionEpoch: 1,
+      approval: "approved"
+    };
+    const { tools } = toolsFixture({ page: application, navigation: next, executionPage: review });
+    const events: string[] = [];
+    tools.fullPageAudit = vi.fn(async ({ snapshot: current, reason }) => {
+      events.push(`audit:${current.id}:${reason}`);
+      return { snapshot: current, mismatches: [] };
+    });
+    tools.execute = vi.fn(async (value) => {
+      events.push(`execute:${value.type}`);
+      return execution(value.type, review);
+    });
+    const graph = createApplicationExecutionSubgraph({
+      tools,
+      traceSink: traceCollector().traceSink,
+      now: () => new Date("2026-08-22T00:00:00.000Z")
+    });
+
+    await expect(graph({ state: state() })).resolves.toMatchObject({
+      status: "interrupted",
+      pendingInterrupt: { kind: "final_review" }
+    });
+
+    expect(events).toEqual([
+      "audit:snapshot-1:phase_boundary",
+      "execute:click_intermediate"
+    ]);
   });
 
   it("retries one failed double-readback and then fails closed", async () => {
@@ -411,6 +483,36 @@ describe("application execution subgraph", () => {
       status: "failed",
       error: { code: "application_resume_not_pending" }
     });
+    expect(tools.invalidate).toHaveBeenCalledOnce();
+    expect(tools.release).toHaveBeenCalledOnce();
+  });
+
+  it("fails a rejected content review after invalidating the browser execution", async () => {
+    const pending: HumanInterrupt = {
+      id: "content-review-1",
+      kind: "content_review",
+      reasonCode: "content_review_required",
+      questionIds: ["field:self-evaluation"],
+      evidenceIds: [],
+      createdAt: "2026-08-22T00:00:00.000Z"
+    };
+    const { tools } = toolsFixture();
+    const graph = createApplicationExecutionSubgraph({
+      tools,
+      traceSink: traceCollector().traceSink,
+      now: () => new Date("2026-08-22T00:00:00.000Z")
+    });
+
+    await expect(graph({ state: state({ status: "interrupted", pendingInterrupt: pending }), resume: {
+      interruptId: pending.id,
+      action: "reject",
+      values: {}
+    } })).resolves.toMatchObject({
+      status: "failed",
+      currentNode: "content_review_rejected",
+      error: { code: "content_review_rejected" }
+    });
+
     expect(tools.invalidate).toHaveBeenCalledOnce();
     expect(tools.release).toHaveBeenCalledOnce();
   });

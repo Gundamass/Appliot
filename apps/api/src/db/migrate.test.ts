@@ -284,6 +284,34 @@ describe("migrateDatabase", () => {
     database.close();
   });
 
+  it("retains graph review cleanup while rebuilding challenge-state tables", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    database.exec(`
+      DROP TRIGGER application_tasks_cleanup;
+      ALTER TABLE application_task_events RENAME TO application_task_events_legacy;
+      CREATE TABLE application_task_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        task_id TEXT NOT NULL,
+        type TEXT NOT NULL CHECK (type = 'state_changed'),
+        state TEXT NOT NULL CHECK (state IN (
+          'created', 'observing_page', 'waiting_for_login', 'needs_questions',
+          'awaiting_content_review', 'filling', 'validating', 'navigating',
+          'review_locked', 'cancelled', 'failed'
+        )),
+        created_at TEXT NOT NULL
+      );
+      DROP TABLE application_task_events_legacy;
+    `);
+
+    migrateDatabase(database);
+
+    const trigger = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'trigger' AND name = 'application_tasks_cleanup'")
+      .get() as { sql: string };
+    expect(trigger.sql).toContain("DELETE FROM agent_application_reviews WHERE task_id = OLD.id;");
+    database.close();
+  });
+
   it("upgrades legacy fact revision foreign keys without retaining renamed triggers", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

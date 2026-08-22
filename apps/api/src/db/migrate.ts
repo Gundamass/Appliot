@@ -82,8 +82,28 @@ export function migrateDatabase(database: SqliteDatabase): void {
       updated_at TEXT NOT NULL,
       profile_revision_applied INTEGER NOT NULL DEFAULT 0 CHECK (profile_revision_applied >= 0),
       profile_sync_status TEXT NOT NULL DEFAULT 'current' CHECK (profile_sync_status IN ('current', 'pending', 'failed')),
-      profile_sync_error TEXT
+      profile_sync_error TEXT,
+      orchestrator TEXT NOT NULL DEFAULT 'xstate-v1' CHECK (orchestrator IN ('xstate-v1', 'langgraph-v1'))
     );
+
+    CREATE TABLE IF NOT EXISTS agent_application_reviews (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES application_tasks(id) ON DELETE CASCADE,
+      interrupt_id TEXT NOT NULL,
+      field_id TEXT NOT NULL,
+      field_label TEXT NOT NULL,
+      original TEXT NOT NULL,
+      draft TEXT NOT NULL,
+      reasons_json TEXT NOT NULL CHECK (json_valid(reasons_json) AND json_type(reasons_json) = 'array'),
+      evidence_json TEXT NOT NULL CHECK (json_valid(evidence_json) AND json_type(evidence_json) = 'array'),
+      unsupported_claims_json TEXT NOT NULL CHECK (json_valid(unsupported_claims_json) AND json_type(unsupported_claims_json) = 'array'),
+      status TEXT NOT NULL CHECK (status IN ('needs_review', 'approved', 'blocked')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (task_id, interrupt_id)
+    );
+    CREATE INDEX IF NOT EXISTS agent_application_reviews_task_status_idx
+      ON agent_application_reviews(task_id, status, updated_at);
 
     CREATE TABLE IF NOT EXISTS profile_metadata (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -252,6 +272,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
       DELETE FROM application_checkpoints WHERE task_id = OLD.id;
       DELETE FROM application_answers WHERE task_id = OLD.id;
       DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
+      DELETE FROM agent_application_reviews WHERE task_id = OLD.id;
       DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
     END;
 
@@ -367,6 +388,9 @@ export function migrateDatabase(database: SqliteDatabase): void {
   }
   if (!taskColumns.some((column) => column.name === "profile_sync_error")) {
     database.exec("ALTER TABLE application_tasks ADD COLUMN profile_sync_error TEXT");
+  }
+  if (!taskColumns.some((column) => column.name === "orchestrator")) {
+    database.exec("ALTER TABLE application_tasks ADD COLUMN orchestrator TEXT NOT NULL DEFAULT 'xstate-v1' CHECK (orchestrator IN ('xstate-v1', 'langgraph-v1'))");
   }
 
   const checkpointColumns = database.prepare("PRAGMA table_info(application_checkpoints)").all() as Array<{ name: string }>;
@@ -488,6 +512,7 @@ function upgradeChallengeStateConstraints(database: SqliteDatabase): void {
         DELETE FROM application_checkpoints WHERE task_id = OLD.id;
         DELETE FROM application_answers WHERE task_id = OLD.id;
         DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
+        DELETE FROM agent_application_reviews WHERE task_id = OLD.id;
         DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
       END;
     `);

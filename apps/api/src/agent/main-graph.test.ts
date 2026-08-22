@@ -30,7 +30,15 @@ function startInput(threadId: string, subgraph: "resume_ingestion" | "job_matchi
     runId: `run-${threadId}`,
     taskId: `task-${threadId}`,
     subgraph,
-    profileRevision: 0
+    profileRevision: 0,
+    ...(subgraph === "application" ? {
+      application: {
+        applicationUrl: "https://jobs.example.test/apply",
+        executionEpoch: 0,
+        retryCount: 0,
+        finalReviewLocked: false
+      }
+    } : {})
   } as const;
 }
 

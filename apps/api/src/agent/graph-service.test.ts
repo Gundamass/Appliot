@@ -4,6 +4,8 @@ import { migrateDatabase } from "../db/migrate.js";
 import { SqliteAgentCheckpointer } from "./sqlite-checkpointer.js";
 import { createSqliteTraceSink } from "./trace-sink.js";
 import { createGraphService } from "./graph-service.js";
+import type { SubgraphPortResult } from "./main-graph.js";
+import type { AgentGraphState, ApplicationExecutionState } from "@resume/contracts";
 
 const databases: Database.Database[] = [];
 
@@ -19,6 +21,79 @@ afterEach(() => {
 });
 
 describe("GraphService", () => {
+  it("passes application execution state into an application subgraph", async () => {
+    const database = createDatabase();
+    const application: ApplicationExecutionState = {
+      applicationUrl: "https://jobs.example.test/apply",
+      executionEpoch: 0,
+      retryCount: 0,
+      finalReviewLocked: false
+    };
+    const runner = vi.fn(async ({ state }: { state: AgentGraphState }): Promise<SubgraphPortResult> => ({
+      status: "completed" as const,
+      application: state.application
+    }));
+    const service = createGraphService({
+      checkpointer: new SqliteAgentCheckpointer(database),
+      traceSink: createSqliteTraceSink(database),
+      application: runner
+    });
+
+    const result = await service.start({
+      threadId: "application-thread",
+      runId: "application-run",
+      taskId: "application-task",
+      subgraph: "application",
+      profileRevision: 3,
+      application
+    });
+
+    expect(runner).toHaveBeenCalledWith(expect.objectContaining({
+      state: expect.objectContaining({ application })
+    }));
+    expect(result.application).toEqual(application);
+  });
+
+  it("continues a persisted application thread using its stored subgraph", async () => {
+    const database = createDatabase();
+    const application: ApplicationExecutionState = {
+      applicationUrl: "https://jobs.example.test/apply",
+      executionEpoch: 0,
+      retryCount: 0,
+      finalReviewLocked: false
+    };
+    const first = createGraphService({
+      checkpointer: new SqliteAgentCheckpointer(database),
+      traceSink: createSqliteTraceSink(database),
+      application: async ({ state }) => ({ status: "running" as const, application: state.application })
+    });
+    await first.start({
+      threadId: "continue-thread",
+      runId: "continue-run",
+      taskId: "continue-task",
+      subgraph: "application",
+      profileRevision: 1,
+      application
+    });
+
+    const runner = vi.fn(async ({ state }: { state: AgentGraphState }): Promise<SubgraphPortResult> => ({
+      status: "completed" as const,
+      application: state.application
+    }));
+    const resumed = createGraphService({
+      checkpointer: new SqliteAgentCheckpointer(database),
+      traceSink: createSqliteTraceSink(database),
+      application: runner
+    });
+
+    const result = await resumed.run("continue-thread");
+
+    expect(runner).toHaveBeenCalledWith(expect.objectContaining({
+      state: expect.objectContaining({ application })
+    }));
+    expect(result.status).toBe("completed");
+  });
+
   it("recovers an interrupted task after a service restart", async () => {
     const database = createDatabase();
     const checkpointer = new SqliteAgentCheckpointer(database);

@@ -2,6 +2,7 @@ import { z } from "zod";
 import { Command } from "@langchain/langgraph";
 import {
   AgentGraphStateSchema,
+  ApplicationExecutionStateSchema,
   HumanResumeSchema,
   SubgraphNameSchema,
   type AgentGraphState,
@@ -16,8 +17,24 @@ const GraphStartInputSchema = z.object({
   runId: z.string().min(1),
   taskId: z.string().min(1),
   subgraph: SubgraphNameSchema,
-  profileRevision: z.number().int().nonnegative()
-}).strict();
+  profileRevision: z.number().int().nonnegative(),
+  application: ApplicationExecutionStateSchema.optional()
+}).strict().superRefine((input, context) => {
+  if (input.subgraph === "application" && input.application === undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["application"],
+      message: "application_start_state_required"
+    });
+  }
+  if (input.subgraph !== "application" && input.application !== undefined) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["application"],
+      message: "application_start_state_unexpected"
+    });
+  }
+});
 
 export type GraphStartInput = z.infer<typeof GraphStartInputSchema>;
 
@@ -33,6 +50,7 @@ export interface GraphServiceDependencies extends MainGraphDependencies {
 
 export interface GraphService {
   start(input: GraphStartInput): Promise<AgentGraphState>;
+  run(threadId: string): Promise<AgentGraphState>;
   resume(threadId: string, resume: HumanResume): Promise<AgentGraphState>;
   state(threadId: string): Promise<AgentGraphState | undefined>;
   cancel(threadId: string): Promise<AgentGraphState>;
@@ -69,10 +87,18 @@ export function createGraphService(dependencies: GraphServiceDependencies): Grap
         status: "running",
         profileRevision: parsed.profileRevision,
         currentSubgraph: parsed.subgraph,
+        ...(parsed.application === undefined ? {} : { application: parsed.application }),
         auditEventIds: []
       });
       await graph.invoke(initialState, invocationConfig(parsed.threadId, parsed.subgraph));
       return requireState(parsed.threadId);
+    },
+
+    async run(threadId) {
+      const current = await requireState(threadId);
+      if (current.status !== "running") return current;
+      await graph.invoke({}, invocationConfig(threadId, current.currentSubgraph));
+      return requireState(threadId);
     },
 
     async resume(threadId, resume) {

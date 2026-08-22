@@ -211,4 +211,29 @@ describe("application task repository", () => {
     })).toThrow("application_task_idempotency_conflict");
     database.close();
   });
+
+  it("marks new tasks as LangGraph-owned while preserving the XState default for legacy rows", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createApplicationTaskRepository(database);
+
+    const task = repository.create({
+      id: "9a92ea67-f47d-4f25-9ce7-8e2cdbd8e0cf",
+      applicationUrl: "https://jobs.example.test/apply"
+    });
+    database.prepare(`
+      INSERT INTO application_tasks (id, name, application_url, created_at, updated_at)
+      VALUES (?, ?, ?, ?, ?)
+    `).run(
+      "legacy-task",
+      "Legacy application",
+      "https://jobs.example.test/legacy",
+      "2026-08-22T00:00:00.000Z",
+      "2026-08-22T00:00:00.000Z"
+    );
+
+    expect(task).toMatchObject({ orchestrator: "langgraph-v1" });
+    expect(repository.get("legacy-task")).toMatchObject({ orchestrator: "xstate-v1" });
+    database.close();
+  });
 });

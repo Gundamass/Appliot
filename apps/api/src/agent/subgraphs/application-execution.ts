@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import type {
   AgentGraphState,
+  ApplicationContentReview,
   ApplicationExecutionState,
   ExecutableCommand,
   FormSnapshot,
@@ -23,16 +24,35 @@ export interface ApplicationExecutionSubgraphDependencies {
   traceSink: TraceSink;
   now?: () => Date;
   onInterrupt?: (interrupt: HumanInterrupt) => void;
+  onContentReview?: (input: {
+    taskId: string;
+    interrupt: HumanInterrupt;
+    review: ContentReviewDraft;
+  }) => void | Promise<void>;
 }
+
+export type ContentReviewDraft = Omit<ApplicationContentReview, "id">;
 
 type ResolutionInterrupt = {
   kind: HumanInterrupt["kind"];
   reasonCode: string;
   questionIds: string[];
   evidenceIds: string[];
+  contentReview?: ContentReviewDraft;
 };
 
 type ReadbackVerification =
+  | {
+      status: "confirmed";
+      application: ApplicationExecutionState;
+      snapshot: FormSnapshot;
+    }
+  | {
+      status: "stopped";
+      result: SubgraphPortResult;
+    };
+
+type FullPageAuditVerification =
   | {
       status: "confirmed";
       application: ApplicationExecutionState;
@@ -81,7 +101,7 @@ async function resumeApplication(
     return failed(application, "application_resume_interrupt_mismatch", "apply_resume");
   }
 
-  if (resume.action === "cancel" || resume.action === "reject") {
+  if (resume.action === "cancel") {
     let executionEpoch: number;
     try {
       executionEpoch = await dependencies.tools.invalidate(input.state.taskId);
@@ -92,6 +112,22 @@ async function resumeApplication(
     const cancelled = { ...application, executionEpoch, finalReviewLocked: application.finalReviewLocked };
     record(dependencies, input.state, "cancelled", "safety_block", "completed", "application_cancelled");
     return { status: "cancelled", currentNode: "cancelled", application: cancelled };
+  }
+
+  if (resume.action === "reject") {
+    if (pendingInterrupt.kind !== "content_review") {
+      return failed(application, "application_reject_action_invalid", "apply_resume");
+    }
+    let executionEpoch: number;
+    try {
+      executionEpoch = await dependencies.tools.invalidate(input.state.taskId);
+      await dependencies.tools.release(input.state.taskId);
+    } catch {
+      return failed(application, "content_review_rejection_invalidation_failed", "content_review_rejected");
+    }
+    const rejected = { ...application, executionEpoch, finalReviewLocked: application.finalReviewLocked };
+    record(dependencies, input.state, "content_review_rejected", "safety_block", "completed", "content_review_rejected");
+    return failed(rejected, "content_review_rejected", "content_review_rejected");
   }
 
   if (pendingInterrupt.kind === "final_review") {
@@ -174,7 +210,7 @@ async function resolveAndExecute(
 
   const deterministicInterrupt = findResolutionInterrupt(deterministic.resolutions, "deterministic");
   if (deterministicInterrupt !== undefined) {
-    return interruptResult(
+    return await interruptResult(
       dependencies,
       state,
       application,
@@ -211,7 +247,7 @@ async function resolveAndExecute(
     });
     const semanticInterrupt = findResolutionInterrupt(resolutions.resolutions, "semantic");
     if (semanticInterrupt !== undefined) {
-      return interruptResult(
+      return await interruptResult(
         dependencies,
         state,
         application,
@@ -270,7 +306,16 @@ async function resolveAndExecute(
       candidateIds: [applicationCommandId(navigation)],
       counts: { commands: 1 }
     });
-    return runCommands(dependencies, state, application, snapshot, [navigation], "phase_boundary");
+    const audit = await verifyFullPageAudit(
+      dependencies,
+      state,
+      application,
+      snapshot,
+      [],
+      "phase_boundary"
+    );
+    if (audit.status === "stopped") return audit.result;
+    return runCommands(dependencies, state, audit.application, audit.snapshot, [navigation], "phase_boundary");
   }
 
   if (hasTerminalAction(snapshot)) {
@@ -360,25 +405,55 @@ async function runCommands(
   if (readback.status === "stopped") return readback.result;
   application = readback.application;
 
+  if (auditReason === "field_applied") {
+    const audit = await verifyFullPageAudit(
+      dependencies,
+      state,
+      application,
+      readback.snapshot,
+      authorized,
+      auditReason
+    );
+    if (audit.status === "stopped") return audit.result;
+    application = audit.application;
+    return routeNext(dependencies, state, application, audit.snapshot);
+  }
+  return routeNext(dependencies, state, application, readback.snapshot);
+}
+
+async function verifyFullPageAudit(
+  dependencies: ApplicationExecutionSubgraphDependencies,
+  state: AgentGraphState,
+  application: ApplicationExecutionState,
+  snapshot: FormSnapshot,
+  expected: readonly ExecutableCommand[],
+  reason: "field_applied" | "phase_boundary"
+): Promise<FullPageAuditVerification> {
   let audit;
   try {
     audit = await dependencies.tools.fullPageAudit({
       taskId: state.taskId,
-      snapshot: readback.snapshot,
-      expected: authorized,
-      reason: auditReason
+      snapshot,
+      expected: [...expected],
+      reason
     });
   } catch {
-    return invalidateAndFail(dependencies, state, application, "application_full_page_audit_failed", "full_page_audit");
+    return {
+      status: "stopped",
+      result: await invalidateAndFail(dependencies, state, application, "application_full_page_audit_failed", "full_page_audit")
+    };
   }
-  application = withSnapshot(application, audit.snapshot);
+  const auditedApplication = withSnapshot(application, audit.snapshot);
   record(dependencies, state, "full_page_audit", "tool_call", audit.mismatches.length === 0 ? "completed" : "blocked", audit.mismatches.length === 0 ? "page_audit_passed" : "page_audit_mismatch", {
     counts: { mismatches: audit.mismatches.length }
   });
   if (audit.mismatches.length > 0) {
-    return invalidateAndFail(dependencies, state, application, "FULL_PAGE_AUDIT_MISMATCH", "full_page_audit");
+    return {
+      status: "stopped",
+      result: await invalidateAndFail(dependencies, state, auditedApplication, "FULL_PAGE_AUDIT_MISMATCH", "full_page_audit")
+    };
   }
-  return routeNext(dependencies, state, application, audit.snapshot);
+  return { status: "confirmed", application: auditedApplication, snapshot: audit.snapshot };
 }
 
 async function verifyReadback(
@@ -587,7 +662,17 @@ function findResolutionInterrupt(
       kind: "content_review",
       reasonCode: "content_review_required",
       questionIds: [`field:${content.field.id}`],
-      evidenceIds: evidenceIdsFor([content])
+      evidenceIds: evidenceIdsFor([content]),
+      contentReview: {
+        fieldId: content.field.id,
+        fieldLabel: content.field.label,
+        original: content.contentReview?.original ?? String(content.value ?? ""),
+        draft: String(content.value ?? ""),
+        reasons: content.contentReview?.reasons ?? ["Human approval is required before this content can be filled."],
+        evidence: content.contentReview?.evidence ?? [],
+        unsupportedClaims: content.contentReview?.unsupportedClaims ?? [],
+        status: content.contentReview?.status ?? "needs_review"
+      }
     };
   }
 
@@ -639,14 +724,25 @@ function findResolutionInterrupt(
   return undefined;
 }
 
-function interruptResult(
+async function interruptResult(
   dependencies: ApplicationExecutionSubgraphDependencies,
   state: AgentGraphState,
   application: ApplicationExecutionState,
   currentNode: string,
   input: ResolutionInterrupt
-): SubgraphPortResult {
+): Promise<SubgraphPortResult> {
   const pendingInterrupt = createInterrupt(state, application, input, dependencies.now);
+  if (input.contentReview !== undefined) {
+    try {
+      await dependencies.onContentReview?.({
+        taskId: state.taskId,
+        interrupt: pendingInterrupt,
+        review: input.contentReview
+      });
+    } catch {
+      return failed(application, "content_review_persistence_failed", currentNode);
+    }
+  }
   record(dependencies, state, currentNode, "interrupt", "pending", input.reasonCode, {
     evidenceIds: pendingInterrupt.evidenceIds,
     counts: { questions: pendingInterrupt.questionIds.length }

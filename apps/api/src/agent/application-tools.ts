@@ -111,6 +111,7 @@ export interface ApplicationToolDependencies {
     field: FormField,
     phase: FieldResolutionPhase
   ): Promise<ApplicationFieldResolution>;
+  resolveApprovedContent?(taskId: string, field: FormField): Promise<unknown | undefined> | unknown | undefined;
   approve(input: {
     taskId: string;
     snapshotId: string;
@@ -234,6 +235,10 @@ export function createApplicationTools(dependencies: ApplicationToolDependencies
       );
       const resolutions = await Promise.all(fields.map(async (field) => {
         try {
+          const approvedContent = await dependencies.resolveApprovedContent?.(input.taskId, field);
+          if (approvedContent !== undefined) {
+            return { field, status: "verified" as const, value: approvedContent };
+          }
           return { field, ...await dependencies.resolveField(input.taskId, field, input.phase) };
         } catch {
           return { field, status: "blocked" as const };

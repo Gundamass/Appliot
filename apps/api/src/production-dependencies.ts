@@ -14,7 +14,14 @@ import {
   createRagService,
   validateEditedSelfEvaluation
 } from "@resume/rag";
+import { createApplicationTools } from "./agent/application-tools.js";
+import { createGraphService } from "./agent/graph-service.js";
+import { SqliteAgentCheckpointer } from "./agent/sqlite-checkpointer.js";
+import { createApplicationExecutionSubgraph } from "./agent/subgraphs/application-execution.js";
 import { createApplicationService } from "./applications/application-service.js";
+import { createGraphApplicationReviewRepository } from "./applications/graph-application-review-repository.js";
+import { createGraphApplicationService } from "./applications/graph-application-service.js";
+import { createApplicationServiceRouter } from "./applications/application-service-router.js";
 import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
 import { createCheckpointRepository } from "./applications/checkpoint-repository.js";
 import {
@@ -92,6 +99,7 @@ export function createProductionDependencies(
   try {
     migrateDatabase(database);
     const agentTraceSink = createSqliteTraceSink(database);
+    const agentCheckpointer = new SqliteAgentCheckpointer(database);
     const profileRepository = createProfileRepository(database);
     const documentRepository = createDocumentRepository(database);
     const originalsDirectory = resolve(dirname(resolve(config.databaseFile)), "originals");
@@ -252,6 +260,7 @@ export function createProductionDependencies(
     });
     const taskEvents = createTaskEventBus(database);
     const taskRepository = createApplicationTaskRepository(database);
+    const graphApplicationReviews = createGraphApplicationReviewRepository(database);
     const browserOwnershipLease = new BrowserOwnershipLease();
     const openBrowser = async (taskId: string, url: string) => {
       const client = await getBrowserClient();
@@ -273,36 +282,44 @@ export function createProductionDependencies(
       }
       tasksWithOpenAttempt.delete(taskId);
     };
-    const applicationService = createApplicationService({
+    const applicationBrowser = {
+      async open(taskId: string, url: string) {
+        return openBrowser(taskId, url);
+      },
+      async observe(taskId: string) {
+        return (await (await getBrowserClient()).observe(taskId)).snapshot;
+      },
+      async execute(command: Parameters<BrowserWorkerClient["execute"]>[0], executionEpoch?: number) {
+        return (await getBrowserClient()).execute(command, executionEpoch);
+      },
+      async invalidateExecution(taskId: string, executionEpoch: number) {
+        await (await getBrowserClient()).invalidateExecution?.(taskId, executionEpoch);
+      },
+      async releaseTask(taskId: string) {
+        await releaseBrowserTask(taskId);
+      },
+      onActivity(listener: Parameters<NonNullable<BrowserWorkerClient["onActivity"]>>[0]) {
+        activityListeners.set(listener, resolvedBrowserClient?.onActivity?.(listener) ?? noop);
+        return () => {
+          activityListeners.get(listener)?.();
+          activityListeners.delete(listener);
+        };
+      }
+    };
+    const legacyApplicationBrowser = {
+      open: applicationBrowser.open,
+      observe: applicationBrowser.observe,
+      execute: applicationBrowser.execute,
+      invalidateExecution: applicationBrowser.invalidateExecution,
+      releaseTask: applicationBrowser.releaseTask
+    };
+    const legacyApplicationService = createApplicationService({
       checkpoints: createCheckpointRepository(database),
       taskRepository,
       profileRevision: () => profileRepository.currentRevision(),
       taskEvents,
       browserOwnershipLease,
-      browser: {
-        async open(taskId, url) {
-          return openBrowser(taskId, url);
-        },
-        async observe(taskId) {
-          return (await (await getBrowserClient()).observe(taskId)).snapshot;
-        },
-        async execute(command, executionEpoch) {
-          return (await getBrowserClient()).execute(command, executionEpoch);
-        },
-        async invalidateExecution(taskId, executionEpoch) {
-          await (await getBrowserClient()).invalidateExecution?.(taskId, executionEpoch);
-        },
-        async releaseTask(taskId) {
-          await releaseBrowserTask(taskId);
-        },
-        onActivity(listener) {
-          activityListeners.set(listener, resolvedBrowserClient?.onActivity?.(listener) ?? noop);
-          return () => {
-            activityListeners.get(listener)?.();
-            activityListeners.delete(listener);
-          };
-        }
-      },
+      browser: legacyApplicationBrowser,
       resolveField: resolveApplicationField,
       listProfileFacts() {
         return profileRepository.listActive();
@@ -338,6 +355,71 @@ export function createProductionDependencies(
           ? `${document.fingerprint}.pdf`
           : undefined;
       }
+    });
+    const graphApplicationTools = createApplicationTools({
+      browser: applicationBrowser,
+      resolveField: resolveApplicationField,
+      resolveApprovedContent(taskId, field) {
+        return graphApplicationReviews.approvedValue(taskId, field.id);
+      },
+      listProfileFacts() {
+        return profileRepository.listActive();
+      },
+      approve(input, snapshot) {
+        return actionPolicy.approve(input, snapshot).token;
+      },
+      resolveFileId(_taskId, field) {
+        if (/avatar|photo|头像|照片|证件照/iu.test(`${field.semanticHint ?? ""} ${field.label}`)) {
+          const avatar = profileRepository.resolveForTask(_taskId, "basics.avatar")?.value;
+          return typeof avatar === "string" && /^avatar-[0-9a-f-]+\.(?:jpg|png|webp)$/u.test(avatar) ? avatar : undefined;
+        }
+        const document = documentRepository.findLatestCompleted();
+        return /resume|cv|简历/iu.test(`${field.semanticHint ?? ""} ${field.label}`) && document !== undefined
+          ? `${document.fingerprint}.pdf`
+          : undefined;
+      }
+    });
+    const graphService = createGraphService({
+      checkpointer: agentCheckpointer,
+      traceSink: agentTraceSink,
+      application: createApplicationExecutionSubgraph({
+        tools: graphApplicationTools,
+        traceSink: agentTraceSink,
+        onContentReview({ taskId, interrupt, review }) {
+          graphApplicationReviews.save({
+            ...review,
+            id: interrupt.id,
+            taskId,
+            interruptId: interrupt.id
+          });
+        }
+      }),
+      async invalidateExecutionEpoch({ taskId }) {
+        await graphApplicationTools.invalidate(taskId);
+      }
+    });
+    const graphApplicationService = createGraphApplicationService({
+      taskRepository,
+      graph: graphService,
+      profileRevision: () => profileRepository.currentRevision(),
+      browserOwnershipLease,
+      browser: applicationBrowser,
+      taskEvents,
+      checkpointer: agentCheckpointer,
+      reviewRepository: graphApplicationReviews,
+      validateContentReview(review, draft) {
+        return validateEditedSelfEvaluation(review.original, draft, review.evidence);
+      }
+    });
+    const applicationService = createApplicationServiceRouter({
+      taskRepository,
+      legacy: legacyApplicationService,
+      graph: graphApplicationService
+    });
+    const unsubscribeApplicationActivity = applicationBrowser.onActivity((activity) => {
+      void applicationService.handleActivity(activity).catch(() => {
+        // Worker activity must never surface a rejected promise through IPC.
+      });
     });
     const jobMatchRepository = createJobMatchRepository(database);
     const jobMatchTrace = new BoundedJobMatchTraceBuffer();
@@ -429,10 +511,11 @@ export function createProductionDependencies(
               } catch {
                 // Recycling either stopped the old Worker or failed before owning a replacement.
               }
-            } else if (browserClient) {
+          } else if (browserClient) {
               await (await browserClient).stop();
             }
           } finally {
+            unsubscribeApplicationActivity();
             closeDatabase();
           }
         })();

@@ -1,8 +1,12 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import type { FormField, FormSnapshot, JobPageSnapshot, ProfileFact, WorkerActivity } from "@resume/contracts";
 import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
 import type { FieldSemanticResolver } from "./applications/field-semantic-resolver.js";
+import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
 import { loadConfig } from "./config.js";
 import { createApp } from "./app.js";
 const fixtureNodeRef = {
@@ -125,6 +129,46 @@ describe("production dependency composition", () => {
     await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("browser_task_in_use");
     expect(browserClient.open).not.toHaveBeenCalled();
     await dependencies.close?.();
+  });
+
+  it("restores a graph-owned application task after rebuilding production dependencies", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "resume-langgraph-restart-"));
+    const databaseFile = join(directory, "resume.db");
+    const taskId = "2b9c0bfb-3785-4393-8e57-2a3082f29e3c";
+    const config = loadConfig({ DATABASE_FILE: databaseFile });
+    const firstBrowser = productionBrowserClient();
+    const first = createProductionDependencies(config, { browserClient: firstBrowser });
+
+    try {
+      createApplicationTaskRepository(first.database).create({
+        id: taskId,
+        applicationUrl: "https://jobs.example.test/apply"
+      });
+      first.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+      await first.applicationService!.openBrowser(taskId);
+      await first.applicationService!.runUntilPause(taskId);
+      expect(first.applicationService!.state(taskId).value).toBe("awaiting_login");
+      const graphCheckpointCount = first.database.prepare(
+        "SELECT COUNT(*) AS count FROM agent_checkpoints WHERE thread_id = ?"
+      ).get(`application:${taskId}`) as { count: number };
+      const legacyCheckpointCount = first.database.prepare(
+        "SELECT COUNT(*) AS count FROM application_checkpoints WHERE task_id = ?"
+      ).get(taskId) as { count: number };
+      expect(graphCheckpointCount.count).toBeGreaterThan(0);
+      expect(legacyCheckpointCount.count).toBe(0);
+      await first.close?.();
+
+      const second = createProductionDependencies(config, { browserClient: productionBrowserClient() });
+      try {
+        await second.applicationService!.openBrowser(taskId);
+        expect(second.applicationService!.state(taskId).value).toBe("awaiting_login");
+      } finally {
+        await second.close?.();
+      }
+    } finally {
+      await first.close?.();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   beforeEach(() => {

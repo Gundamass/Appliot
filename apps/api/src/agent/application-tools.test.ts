@@ -209,6 +209,42 @@ describe("ApplicationTools", () => {
     expect(browser.observe).toHaveBeenCalledTimes(3);
   });
 
+  it("uses a persisted approved content review before resolving the field again", async () => {
+    const contentField = field({ id: "self-evaluation", semanticHint: "selfEvaluation" });
+    const page = snapshot({ fields: [contentField] });
+    const resolveField = vi.fn(async () => ({
+      status: "verified" as const,
+      value: "Generated draft",
+      requiresContentReview: true
+    }));
+    const resolveApprovedContent = vi.fn(async () => "Approved draft");
+    const tools = createApplicationTools({
+      browser: {
+        observe: vi.fn(async () => page),
+        execute: vi.fn(async (command) => executionResult(command.type, page))
+      },
+      resolveField,
+      resolveApprovedContent,
+      approve: () => "approved-token"
+    });
+
+    const observed = await tools.observe(taskId);
+    const resolutions = await tools.resolveFields({
+      taskId,
+      snapshot: observed,
+      profileRevision: 1,
+      phase: "deterministic"
+    });
+
+    expect(resolutions.resolutions).toEqual([expect.objectContaining({
+      field: contentField,
+      status: "verified",
+      value: "Approved draft"
+    })]);
+    expect(resolveApprovedContent).toHaveBeenCalledWith(taskId, contentField);
+    expect(resolveField).not.toHaveBeenCalled();
+  });
+
   it("never creates a submit command from a terminal page action", async () => {
     const terminalPage = snapshot({ fields: [] });
     const { browser, tools } = createHarness({ snapshots: [terminalPage] });
