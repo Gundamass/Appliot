@@ -1,0 +1,2 @@
+{"caseId":"trace-001","suiteVersion":"trace-v1","privacy":"local_only","inputFixtureId":"trace-sequence-a","expectedOutcome":"completed","expectedLabels":["parentage","order","versions","terminal_outcome"],"inputHash":"aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa"}
+{"caseId":"trace-002","suiteVersion":"trace-v1","privacy":"local_only","inputFixtureId":"trace-sequence-b","expectedOutcome":"interrupted","expectedLabels":["privacy_rejection","retry_isolation","dead_letter"],"inputHash":"bbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbbb"}
