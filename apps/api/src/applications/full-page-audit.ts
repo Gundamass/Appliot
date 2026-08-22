@@ -90,7 +90,7 @@ function entryIndexFromSemanticPath(semanticPath: string): number | undefined {
   return match === null ? undefined : Number(match[1]);
 }
 
-function valuesMatch(expected: unknown, actual: unknown, field: FormField): boolean {
+export function valuesMatch(expected: unknown, actual: unknown, field: FormField): boolean {
   return JSON.stringify(normalizeValue(expected, field)) === JSON.stringify(normalizeValue(actual, field));
 }
 
