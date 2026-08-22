@@ -136,6 +136,9 @@ function resultUpdate(
     } : undefined
   };
   if (result.resumeIngestion !== undefined) update.resumeIngestion = result.resumeIngestion;
+  if (result.resumeIngestion?.publishedProfileRevision !== undefined) {
+    update.profileRevision = result.resumeIngestion.publishedProfileRevision;
+  }
   if (result.jobMatching !== undefined) update.jobMatching = result.jobMatching;
   if (result.application !== undefined) update.application = result.application;
 

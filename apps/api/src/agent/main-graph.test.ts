@@ -130,6 +130,32 @@ describe("main LangGraph", () => {
     expect((await service.state("thread-a"))?.status).toBe("completed");
   });
 
+  it("adopts the profile revision published by resume ingestion", async () => {
+    const runner = vi.fn(async (): Promise<SubgraphPortResult> => ({
+      status: "completed",
+      currentNode: "check_completeness",
+      resumeIngestion: {
+        documentId: "document-1",
+        documentFingerprint: "a".repeat(64),
+        pageSources: ["pdf"],
+        candidateFactIds: ["fact-1"],
+        acceptedFactIds: ["fact-1"],
+        publishedProfileRevision: 3
+      }
+    }));
+    const database = createDatabase();
+    const service = createGraphService({
+      checkpointer: new SqliteAgentCheckpointer(database),
+      traceSink: createSqliteTraceSink(database),
+      resumeIngestion: runner
+    });
+
+    const state = await service.start(startInput("thread-profile-revision"));
+
+    expect(state.profileRevision).toBe(3);
+    expect(state.resumeIngestion?.publishedProfileRevision).toBe(3);
+  });
+
   it("invalidates application execution before persisting cancellation", async () => {
     const order: string[] = [];
     const runner = vi.fn(async () => ({ status: "interrupted" as const, pendingInterrupt: {
