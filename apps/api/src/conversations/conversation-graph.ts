@@ -511,7 +511,8 @@ async function invokeTool(
         toolName: name,
         outcome: "completed",
         reasonCode: "tool_completed",
-        durationMs: elapsedMs(startedAt)
+        durationMs: elapsedMs(startedAt),
+        counts: { results: result.cards.length }
       }, state.traceIds)
     };
   } catch (error) {
@@ -729,6 +730,7 @@ function trace(
     confidence?: number;
     durationMs?: number;
     errorCode?: string;
+    counts?: Record<string, number>;
   },
   existing: string[]
 ): string[] {
@@ -745,6 +747,7 @@ function trace(
       ...(input.toolName === undefined ? {} : { toolName: input.toolName }),
       ...(input.confidence === undefined ? {} : { confidence: input.confidence }),
       ...(input.durationMs === undefined ? {} : { durationMs: elapsedDuration(input.durationMs) }),
+      ...(input.counts === undefined ? {} : { counts: input.counts }),
       ...(input.errorCode === undefined ? {} : { errorCode: normalizeReason(input.errorCode) })
     });
     return [...existing, id];
