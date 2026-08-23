@@ -3,6 +3,7 @@ import { render, screen, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { AppRouter } from "./router.js";
+import type { ConversationApi } from "./conversation/api.js";
 
 const task: ApplicationTask = {
   id: "0f8fad5b-d9cb-469f-a165-70867728950e",
@@ -30,12 +31,30 @@ class SilentEventSource extends EventTarget {
   close() {}
 }
 
+function conversationApi(): ConversationApi {
+  const session = { id: "conversation-router", title: "新的求职对话", createdAt: "2026-08-23T01:00:00.000Z", updatedAt: "2026-08-23T01:00:00.000Z" };
+  return {
+    create: vi.fn().mockResolvedValue(session),
+    get: vi.fn().mockResolvedValue({ session, messages: [], context: { version: 0, recentPostingIds: [] } }),
+    send: vi.fn(),
+    confirm: vi.fn()
+  };
+}
+
 afterEach(() => {
   vi.unstubAllGlobals();
   window.history.pushState({}, "", "/");
 });
 
 describe("AppRouter", () => {
+  it("injects the conversation API into the default chat workspace", async () => {
+    const api = conversationApi();
+    render(<AppRouter conversationApi={api} applicationApi={{ list: vi.fn(), create: vi.fn(), get: vi.fn(), command: vi.fn(), recover: vi.fn() }} />);
+
+    expect(await screen.findByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
+    expect(api.create).toHaveBeenCalledTimes(1);
+  });
+
   it("injects the job matching API into the root workspace", async () => {
     window.history.pushState({}, "", "/?view=apply");
     vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
@@ -105,7 +124,7 @@ describe("AppRouter", () => {
     const api = { list: vi.fn().mockResolvedValue([]), create: vi.fn(), get: vi.fn().mockResolvedValue(task), command: vi.fn(), recover: vi.fn() };
     window.history.pushState({}, "", "/applications/new");
     const view = render(<AppRouter applicationApi={api} />);
-    expect(screen.getByRole("heading", { name: "新建投递" })).toBeVisible();
+    expect(screen.getByRole("heading", { name: "我的岗位" })).toBeVisible();
 
     view.unmount();
     window.history.pushState({}, "", `/applications/${task.id}`);
@@ -113,9 +132,10 @@ describe("AppRouter", () => {
     expect(await screen.findByRole("heading", { name: "请在受控浏览器中完成登录" })).toBeVisible();
     const navigation = screen.getByRole("navigation", { name: "候选人工作台" });
     expect(within(navigation).getAllByRole("button").map((button) => button.textContent?.trim())).toEqual([
-      "候选人档案",
-      "新建投递",
-      "投递审核"
+      "对话首页",
+      "我的岗位",
+      "投递进度",
+      "我的简历"
     ]);
     expect(screen.queryByRole("navigation", { name: "主导航" })).not.toBeInTheDocument();
   });
@@ -129,7 +149,7 @@ describe("AppRouter", () => {
 
     render(<AppRouter applicationApi={{ list: vi.fn().mockResolvedValue([]), create: vi.fn(), get: vi.fn(), command: vi.fn(), recover: vi.fn() }} />);
 
-    expect(await screen.findByRole("heading", { name: "简历资料" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
     expect(window.location.pathname).toBe("/");
   });
 });

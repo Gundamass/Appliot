@@ -7,11 +7,12 @@ import { ProfileApplicationWorkspace } from "./workspace/ProfileApplicationWorks
 import { createJobMatchApi, type JobMatchApi } from "./job-matching/api.js";
 import { JobMatchWorkbench } from "./job-matching/JobMatchWorkbench.js";
 import { useJobMatchSession } from "./job-matching/useJobMatchSession.js";
+import { createConversationApi, type ConversationApi } from "./conversation/api.js";
 
-export function AppRouter({ applicationApi = createApplicationApi(), jobMatchApi = createJobMatchApi() }: { applicationApi?: ApplicationApi; jobMatchApi?: JobMatchApi }) {
+export function AppRouter({ applicationApi = createApplicationApi(), jobMatchApi = createJobMatchApi(), conversationApi = createConversationApi() }: { applicationApi?: ApplicationApi; jobMatchApi?: JobMatchApi; conversationApi?: ConversationApi }) {
   return <BrowserRouter><Routes>
-    <Route path="/" element={<WorkspaceRoute applicationApi={applicationApi} jobMatchApi={jobMatchApi} />} />
-    <Route path="/applications/new" element={<Navigate replace to="/?view=apply" />} />
+    <Route path="/" element={<WorkspaceRoute applicationApi={applicationApi} jobMatchApi={jobMatchApi} conversationApi={conversationApi} />} />
+    <Route path="/applications/new" element={<Navigate replace to="/?view=jobs" />} />
     <Route path="/applications/:taskId" element={<ApplicationTaskRoute api={applicationApi} />} />
     <Route path="/job-match-sessions/:sessionId" element={<JobMatchRoute api={jobMatchApi} />} />
     <Route path="*" element={<Navigate replace to="/" />} />
@@ -34,7 +35,7 @@ async function conflictSummaryHash(result: import("@resume/contracts").JobMatchR
   return `sha256:${Array.from(new Uint8Array(bytes), (value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function WorkspaceRoute({ applicationApi, jobMatchApi }: { applicationApi: ApplicationApi; jobMatchApi: JobMatchApi }) {
+function WorkspaceRoute({ applicationApi, jobMatchApi, conversationApi }: { applicationApi: ApplicationApi; jobMatchApi: JobMatchApi; conversationApi: ConversationApi }) {
   return <ProfileApplicationWorkspace
     profileApi={createProfileApi()}
     applicationApi={applicationApi}
@@ -42,6 +43,7 @@ function WorkspaceRoute({ applicationApi, jobMatchApi }: { applicationApi: Appli
     healthApi={createHealthApi()}
     reviewApi={createSelfEvaluationReviewApi()}
     ragApi={createRagApi()}
+    conversationApi={conversationApi}
   />;
 }
 

@@ -10,6 +10,8 @@ import { JobMatchStartPanel } from "../job-matching/JobMatchStartPanel.js";
 import { ProfilePage } from "../profile/ProfilePage.js";
 import { ApplicationReviewInbox } from "../applications/ApplicationReviewInbox.js";
 import { ApplicationStartPanel } from "../applications/ApplicationStartPanel.js";
+import type { ConversationApi } from "../conversation/api.js";
+import { ChatHome } from "../conversation/ChatHome.js";
 import { WorkspaceFrame, type WorkspaceView } from "./WorkspaceFrame.js";
 
 interface ProfileApplicationWorkspaceProps {
@@ -19,6 +21,7 @@ interface ProfileApplicationWorkspaceProps {
   healthApi?: HealthApi;
   reviewApi?: SelfEvaluationReviewApi;
   ragApi?: RagApi;
+  conversationApi: ConversationApi;
 }
 
 export function ProfileApplicationWorkspace({
@@ -27,12 +30,13 @@ export function ProfileApplicationWorkspace({
   jobMatchApi,
   healthApi,
   reviewApi,
-  ragApi
+  ragApi,
+  conversationApi
 }: ProfileApplicationWorkspaceProps) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const requested = searchParams.get("view");
-  const view: WorkspaceView = requested === "apply" || requested === "reviews" ? requested : "profile";
+  const view = normalizeWorkspaceView(requested);
   const [profileCompleteness, setProfileCompleteness] = useState<ProfileCompleteness>();
   const [tasks, setTasks] = useState<ApplicationTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
@@ -73,24 +77,26 @@ export function ProfileApplicationWorkspace({
   };
 
   useEffect(() => {
-    if (view === "apply") void profileApi.getCompleteness().then(setProfileCompleteness).catch(() => setProfileCompleteness(undefined));
-    if (view === "reviews") void loadTasks();
+    if (view === "jobs") void profileApi.getCompleteness().then(setProfileCompleteness).catch(() => setProfileCompleteness(undefined));
+    if (view === "applications") void loadTasks();
   }, [view, profileApi, applicationApi]);
 
   const selectView = (nextView: WorkspaceView) => {
     const next = new URLSearchParams(searchParams);
-    if (nextView === "profile") next.delete("view");
+    if (nextView === "chat") next.delete("view");
     else next.set("view", nextView);
     setSearchParams(next, { replace: false });
   };
+
+  if (view === "chat") return <ChatHome api={conversationApi} onOpenJobMatch={(sessionId) => navigate(`/job-match-sessions/${sessionId}`)} onOpenApplication={(taskId) => navigate(`/applications/${taskId}`)} onNavigate={selectView} />;
 
   return (
     <WorkspaceFrame activeView={view} onSelectView={selectView}>
         {view === "profile" ? (
           <section className="workspace-view" aria-labelledby="workspace-profile-title">
             <header className="workspace-view-header">
-              <div><span>长期资料库</span><h1 id="workspace-profile-title">候选人档案</h1></div>
-              <button className="button primary" type="button" onClick={() => selectView("apply")}>
+              <div><span>长期资料库</span><h1 id="workspace-profile-title">我的简历</h1></div>
+              <button className="button primary" type="button" onClick={() => selectView("jobs")}>
                 <FilePlus2 aria-hidden="true" size={16} />新建投递
               </button>
             </header>
@@ -102,9 +108,9 @@ export function ProfileApplicationWorkspace({
               {...(ragApi ? { ragApi } : {})}
             />
           </section>
-        ) : view === "apply" ? (
+        ) : view === "jobs" ? (
           <section className="workspace-view" aria-labelledby="workspace-apply-title">
-            <header className="workspace-view-header"><div><span>受控浏览器</span><h1 id="workspace-apply-title">新建投递</h1></div></header>
+            <header className="workspace-view-header"><div><span>受控浏览器</span><h1 id="workspace-apply-title">我的岗位</h1></div></header>
             <div className="workspace-panel-content">
               <div className="application-mode-switch" aria-label="新建投递模式">
                 <button
@@ -156,4 +162,11 @@ export function ProfileApplicationWorkspace({
         )}
     </WorkspaceFrame>
   );
+}
+
+function normalizeWorkspaceView(requested: string | null): WorkspaceView {
+  if (requested === "jobs" || requested === "apply") return "jobs";
+  if (requested === "applications" || requested === "reviews") return "applications";
+  if (requested === "profile") return "profile";
+  return "chat";
 }
