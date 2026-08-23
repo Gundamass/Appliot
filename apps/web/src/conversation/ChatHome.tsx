@@ -68,6 +68,32 @@ export function ChatHome({ api, onOpenJobMatch, onOpenApplication, onNavigate }:
 }
 
 function toUserError(error: unknown): string {
-  if (error instanceof ConversationApiError) return error.message;
+  if (error instanceof ConversationApiError) {
+    switch (error.code) {
+      case "recommendation_context_missing":
+      case "recommendation_ordinal_1_missing":
+      case "recommendation_not_found":
+        return "当前没有可确定的目标岗位，请先打开岗位匹配结果。";
+      case "recommendation_stale":
+      case "job_match_posting_changed":
+        return "岗位匹配结果已变化，请刷新岗位匹配后再试。";
+      case "browser_worker_unavailable":
+      case "browser_open_unavailable":
+        return "受控浏览器暂时不可用，可以稍后重试或打开已有投递任务。";
+      case "challenge_required":
+      case "browser_challenge_required":
+        return "投递页面需要额外验证，请手动接管浏览器完成验证后再继续。";
+      case "policy_rejected":
+      case "application_submission_locked":
+        return "当前策略不允许提交，提交已锁定；请先检查投递审核要求。";
+      case "conversation_confirmation_invalid":
+      case "confirmation_invalid":
+        return "这条确认已失效或已经使用，请重新发起投递。";
+      case "conversation_input_invalid":
+        return "消息最多 500 字，请缩短后重试。";
+      default:
+        return "对话暂时不可用，请稍后重试。";
+    }
+  }
   return "对话暂时不可用，请稍后重试";
 }

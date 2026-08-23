@@ -539,7 +539,8 @@ function persistTurn(
   state: GraphState
 ): Partial<GraphState> {
   const intent = state.intent ?? unknownIntent();
-  const assistantText = state.assistantText ?? defaultAssistantText(intent.kind);
+  const assistantText = state.assistantText
+    ?? (state.resolutionError === undefined ? defaultAssistantText(intent.kind) : userFacingError(state.resolutionError));
   const cards = (Array.isArray(state.cards) ? state.cards : []).map((card) => ConversationCardSchema.parse(card));
   const sequence = Number.isSafeInteger(state.sequence) && state.sequence >= 0 ? state.sequence : 0;
   const nextContext = ConversationContextSchema.parse({
@@ -576,6 +577,9 @@ function persistTurn(
 function deterministicIntent(text: string): ConversationIntent {
   const ordinal = extractOrdinal(text);
   const target = ordinal === undefined ? undefined : { kind: "recommendation" as const, ordinal };
+  if (/\u6295\u9012/u.test(text) && ordinal !== undefined && !/[\u67e5\u770b\u8fdb\u5ea6\u72b6\u6001]/u.test(text)) {
+    return ConversationIntentSchema.parse({ kind: "start_application", target, requiresConfirmation: true });
+  }
   if (/投递[\s\S]*(查看|看看|查询)[\s\S]*(进度|状态)|投递[\s\S]*进度/u.test(text)) {
     return ConversationIntentSchema.parse({ kind: "start_application_and_show_status", target, requiresConfirmation: true });
   }
@@ -680,6 +684,12 @@ function userFacingError(code: string): string {
     case "browser_worker_unavailable":
     case "browser_open_unavailable":
       return "受控浏览器暂时不可用，可以稍后重试或打开已有投递任务。";
+    case "challenge_required":
+    case "browser_challenge_required":
+      return "投递页面需要额外验证，请手动接管浏览器完成验证后再继续。";
+    case "policy_rejected":
+    case "application_submission_locked":
+      return "当前策略不允许提交，提交已锁定；请先检查投递审核要求。";
     case "confirmation_invalid":
       return "这条确认已失效或已经使用，请重新发起投递。";
     default:
