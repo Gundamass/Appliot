@@ -2,7 +2,7 @@ import { randomBytes } from "node:crypto";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { ActionPolicy } from "@resume/action-policy";
-import { djiJobAdapter, jobExpectationSnapshot, mokaJobAdapter } from "@resume/job-matching";
+import { baiduJobAdapter, djiJobAdapter, jobExpectationSnapshot, mokaJobAdapter } from "@resume/job-matching";
 import {
   DeepSeekStructuredModelProvider,
   EMBEDDING_INSTRUCTION_VERSION,
@@ -67,7 +67,8 @@ import { createConversationService, type ConversationService } from "./conversat
 
 type ProductionBrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
   & Partial<Pick<BrowserWorkerClient,
-    "invalidateExecution" | "releaseTask" | "onActivity" | "observeJob" | "applyJobFilters" | "advanceJobPage">>;
+    "invalidateExecution" | "releaseTask" | "onActivity" | "observeJob" | "applyJobFilters" | "advanceJobPage"
+  >>;
 
 export interface ProductionAdapterDependencies {
   fetch?: typeof globalThis.fetch;
@@ -428,7 +429,7 @@ export function createProductionDependencies(
     });
     const jobMatchRepository = createJobMatchRepository(database);
     const jobMatchTrace = new BoundedJobMatchTraceBuffer();
-    const jobAdapters = [mokaJobAdapter, djiJobAdapter] as const;
+    const jobAdapters = [mokaJobAdapter, djiJobAdapter, baiduJobAdapter] as const;
     const jobBrowser = {
       open: openBrowser,
       async observeJob(ownerId: string) {

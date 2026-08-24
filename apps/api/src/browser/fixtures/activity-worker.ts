@@ -3,7 +3,12 @@ process.on("message", (message: unknown) => {
     return;
   }
 
-  const { requestId, request } = message as { requestId: string; request: { type?: string } };
+  const { requestId, request } = message as {
+    requestId: string;
+    request: {
+      type?: string;
+    };
+  };
   if (request.type === "handshake") {
     process.send({ requestId, response: { type: "ready" } });
     return;

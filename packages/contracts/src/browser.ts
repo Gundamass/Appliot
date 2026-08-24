@@ -10,6 +10,29 @@ import {
   JobPageSnapshotSchema
 } from "./job-matching.js";
 
+const RecruitmentCompanySchema = z.string()
+  .trim()
+  .min(1)
+  .max(80)
+  .refine((value) => !/[\u0000-\u001f\u007f]/u.test(value), "公司名包含控制字符");
+
+export const RecruitmentTypeSchema = z.literal("campus");
+
+export const RecruitmentSiteResultSchema = z.object({
+  company: RecruitmentCompanySchema,
+  recruitmentType: RecruitmentTypeSchema,
+  query: z.string().min(1).max(200),
+  title: z.string().trim().min(1).max(2_000),
+  url: z.string().url().max(2_048).refine((value) => {
+    try {
+      return new URL(value).protocol === "https:";
+    } catch {
+      return false;
+    }
+  }, "招聘入口必须使用 HTTPS"),
+  domain: z.string().trim().min(1).max(255).regex(/^[A-Za-z0-9.-]+$/u)
+}).strict();
+
 export {
   ChallengeDiagnosticSchema,
   ChallengeKindSchema,
@@ -324,6 +347,8 @@ export type PageAction = z.infer<typeof PageActionSchema>;
 export type FormSnapshot = z.infer<typeof FormSnapshotSchema>;
 export type ExecutableCommand = z.infer<typeof ExecutableCommandSchema>;
 export type WorkerRequest = z.infer<typeof WorkerRequestSchema>;
+export type RecruitmentType = z.infer<typeof RecruitmentTypeSchema>;
+export type RecruitmentSiteResult = z.infer<typeof RecruitmentSiteResultSchema>;
 export type WorkerActivityErrorCode = z.infer<typeof WorkerActivityErrorCodeSchema>;
 export type WorkerActivity = z.infer<typeof WorkerActivitySchema>;
 export type WorkerResponse = z.infer<typeof WorkerResponseSchema>;

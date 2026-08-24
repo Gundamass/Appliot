@@ -3,7 +3,13 @@ import Database from "better-sqlite3";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import type { FormField, FormSnapshot, JobPageSnapshot, ProfileFact, WorkerActivity } from "@resume/contracts";
+import type {
+  FormField,
+  FormSnapshot,
+  JobPageSnapshot,
+  ProfileFact,
+  WorkerActivity
+} from "@resume/contracts";
 import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
 import type { FieldSemanticResolver } from "./applications/field-semantic-resolver.js";
 import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
@@ -46,7 +52,6 @@ vi.mock("./db/migrate.js", async (importOriginal) => {
     }
   };
 });
-
 const {
   createProductionDependencies,
   createProductionFieldResolver,
@@ -129,6 +134,66 @@ describe("production dependency composition", () => {
     await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("browser_task_in_use");
     expect(browserClient.open).not.toHaveBeenCalled();
     await dependencies.close?.();
+  });
+
+  it("registers the Baidu campus adapter in the production job-matching service", async () => {
+    const browserClient = productionBrowserClient({
+      observeJob: vi.fn(async (ownerId: string): Promise<JobPageSnapshot> => ({
+        id: `baidu-snapshot-${ownerId}`,
+        ownerId,
+        url: "https://talent.baidu.com/jobs/list?projectType=3&recruitType=GRADUATE",
+        title: "百度校园招聘",
+        capturedAt: "2026-08-24T00:00:00.000Z",
+        entryHint: "job_list",
+        visibleText: ["职位列表"],
+        jobCards: [],
+        filterState: [],
+        pagination: { kind: "none", hasNext: false },
+        boundaries: []
+      }))
+    });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient
+    });
+    const expectation = confirmedProfileFact("preferences.targetRole", "技术");
+    dependencies.profileRepository.createExtracted({ ...expectation, status: "extracted" });
+    dependencies.profileRepository.confirm(expectation.id);
+
+    const created = await dependencies.jobMatchService.create({
+      url: "https://talent.baidu.com/jobs/list?projectType=3&recruitType=GRADUATE"
+    });
+
+    expect(created).toMatchObject({
+      source: "baidu",
+      adapterVersion: "baidu-job-v1",
+      entryKind: "job_list"
+    });
+    await dependencies.close?.();
+  });
+
+  it("does not start a browser to search for a recruitment site", async () => {
+    const browserClientFactory = vi.fn(async () => productionBrowserClient());
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClientFactory
+    });
+    const app = await createApp(dependencies);
+
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/conversations" });
+      const sessionId = created.json().id as string;
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${sessionId}/messages`,
+        payload: { text: "\u5e2e\u6211\u6295\u9012\u4e00\u4e0b\u767e\u5ea6\u6821\u56ed\u62db\u8058" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().pendingConfirmation).toBeUndefined();
+      expect(response.json().message.text).toContain("暂时无法");
+      expect(browserClientFactory).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
   });
 
   it("restores a graph-owned application task after rebuilding production dependencies", async () => {
