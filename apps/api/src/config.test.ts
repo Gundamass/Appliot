@@ -32,6 +32,35 @@ describe("API configuration", () => {
     });
   });
 
+  it("loads Tavily Remote MCP from an API key without exposing the key in errors", () => {
+    expect(loadConfig({ TAVILY_API_KEY: "tvly-test-secret" })).toMatchObject({
+      tavily: {
+        apiKey: "tvly-test-secret",
+        endpoint: "https://mcp.tavily.com/mcp/",
+        timeoutMs: 10_000,
+        maxRetries: 1
+      }
+    });
+
+    const secret = "tvly-should-never-leak";
+    const message = captureError(() => loadConfig({
+      TAVILY_API_KEY: secret,
+      TAVILY_MCP_TIMEOUT_MS: "invalid"
+    }));
+    expect(message).toContain("TAVILY_MCP_TIMEOUT_MS");
+    expect(message).not.toContain(secret);
+  });
+
+  it("keeps Tavily disabled when no TAVILY variables are present and rejects unsafe endpoints", () => {
+    expect(loadConfig({}).tavily).toBeUndefined();
+    expect(() => loadConfig({
+      TAVILY_API_KEY: "key",
+      TAVILY_MCP_ENDPOINT: "http://localhost:3000/mcp"
+    })).toThrow("TAVILY_MCP_ENDPOINT");
+    expect(() => loadConfig({ TAVILY_MCP_TIMEOUT_MS: "10000" }))
+      .toThrow("TAVILY_API_KEY");
+  });
+
   it("keeps LangSmith disabled by default and validates credentials only when enabled", () => {
     expect(loadConfig({}).langsmith).toEqual({
       enabled: false,

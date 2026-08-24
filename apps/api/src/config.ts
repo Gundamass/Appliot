@@ -34,6 +34,13 @@ export interface LightRagRetrievalAdapterConfig {
   timeoutMs: number;
 }
 
+export interface TavilyRemoteMcpConfig {
+  apiKey: string;
+  endpoint: string;
+  timeoutMs: number;
+  maxRetries: 1;
+}
+
 export interface LangSmithConfig {
   enabled: boolean;
   apiKey?: string;
@@ -50,6 +57,7 @@ export interface ApiConfig {
   embedding?: RemoteEmbeddingAdapterConfig;
   ocr?: RemoteOcrAdapterConfig;
   lightRag?: LightRagRetrievalAdapterConfig;
+  tavily?: TavilyRemoteMcpConfig;
   langsmith: LangSmithConfig;
 }
 
@@ -121,6 +129,19 @@ const lightRagSchema = z.object({
   apiToken: nonEmptyString,
   baseUrl: loopbackTunnelUrl(43122),
   tenantScope: nonEmptyString.max(200),
+  timeoutMs: positiveInteger
+});
+
+const tavilySchema = z.object({
+  apiKey: nonEmptyString,
+  endpoint: z.string().url().refine((value) => {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:"
+      && parsed.username === ""
+      && parsed.password === ""
+      && parsed.search === ""
+      && parsed.hash === "";
+  }, "https_endpoint_required"),
   timeoutMs: positiveInteger
 });
 
@@ -269,6 +290,25 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     }
   }
 
+  const hasTavily = Object.keys(env).some((name) => name.startsWith("TAVILY_"));
+  let tavily: TavilyRemoteMcpConfig | undefined;
+  if (hasTavily) {
+    const result = tavilySchema.safeParse({
+      apiKey: env.TAVILY_API_KEY,
+      endpoint: env.TAVILY_MCP_ENDPOINT ?? "https://mcp.tavily.com/mcp/",
+      timeoutMs: env.TAVILY_MCP_TIMEOUT_MS ?? "10000"
+    });
+    if (!result.success) {
+      coreErrors.push(...invalidVariables(result, {
+        apiKey: "TAVILY_API_KEY",
+        endpoint: "TAVILY_MCP_ENDPOINT",
+        timeoutMs: "TAVILY_MCP_TIMEOUT_MS"
+      }));
+    } else {
+      tavily = { ...result.data, maxRetries: 1 };
+    }
+  }
+
   if (coreErrors.length > 0) throw new ConfigurationError([...new Set(coreErrors)]);
   if (!langsmithResult.success) throw new ConfigurationError(["LANGSMITH_CONFIGURATION"]);
   const langsmith: LangSmithConfig = {
@@ -286,6 +326,7 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     ...(embedding ? { embedding } : {}),
     ...(ocr ? { ocr } : {}),
     ...(lightRag ? { lightRag } : {}),
+    ...(tavily ? { tavily } : {}),
     langsmith
   };
 }
