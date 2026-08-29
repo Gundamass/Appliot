@@ -121,7 +121,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
         'cancelled', 'expired'
       )),
       entry_kind TEXT CHECK (entry_kind IS NULL OR entry_kind IN ('job_list', 'job_detail', 'application_form')),
-      source TEXT CHECK (source IS NULL OR source IN ('moka', 'dji')),
+      source TEXT CHECK (source IS NULL OR source IN ('moka', 'dji', 'baidu')),
       initial_url TEXT NOT NULL,
       adapter_version TEXT,
       scoring_version TEXT NOT NULL DEFAULT 'job-match-v1' CHECK (scoring_version = 'job-match-v1'),
@@ -156,7 +156,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
     CREATE TABLE IF NOT EXISTS job_postings (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL REFERENCES job_match_sessions(id) ON DELETE CASCADE,
-      source TEXT NOT NULL CHECK (source IN ('moka', 'dji')),
+      source TEXT NOT NULL CHECK (source IN ('moka', 'dji', 'baidu')),
       source_job_id TEXT,
       canonical_url TEXT NOT NULL,
       content_hash TEXT NOT NULL,
@@ -461,6 +461,8 @@ export function migrateDatabase(database: SqliteDatabase): void {
 
   upgradeFactForeignKeys(database);
 
+  upgradeJobSourceConstraints(database);
+
   const documentColumns = database.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;
   if (!documentColumns.some((column) => column.name === "source_path")) {
     database.exec("ALTER TABLE documents ADD COLUMN source_path TEXT NOT NULL DEFAULT ''");
@@ -628,6 +630,84 @@ function upgradeFactForeignKeys(database: SqliteDatabase): void {
       DROP TABLE fact_embeddings_legacy;
       COMMIT;
     `);
+  }
+}
+
+function upgradeJobSourceConstraints(database: SqliteDatabase): void {
+  const sessionNeedsUpgrade = !tableSql(database, "job_match_sessions").includes("'baidu'");
+  const postingNeedsUpgrade = !tableSql(database, "job_postings").includes("'baidu'");
+  if (!sessionNeedsUpgrade && !postingNeedsUpgrade) return;
+
+  const foreignKeysWereEnabled = database.pragma("foreign_keys", { simple: true }) === 1;
+  if (foreignKeysWereEnabled) database.pragma("foreign_keys = OFF");
+  try {
+    const upgrade = database.transaction(() => {
+      if (sessionNeedsUpgrade) {
+        database.exec(`
+          CREATE TABLE job_match_sessions_source_new (
+            id TEXT PRIMARY KEY,
+            version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+            state TEXT NOT NULL CHECK (state IN (
+              'created', 'awaiting_filter_confirmation', 'opening_job_page', 'awaiting_login',
+              'applying_filters', 'extracting_jobs', 'matching_jobs', 'awaiting_job_selection',
+              'selected', 'converted_to_application', 'awaiting_challenge', 'paused', 'failed',
+              'cancelled', 'expired'
+            )),
+            entry_kind TEXT CHECK (entry_kind IS NULL OR entry_kind IN ('job_list', 'job_detail', 'application_form')),
+            source TEXT CHECK (source IS NULL OR source IN ('moka', 'dji', 'baidu')),
+            initial_url TEXT NOT NULL,
+            adapter_version TEXT,
+            scoring_version TEXT NOT NULL DEFAULT 'job-match-v1' CHECK (scoring_version = 'job-match-v1'),
+            profile_revision INTEGER NOT NULL CHECK (profile_revision >= 0),
+            expectation_revision INTEGER NOT NULL CHECK (expectation_revision >= 0),
+            execution_epoch INTEGER NOT NULL DEFAULT 0 CHECK (execution_epoch >= 0),
+            selected_result_id TEXT,
+            selected_posting_content_hash TEXT,
+            conflict_summary_hash TEXT,
+            selection_idempotency_key TEXT,
+            application_task_id TEXT REFERENCES application_tasks(id),
+            conversion_idempotency_key TEXT,
+            stop_reason TEXT,
+            error_code TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO job_match_sessions_source_new SELECT * FROM job_match_sessions;
+          DROP TABLE job_match_sessions;
+          ALTER TABLE job_match_sessions_source_new RENAME TO job_match_sessions;
+          CREATE UNIQUE INDEX job_match_sessions_selection_idempotency_unique
+            ON job_match_sessions(selection_idempotency_key) WHERE selection_idempotency_key IS NOT NULL;
+          CREATE UNIQUE INDEX job_match_sessions_conversion_idempotency_unique
+            ON job_match_sessions(conversion_idempotency_key) WHERE conversion_idempotency_key IS NOT NULL;
+        `);
+      }
+
+      if (postingNeedsUpgrade) {
+        database.exec(`
+          CREATE TABLE job_postings_source_new (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+            source TEXT NOT NULL CHECK (source IN ('moka', 'dji', 'baidu')),
+            source_job_id TEXT,
+            canonical_url TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+            extracted_at TEXT NOT NULL
+          );
+          INSERT INTO job_postings_source_new SELECT * FROM job_postings;
+          DROP TABLE job_postings;
+          ALTER TABLE job_postings_source_new RENAME TO job_postings;
+          CREATE UNIQUE INDEX job_postings_session_url_hash_unique
+            ON job_postings(session_id, source, canonical_url, content_hash);
+          CREATE UNIQUE INDEX job_postings_session_source_id_hash_unique
+            ON job_postings(session_id, source, source_job_id, content_hash) WHERE source_job_id IS NOT NULL;
+          CREATE INDEX job_postings_session_id_idx ON job_postings(session_id, id);
+        `);
+      }
+    });
+    upgrade();
+  } finally {
+    if (foreignKeysWereEnabled) database.pragma("foreign_keys = ON");
   }
 }
 

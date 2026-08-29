@@ -76,6 +76,28 @@ describe("conversation routes", () => {
     });
   });
 
+  it("passes the selected recruitment URL through the confirmation route", async () => {
+    const service = fakeService();
+    const app = await buildApp(service);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/conversations/session-1/confirm",
+      payload: {
+        confirmationId: "confirmation-choices",
+        approved: true,
+        selectedUrl: "https://jobs.baidu.com/"
+      }
+    });
+
+    expect(response.statusCode).toBe(200);
+    expect(service.confirm).toHaveBeenCalledWith("session-1", {
+      confirmationId: "confirmation-choices",
+      approved: true,
+      selectedUrl: "https://jobs.baidu.com/"
+    });
+  });
+
   it("creates a session and returns its history and context", async () => {
     const service = fakeService();
     const app = await buildApp(service);

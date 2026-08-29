@@ -89,6 +89,77 @@ describe("migrateDatabase", () => {
     database.close();
   });
 
+  it("upgrades legacy job source constraints without losing matching rows", () => {
+    const database = new Database(":memory:");
+    database.exec(`
+      CREATE TABLE application_tasks (
+        id TEXT PRIMARY KEY,
+        application_url TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE job_match_sessions (
+        id TEXT PRIMARY KEY,
+        version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+        state TEXT NOT NULL,
+        entry_kind TEXT,
+        source TEXT CHECK (source IS NULL OR source IN ('moka', 'dji')),
+        initial_url TEXT NOT NULL,
+        adapter_version TEXT,
+        scoring_version TEXT NOT NULL DEFAULT 'job-match-v1',
+        profile_revision INTEGER NOT NULL,
+        expectation_revision INTEGER NOT NULL,
+        execution_epoch INTEGER NOT NULL DEFAULT 0,
+        selected_result_id TEXT,
+        selected_posting_content_hash TEXT,
+        conflict_summary_hash TEXT,
+        selection_idempotency_key TEXT,
+        application_task_id TEXT REFERENCES application_tasks(id),
+        conversion_idempotency_key TEXT,
+        stop_reason TEXT,
+        error_code TEXT,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE job_postings (
+        id TEXT PRIMARY KEY,
+        session_id TEXT NOT NULL REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+        source TEXT NOT NULL CHECK (source IN ('moka', 'dji')),
+        source_job_id TEXT,
+        canonical_url TEXT NOT NULL,
+        content_hash TEXT NOT NULL,
+        payload_json TEXT NOT NULL,
+        extracted_at TEXT NOT NULL
+      );
+      INSERT INTO job_match_sessions (
+        id, state, entry_kind, source, initial_url, profile_revision, expectation_revision,
+        created_at, updated_at
+      ) VALUES ('legacy-session', 'created', 'job_list', 'moka', 'https://jobs.example.test', 0, 0, '2026-08-24', '2026-08-24');
+      INSERT INTO job_postings (
+        id, session_id, source, source_job_id, canonical_url, content_hash, payload_json, extracted_at
+      ) VALUES ('legacy-posting', 'legacy-session', 'moka', 'legacy-job', 'https://jobs.example.test/1', 'hash-1', '{}', '2026-08-24');
+    `);
+
+    migrateDatabase(database);
+
+    expect(database.prepare("SELECT source FROM job_match_sessions WHERE id = 'legacy-session'").get())
+      .toEqual({ source: "moka" });
+    expect(database.prepare("SELECT source FROM job_postings WHERE id = 'legacy-posting'").get())
+      .toEqual({ source: "moka" });
+    expect(() => database.prepare(`
+      INSERT INTO job_match_sessions (
+        id, state, entry_kind, source, initial_url, profile_revision, expectation_revision,
+        created_at, updated_at
+      ) VALUES ('baidu-session', 'created', 'job_list', 'baidu', 'https://talent.baidu.com/jobs/list', 0, 0, '2026-08-24', '2026-08-24')
+    `).run()).not.toThrow();
+    expect(() => database.prepare(`
+      INSERT INTO job_postings (
+        id, session_id, source, canonical_url, content_hash, payload_json, extracted_at
+      ) VALUES ('baidu-posting', 'baidu-session', 'baidu', 'https://talent.baidu.com/jobs/detail/GRADUATE/1', 'hash-2', '{}', '2026-08-24')
+    `).run()).not.toThrow();
+    database.close();
+  });
+
   it("upgrades checkpoint state constraints for persistent challenge pauses without losing rows", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

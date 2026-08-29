@@ -66,12 +66,15 @@ describe("ProfileApplicationWorkspace", () => {
 
     expect(await screen.findByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
     const navigation = screen.getByRole("navigation", { name: "候选人工作台" });
-    expect(within(navigation).getByRole("button", { name: "我的岗位" })).toBeVisible();
-    expect(within(navigation).getByRole("button", { name: "投递进度" })).toBeVisible();
-    expect(within(navigation).getByRole("button", { name: "我的简历" })).toBeVisible();
+    expect(within(navigation).getAllByRole("button").map((button) => button.textContent?.trim())).toEqual([
+      "对话首页",
+      "投递进度",
+      "我的简历"
+    ]);
+    expect(within(navigation).queryByRole("button", { name: "我的岗位" })).not.toBeInTheDocument();
   });
 
-  it("opens the profile view and moves to the jobs view", async () => {
+  it("opens the profile view and returns to chat from the shared navigation", async () => {
     window.history.pushState({}, "", "/?view=profile");
     const user = userEvent.setup();
     render(
@@ -82,10 +85,10 @@ describe("ProfileApplicationWorkspace", () => {
 
     expect(await screen.findByRole("heading", { name: "我的简历" })).toBeVisible();
     const navigation = screen.getByRole("navigation", { name: "候选人工作台" });
-    await user.click(within(navigation).getByRole("button", { name: "我的岗位" }));
+    await user.click(within(navigation).getByRole("button", { name: "对话首页" }));
 
-    expect(screen.getByRole("heading", { name: "我的岗位" })).toBeVisible();
-    expect(new URLSearchParams(window.location.search).get("view")).toBe("jobs");
+    expect(await screen.findByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
+    expect(new URLSearchParams(window.location.search).get("view")).toBeNull();
   });
 
   it("maps the legacy reviews view to application progress", async () => {
@@ -111,11 +114,12 @@ describe("ProfileApplicationWorkspace", () => {
     expect(await screen.findByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
   });
 
-  it("maps the legacy apply view to jobs", async () => {
+  it("maps the legacy apply view to chat", async () => {
     window.history.pushState({}, "", "/?view=apply");
     render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={applicationApi} jobMatchApi={jobMatchApi as never} conversationApi={conversationApi()} /></BrowserRouter>);
 
-    expect(await screen.findByRole("heading", { name: "我的岗位" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
+    expect(screen.queryByRole("heading", { name: "我的岗位" })).not.toBeInTheDocument();
   });
 
   it("exposes the review view from the new navigation", async () => {
@@ -204,80 +208,4 @@ describe("ProfileApplicationWorkspace", () => {
     expect(screen.getByText(failedTask.applicationUrl)).toBeVisible();
   });
 
-  it("defaults to job matching and can switch to direct application", async () => {
-    window.history.pushState({}, "", "/?view=apply");
-    render(<BrowserRouter><ProfileApplicationWorkspace
-      profileApi={profileApi()}
-      applicationApi={applicationApi}
-      jobMatchApi={jobMatchApi as never}
-      conversationApi={conversationApi()}
-    /></BrowserRouter>);
-
-    const matchMode = await screen.findByRole("button", { name: "岗位匹配" });
-    expect(matchMode).toHaveAttribute("aria-pressed", "true");
-    await userEvent.click(screen.getByRole("button", { name: "直接投递" }));
-
-    expect(screen.getByLabelText("任务名称")).toBeVisible();
-    expect(screen.getByRole("button", { name: "直接投递" })).toHaveAttribute("aria-pressed", "true");
-  });
-
-  it("navigates to a created job match session", async () => {
-    window.history.pushState({}, "", "/?view=apply");
-    const api = profileApi();
-    api.listFacts = vi.fn().mockResolvedValue([{
-      id: "role",
-      fieldPath: "preferences.targetRole",
-      value: "Java",
-      status: "user_confirmed",
-      confidence: 1,
-      scope: "profile",
-      evidence: [{ documentId: "fixture", page: 1, text: "Java", extraction: "user" }],
-      revision: 1
-    }]);
-    const matching = { create: vi.fn().mockResolvedValue({ id: "session-1" }) };
-    render(<BrowserRouter><ProfileApplicationWorkspace
-      profileApi={api}
-      applicationApi={applicationApi}
-      jobMatchApi={matching as never}
-      conversationApi={conversationApi()}
-    /></BrowserRouter>);
-
-    await screen.findByDisplayValue("Java");
-    await userEvent.type(screen.getByLabelText("招聘链接"), "https://acme.mokahr.com/jobs");
-    await userEvent.click(screen.getByRole("button", { name: "确认岗位期望并开始匹配" }));
-
-    expect(window.location.pathname).toBe("/job-match-sessions/session-1");
-  });
-
-  it("switches to direct application and prefills an application redirect", async () => {
-    window.history.pushState({}, "", "/?view=apply");
-    const api = profileApi();
-    api.listFacts = vi.fn().mockResolvedValue([{
-      id: "role",
-      fieldPath: "preferences.targetRole",
-      value: "Java",
-      status: "user_confirmed",
-      confidence: 1,
-      scope: "profile",
-      evidence: [{ documentId: "fixture", page: 1, text: "Java", extraction: "user" }],
-      revision: 1
-    }]);
-    const matching = { create: vi.fn().mockResolvedValue({
-      redirect: "application",
-      applicationUrl: "https://acme.mokahr.com/apply"
-    }) };
-    render(<BrowserRouter><ProfileApplicationWorkspace
-      profileApi={api}
-      applicationApi={applicationApi}
-      jobMatchApi={matching as never}
-      conversationApi={conversationApi()}
-    /></BrowserRouter>);
-
-    await screen.findByDisplayValue("Java");
-    await userEvent.type(screen.getByLabelText("招聘链接"), "https://acme.mokahr.com/apply");
-    await userEvent.click(screen.getByRole("button", { name: "确认岗位期望并开始匹配" }));
-
-    expect(await screen.findByLabelText("投递官网链接")).toHaveValue("https://acme.mokahr.com/apply");
-    expect(applicationApi.create).not.toHaveBeenCalled();
-  });
 });

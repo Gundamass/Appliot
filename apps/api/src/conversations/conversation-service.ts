@@ -1,12 +1,14 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import {
   ConversationContextSchema,
+  ConversationConfirmInputSchema,
   ConversationMessageSchema,
   ConversationSessionSchema,
   ConversationTurnInputSchema,
   ConversationTurnResponseSchema,
   ConversationViewSchema,
   type ConversationConfirmation,
+  type ConversationConfirmInput as ContractConversationConfirmInput,
   type ConversationContext,
   type ConversationMessage,
   type ConversationSession,
@@ -16,10 +18,7 @@ import {
 import type { ConversationGraph, ConversationGraphOutput } from "./conversation-graph.js";
 import type { ConversationRepository } from "./conversation-repository.js";
 
-export interface ConversationConfirmInput {
-  confirmationId: string;
-  approved: boolean;
-}
+export type ConversationConfirmInput = ContractConversationConfirmInput;
 
 export interface ConversationServiceDependencies {
   repository: ConversationRepository;
@@ -120,7 +119,8 @@ export function createConversationService(
           context,
           sequence: nextSequence,
           confirmationId: input.confirmationId,
-          approved: input.approved
+          approved: input.approved,
+          ...(input.selectedUrl === undefined ? {} : { selectedUrl: input.selectedUrl })
         }, graphConfig(id));
         const response = normalizeResponse(output, id, nextSequence, context.version);
         const decisionText = input.approved ? "确认开始投递" : "取消开始投递";
@@ -131,7 +131,11 @@ export function createConversationService(
           text: decisionText,
           now
         });
-        const requestId = `confirmation:${input.confirmationId}:${input.approved ? "approved" : "declined"}`;
+        const selectionHash = createHash("sha256")
+          .update(input.selectedUrl ?? "")
+          .digest("hex")
+          .slice(0, 16);
+        const requestId = `confirmation:${input.confirmationId}:${input.approved ? "approved" : "declined"}:${selectionHash}`;
         const stored = dependencies.repository.appendTurn({
           conversationId: id,
           requestId,
@@ -226,12 +230,13 @@ function persistConfirmation(
 }
 
 function parseConfirmationInput(input: ConversationConfirmInput): ConversationConfirmInput {
-  if (typeof input !== "object" || input === null) throw new Error("conversation_confirmation_input_invalid");
-  const confirmationId = typeof input.confirmationId === "string"
-    ? RequestIdSchema.parse(input.confirmationId.trim())
-    : (() => { throw new Error("conversation_confirmation_input_invalid"); })();
-  if (typeof input.approved !== "boolean") throw new Error("conversation_confirmation_input_invalid");
-  return { confirmationId, approved: input.approved };
+  const parsed = ConversationConfirmInputSchema.safeParse(input);
+  if (!parsed.success) throw new Error("conversation_confirmation_input_invalid");
+  return {
+    confirmationId: RequestIdSchema.parse(parsed.data.confirmationId.trim()),
+    approved: parsed.data.approved,
+    ...(parsed.data.selectedUrl === undefined ? {} : { selectedUrl: parsed.data.selectedUrl })
+  };
 }
 
 function graphConfig(conversationId: string) {

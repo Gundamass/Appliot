@@ -55,40 +55,14 @@ describe("AppRouter", () => {
     expect(api.create).toHaveBeenCalledTimes(1);
   });
 
-  it("injects the job matching API into the root workspace", async () => {
+  it("maps the legacy job workspace query to chat", async () => {
     window.history.pushState({}, "", "/?view=apply");
-    vi.stubGlobal("fetch", vi.fn(async (input: RequestInfo | URL) => {
-      const url = String(input);
-      const payload = url.endsWith("/api/profile/facts") ? [{
-        id: "role",
-        fieldPath: "preferences.targetRole",
-        value: "Java",
-        status: "user_confirmed",
-        confidence: 1,
-        scope: "profile",
-        evidence: [{ documentId: "fixture", page: 1, text: "Java", extraction: "user" }],
-        revision: 1
-      }] : { completed: 0, total: 1, sections: [] };
-      return new Response(JSON.stringify(payload), {
-        status: 200,
-        headers: { "Content-Type": "application/json" }
-      });
-    }));
-    const create = vi.fn().mockResolvedValue({
-      redirect: "application",
-      applicationUrl: "https://acme.mokahr.com/apply"
-    });
-    const applicationApi = {
-      list: vi.fn().mockResolvedValue([]), create: vi.fn(), get: vi.fn(), command: vi.fn(), recover: vi.fn()
-    };
-    const user = userEvent.setup();
-    render(<AppRouter applicationApi={applicationApi} jobMatchApi={{ create } as never} />);
+    const api = conversationApi();
+    render(<AppRouter conversationApi={api} applicationApi={{ list: vi.fn(), create: vi.fn(), get: vi.fn(), command: vi.fn(), recover: vi.fn() }} />);
 
-    await screen.findByDisplayValue("Java");
-    await user.type(screen.getByLabelText("招聘链接"), "https://acme.mokahr.com/jobs");
-    await user.click(screen.getByRole("button", { name: "确认岗位期望并开始匹配" }));
-
-    expect(create).toHaveBeenCalledWith("https://acme.mokahr.com/jobs");
+    expect(await screen.findByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
+    expect(api.create).toHaveBeenCalledTimes(1);
+    expect(screen.queryByRole("heading", { name: "我的岗位" })).not.toBeInTheDocument();
   });
 
   it("renders a job matching session route", async () => {
@@ -111,6 +85,12 @@ describe("AppRouter", () => {
     };
     render(<AppRouter applicationApi={{ list: vi.fn(), create: vi.fn(), get: vi.fn(), command: vi.fn(), recover: vi.fn() }} jobMatchApi={jobMatchApi as never} />);
     expect(await screen.findByText("岗位匹配工作台")).toBeVisible();
+    const navigation = screen.getByRole("navigation", { name: "候选人工作台" });
+    expect(within(navigation).getAllByRole("button").map((button) => button.textContent?.trim())).toEqual([
+      "对话首页",
+      "投递进度",
+      "我的简历"
+    ]);
     await userEvent.setup().click(screen.getByRole("button", { name: /确认筛选/u }));
     expect(jobMatchApi.confirmFilters).toHaveBeenCalledWith(
       "session-1",
@@ -124,7 +104,8 @@ describe("AppRouter", () => {
     const api = { list: vi.fn().mockResolvedValue([]), create: vi.fn(), get: vi.fn().mockResolvedValue(task), command: vi.fn(), recover: vi.fn() };
     window.history.pushState({}, "", "/applications/new");
     const view = render(<AppRouter applicationApi={api} />);
-    expect(screen.getByRole("heading", { name: "我的岗位" })).toBeVisible();
+    expect(await screen.findByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
+    expect(window.location.pathname).toBe("/");
 
     view.unmount();
     window.history.pushState({}, "", `/applications/${task.id}`);
@@ -133,7 +114,6 @@ describe("AppRouter", () => {
     const navigation = screen.getByRole("navigation", { name: "候选人工作台" });
     expect(within(navigation).getAllByRole("button").map((button) => button.textContent?.trim())).toEqual([
       "对话首页",
-      "我的岗位",
       "投递进度",
       "我的简历"
     ]);

@@ -8,7 +8,7 @@ interface ChatMessageListProps {
   onOpenJobMatch(sessionId: string): void;
   onOpenApplication(taskId: string): void;
   onStartApplication?(card: Extract<ConversationMessage["cards"][number], { type: "recommendation" }>): void;
-  onConfirm?(confirmationId: string, approved: boolean): void;
+  onConfirm?(confirmationId: string, approved: boolean, selectedUrl?: string): void;
 }
 
 export function ChatMessageList({ messages, pendingConfirmation, onOpenJobMatch, onOpenApplication, onStartApplication, onConfirm }: ChatMessageListProps) {

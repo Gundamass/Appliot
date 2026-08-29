@@ -2,6 +2,61 @@ import { describe, expect, it, vi } from "vitest";
 import { createIpcServer } from "./ipc-server.js";
 
 describe("startIpcServer", () => {
+  it("forwards the public HTTPS navigation policy to the session manager", async () => {
+    const sent: unknown[] = [];
+    let messageListener: ((message: unknown) => void) | undefined;
+    const ipc = {
+      on: (_event: string, listener: (message: unknown) => void) => { messageListener = listener; },
+      send: (message: unknown, callback?: (error: null) => void) => {
+        sent.push(message);
+        callback?.(null);
+        return true;
+      },
+      disconnect: vi.fn(),
+      stderr: { write: vi.fn() }
+    };
+    const open = vi.fn(async (taskId: string, url: string, navigationPolicy: string) => ({
+      type: "opened" as const,
+      taskId,
+      url,
+      title: navigationPolicy
+    }));
+    const session = {
+      start: vi.fn(async () => undefined),
+      stop: vi.fn(async () => undefined),
+      subscribeActivity: vi.fn(() => () => undefined),
+      open
+    };
+    createIpcServer(session as never, ipc);
+    messageListener?.({ requestId: "handshake", request: { type: "handshake", approvalKey: "a".repeat(43) } });
+    await vi.waitFor(() => expect(sent).toContainEqual({ requestId: "handshake", response: { type: "ready" } }));
+
+    messageListener?.({
+      requestId: "open-public",
+      request: {
+        type: "open",
+        taskId: "task-public",
+        url: "https://jobs.example.test/apply",
+        navigationPolicy: "public_https"
+      }
+    });
+
+    await vi.waitFor(() => expect(open).toHaveBeenCalledWith(
+      "task-public",
+      "https://jobs.example.test/apply",
+      "public_https"
+    ));
+    expect(sent).toContainEqual({
+      requestId: "open-public",
+      response: {
+        type: "opened",
+        taskId: "task-public",
+        url: "https://jobs.example.test/apply",
+        title: "public_https"
+      }
+    });
+  });
+
   it("dispatches job observation and epoch-authorized mutations", async () => {
     const sent: unknown[] = [];
     let messageListener: ((message: unknown) => void) | undefined;

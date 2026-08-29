@@ -1,6 +1,8 @@
 import { describe, expect, it } from "vitest";
 import {
   ConversationCardSchema,
+  ConversationConfirmInputSchema,
+  ConversationConfirmationSchema,
   ConversationContextSchema,
   ConversationIntentSchema,
   ConversationMessageSchema,
@@ -34,6 +36,127 @@ describe("conversation contracts", () => {
       .toEqual({ kind: "recommendation", ordinal: 1 });
     expect(() => ConversationTargetSchema.parse({ kind: "recommendation", id: "result-1", url: "https://unsafe" }))
       .toThrow();
+  });
+
+  it("accepts bounded recruitment discovery targets and staged confirmations", () => {
+    expect(ConversationIntentSchema.parse({
+      kind: "discover_recruitment_site",
+      target: { kind: "recruitment_site", company: "Baidu", recruitmentType: "campus" }
+    })).toMatchObject({
+      kind: "discover_recruitment_site",
+      target: { company: "Baidu", recruitmentType: "campus" }
+    });
+
+    const site = {
+      company: "Baidu",
+      recruitmentType: "campus" as const,
+      query: "Baidu campus recruitment official",
+      title: "Baidu Campus Recruitment",
+      url: "https://campus.baidu.com/",
+      domain: "campus.baidu.com",
+      snippet: "校园招聘岗位",
+      source: "tavily" as const
+    };
+    const siteCard = ConversationCardSchema.parse({ type: "recruitment_site", ...site });
+    expect(siteCard).toMatchObject({ type: "recruitment_site", url: site.url });
+
+    const sessionCard = ConversationCardSchema.parse({
+      type: "job_match_session",
+      sessionId: "match-1",
+      initialUrl: site.url,
+      state: "awaiting_filter_confirmation",
+      postingCount: 0
+    });
+    expect(sessionCard).toMatchObject({ type: "job_match_session", sessionId: "match-1" });
+
+    const confirmation = ConversationConfirmationSchema.parse({
+      confirmationId: "confirmation-1",
+      action: "request_job_recommendations",
+      target: { kind: "recruitment_site", ...site }
+    });
+    expect(confirmation.action).toBe("request_job_recommendations");
+
+    expect(() => ConversationCardSchema.parse({
+      type: "confirmation",
+      action: "start_application",
+      target: { kind: "recruitment_site", ...site }
+    })).toThrow();
+
+    expect(() => ConversationCardSchema.parse({
+      type: "confirmation",
+      action: "request_job_recommendations",
+      target: { kind: "recommendation", sessionId: "match-1", resultId: "result-1" }
+    })).toThrow();
+
+    expect(ConversationContextSchema.parse({
+      version: 0,
+      recentPostingIds: [],
+      verifiedRecruitmentSite: site,
+      lastRecruitmentRequest: { companyName: "百度", recruitmentType: "campus" }
+    })).toMatchObject({ verifiedRecruitmentSite: { company: "Baidu" } });
+  });
+
+  it("rejects an arbitrary or non-HTTPS recruitment entry", () => {
+    expect(() => ConversationCardSchema.parse({
+      type: "recruitment_site",
+      company: "Baidu",
+      recruitmentType: "campus",
+      query: "Baidu campus recruitment official",
+      title: "Untrusted result",
+      url: "http://example.com/",
+      domain: "example.com"
+    })).toThrow();
+  });
+
+  it("accepts bounded recruitment choices and an HTTPS selected URL", () => {
+    const choices = {
+      kind: "recruitment_site_choices" as const,
+      company: "百度",
+      recruitmentType: "campus" as const,
+      query: "百度 校园招聘 招聘 官网",
+      candidates: [
+        {
+          title: "百度人才",
+          url: "https://talent.baidu.com/",
+          domain: "talent.baidu.com",
+          snippet: "校园招聘",
+          source: "tavily" as const
+        },
+        {
+          title: "百度招聘",
+          url: "https://jobs.baidu.com/",
+          domain: "jobs.baidu.com",
+          snippet: "招聘",
+          source: "tavily" as const
+        }
+      ]
+    };
+
+    expect(ConversationConfirmationSchema.parse({
+      confirmationId: "confirmation-choices",
+      action: "confirm_recruitment_site",
+      target: choices
+    })).toMatchObject({ target: { candidates: expect.any(Array) } });
+    expect(ConversationConfirmInputSchema.parse({
+      confirmationId: "confirmation-choices",
+      approved: true,
+      selectedUrl: "https://talent.baidu.com/"
+    })).toMatchObject({ selectedUrl: "https://talent.baidu.com/" });
+    expect(() => ConversationConfirmationSchema.parse({
+      confirmationId: "confirmation-choices",
+      action: "confirm_recruitment_site",
+      target: { ...choices, candidates: [] }
+    })).toThrow();
+    expect(() => ConversationConfirmationSchema.parse({
+      confirmationId: "confirmation-choices",
+      action: "confirm_recruitment_site",
+      target: { ...choices, candidates: [...choices.candidates, choices.candidates[0], choices.candidates[1]] }
+    })).toThrow();
+    expect(() => ConversationConfirmInputSchema.parse({
+      confirmationId: "confirmation-choices",
+      approved: true,
+      selectedUrl: "http://talent.baidu.com/"
+    })).toThrow();
   });
 
   it("keeps cards as a bounded discriminated union", () => {

@@ -231,7 +231,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
   };
 
   const selectWorkspaceView = (view: WorkspaceView) => {
-    const destination = view === "profile" ? "/?view=profile" : view === "jobs" ? "/?view=jobs" : view === "applications" ? "/?view=applications" : "/";
+    const destination = view === "profile" ? "/?view=profile" : view === "applications" ? "/?view=applications" : "/";
     onNavigate?.(destination);
   };
 

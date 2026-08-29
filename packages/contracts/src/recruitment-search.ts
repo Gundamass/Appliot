@@ -25,7 +25,7 @@ export const RecruitmentSiteCandidateSchema = z.object({
   url: HttpsUrlSchema,
   domain: z.string().trim().min(1).max(255).regex(/^[A-Za-z0-9.-]+$/u),
   snippet: z.string().trim().max(500),
-  source: z.literal("tavily"),
+  source: z.enum(["tavily", "user"]),
   sourceScore: z.number().min(0).max(1).optional()
 }).strict();
 

@@ -130,6 +130,14 @@ describe("job matching contracts", () => {
     }).hasNext).toBe(true);
   });
 
+  it("accepts the registered Baidu campus source", () => {
+    expect(JobPostingDraftSchema.parse({
+      ...postingDraft,
+      source: "baidu",
+      adapterVersion: "baidu-job-v1"
+    }).source).toBe("baidu");
+  });
+
   it("accepts only finite, sanitized browser job snapshots", () => {
     expect(JobPageSnapshotSchema.parse(jobSnapshot)).toEqual(jobSnapshot);
 

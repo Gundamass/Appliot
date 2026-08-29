@@ -1,7 +1,14 @@
 import { createHash } from "node:crypto";
 import {
   ConversationCardSchema,
-  type ConversationCard
+  RecruitmentSearchRequestSchema,
+  RecruitmentSiteSearchResultSchema,
+  VerifiedRecruitmentSiteSchema,
+  type ConversationCard,
+  type RecruitmentSearchRequest,
+  type RecruitmentSiteSearchResult,
+  type VerifiedRecruitmentSite,
+  type JobMatchResult
 } from "@resume/contracts";
 import type { ApplicationService } from "../applications/application-service.js";
 import type {
@@ -12,12 +19,13 @@ import type {
   JobMatchAggregate,
   JobMatchRepository
 } from "../job-matching/job-match-repository.js";
-import type { JobMatchResult } from "@resume/contracts";
 import { z } from "zod";
 
 const IdentifierSchema = z.string().min(1).max(256);
 
 export const conversationToolNames = [
+  "discover_recruitment_site",
+  "create_job_match_session",
   "list_recommendations",
   "show_recommendation",
   "list_application_tasks",
@@ -33,6 +41,7 @@ export interface ConversationToolContext {
   activeJobMatchSessionId?: string;
   selectedPostingId?: string;
   activeApplicationTaskId?: string;
+  verifiedRecruitmentSite?: VerifiedRecruitmentSite;
 }
 
 export interface ConversationToolResult {
@@ -44,13 +53,24 @@ export interface ConversationToolResult {
     postingId: string;
     postingContentHash: string;
   };
+  recruitmentSite?: VerifiedRecruitmentSite;
+  recruitmentSearch?: RecruitmentSiteSearchResult;
+  jobMatchSession?: {
+    sessionId: string;
+    state: string;
+    postingIds: string[];
+  };
 }
 
 export interface ConversationToolDependencies {
   jobMatchRepository: Pick<JobMatchRepository, "get">;
   applicationTasks: Pick<ApplicationTaskRepository, "list" | "get" | "createFromJob">;
   applicationService?: Pick<ApplicationService, "start"> & Partial<Pick<ApplicationService, "state">>;
+  searchRecruitmentSites?: (
+    input: RecruitmentSearchRequest
+  ) => Promise<RecruitmentSiteSearchResult>;
   jobMatchService?: {
+    create?(input: { url: string }): Promise<JobMatchAggregate | { redirect: "application"; applicationUrl: string }>;
     select(sessionId: string, input: {
       sessionVersion: number;
       idempotencyKey: string;
@@ -90,6 +110,13 @@ const CreateApplicationTaskInputSchema = z.object({
   postingContentHash: z.string().min(1).max(256)
 }).strict();
 
+const DiscoverRecruitmentSiteInputSchema = z.object({
+  company: z.string().trim().min(1).max(80),
+  recruitmentType: z.enum(["campus", "social", "internship", "unknown"])
+}).strict();
+
+const CreateJobMatchSessionInputSchema = z.object({}).strict();
+
 export function createConversationToolRegistry(dependencies: ConversationToolDependencies) {
   const names = [...conversationToolNames] as ConversationToolName[];
   const createTaskId = dependencies.createTaskId ?? defaultTaskId;
@@ -109,6 +136,16 @@ export function createConversationToolRegistry(dependencies: ConversationToolDep
       try {
         let result: ConversationToolResult;
         switch (name) {
+          case "discover_recruitment_site": {
+            const input = DiscoverRecruitmentSiteInputSchema.parse(rawInput);
+            result = await discoverRecruitmentSite(dependencies, input, context);
+            break;
+          }
+          case "create_job_match_session": {
+            CreateJobMatchSessionInputSchema.parse(rawInput);
+            result = await createJobMatchSession(dependencies, context);
+            break;
+          }
           case "list_recommendations": {
             const input = ListRecommendationsInputSchema.parse(rawInput);
             const sessionId = input.sessionId ?? context.activeJobMatchSessionId;
@@ -253,6 +290,54 @@ async function createApplicationTask(
   };
 }
 
+async function discoverRecruitmentSite(
+  dependencies: ConversationToolDependencies,
+  input: z.infer<typeof DiscoverRecruitmentSiteInputSchema>,
+  context: ConversationToolContext
+): Promise<ConversationToolResult> {
+  if (dependencies.searchRecruitmentSites === undefined) throw new Error("TAVILY_NOT_CONFIGURED");
+  const request = RecruitmentSearchRequestSchema.parse({
+    companyName: input.company,
+    recruitmentType: input.recruitmentType
+  });
+  const search = RecruitmentSiteSearchResultSchema.parse(await dependencies.searchRecruitmentSites(request));
+  return { cards: [], recruitmentSearch: search };
+}
+
+async function createJobMatchSession(
+  dependencies: ConversationToolDependencies,
+  context: ConversationToolContext
+): Promise<ConversationToolResult> {
+  const site = context.verifiedRecruitmentSite;
+  if (site === undefined) throw new Error("recruitment_site_confirmation_required");
+  if (dependencies.jobMatchService?.create === undefined) {
+    throw new Error("job_match_create_unavailable");
+  }
+  const created = await dependencies.jobMatchService.create({ url: site.url });
+  if (!isJobMatchAggregate(created)) {
+    throw new Error("job_match_application_redirect");
+  }
+  const aggregate = created;
+  const resultCards = aggregate.results
+    .filter((result) => !result.stale)
+    .sort((left, right) => right.rankingScore - left.rankingScore || left.id.localeCompare(right.id))
+    .slice(0, 18)
+    .map((result) => recommendationCard(aggregate, result));
+  return {
+    cards: [
+      recruitmentSiteCard(site),
+      jobMatchSessionCard(aggregate),
+      ...resultCards
+    ],
+    recruitmentSite: site,
+    jobMatchSession: {
+      sessionId: aggregate.id,
+      state: aggregate.state,
+      postingIds: aggregate.results.map((result) => result.postingId).slice(0, 50)
+    }
+  };
+}
+
 function recommendationCard(aggregate: JobMatchAggregate, result: JobMatchResult): ConversationCard {
   const posting = aggregate.postings.find((candidate) => candidate.id === result.postingId);
   if (posting === undefined) throw new Error("recommendation_posting_not_found");
@@ -289,6 +374,20 @@ function taskCard(
   });
 }
 
+function recruitmentSiteCard(site: VerifiedRecruitmentSite): ConversationCard {
+  return ConversationCardSchema.parse({ type: "recruitment_site", ...site });
+}
+
+function jobMatchSessionCard(aggregate: JobMatchAggregate): ConversationCard {
+  return ConversationCardSchema.parse({
+    type: "job_match_session",
+    sessionId: aggregate.id,
+    initialUrl: aggregate.initialUrl,
+    state: aggregate.state,
+    postingCount: aggregate.postings.length
+  });
+}
+
 function requireAggregate(
   dependencies: ConversationToolDependencies,
   sessionId: string
@@ -304,14 +403,16 @@ function parseContext(value: ConversationToolContext): ConversationToolContext {
     recentPostingIds: z.array(IdentifierSchema).max(50),
     activeJobMatchSessionId: IdentifierSchema.optional(),
     selectedPostingId: IdentifierSchema.optional(),
-    activeApplicationTaskId: IdentifierSchema.optional()
+    activeApplicationTaskId: IdentifierSchema.optional(),
+    verifiedRecruitmentSite: VerifiedRecruitmentSiteSchema.optional()
   }).strict().parse(value);
   return {
     conversationId: parsed.conversationId,
     recentPostingIds: parsed.recentPostingIds,
     ...(parsed.activeJobMatchSessionId === undefined ? {} : { activeJobMatchSessionId: parsed.activeJobMatchSessionId }),
     ...(parsed.selectedPostingId === undefined ? {} : { selectedPostingId: parsed.selectedPostingId }),
-    ...(parsed.activeApplicationTaskId === undefined ? {} : { activeApplicationTaskId: parsed.activeApplicationTaskId })
+    ...(parsed.activeApplicationTaskId === undefined ? {} : { activeApplicationTaskId: parsed.activeApplicationTaskId }),
+    ...(parsed.verifiedRecruitmentSite === undefined ? {} : { verifiedRecruitmentSite: parsed.verifiedRecruitmentSite })
   };
 }
 
@@ -319,13 +420,27 @@ function validateResult(value: ConversationToolResult): ConversationToolResult {
   return {
     cards: value.cards.map((card) => ConversationCardSchema.parse(card)),
     ...(value.task === undefined ? {} : { task: value.task }),
-    ...(value.recommendation === undefined ? {} : { recommendation: value.recommendation })
+    ...(value.recommendation === undefined ? {} : { recommendation: value.recommendation }),
+    ...(value.recruitmentSite === undefined ? {} : { recruitmentSite: VerifiedRecruitmentSiteSchema.parse(value.recruitmentSite) }),
+    ...(value.recruitmentSearch === undefined ? {} : { recruitmentSearch: RecruitmentSiteSearchResultSchema.parse(value.recruitmentSearch) }),
+    ...(value.jobMatchSession === undefined ? {} : { jobMatchSession: value.jobMatchSession })
   };
+}
+
+function isJobMatchAggregate(value: JobMatchAggregate | { redirect: "application"; applicationUrl: string }): value is JobMatchAggregate {
+  return typeof value === "object"
+    && value !== null
+    && "id" in value
+    && typeof value.id === "string"
+    && "postings" in value
+    && Array.isArray(value.postings)
+    && "results" in value
+    && Array.isArray(value.results);
 }
 
 function normalizeToolError(error: unknown): Error {
   if (error instanceof z.ZodError) return new Error("tool_input_invalid");
-  if (error instanceof Error && /^[a-z0-9_:-]+$/u.test(error.message)) return error;
+  if (error instanceof Error && /^[A-Za-z0-9_:-]+$/u.test(error.message)) return error;
   return new Error("tool_execution_failed");
 }
 

@@ -114,7 +114,10 @@ describe("conversation recommendation to application task handoff", () => {
     const graph = createConversationGraph(fakes.dependencies);
 
     const pending = await send(graph, "投递第一份，帮我查看投递进度");
-    expect(pending.pendingConfirmation?.target.resultId).toBe("result-1");
+    expect(pending.pendingConfirmation?.target).toMatchObject({
+      kind: "recommendation",
+      resultId: "result-1"
+    });
     expect(fakes.convert).not.toHaveBeenCalled();
 
     const confirmed = (await graph.invoke({

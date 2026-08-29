@@ -1,6 +1,7 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
   ConversationSessionSchema,
+  ConversationConfirmInputSchema,
   ConversationTurnInputSchema,
   ConversationTurnResponseSchema,
   ConversationViewSchema
@@ -10,10 +11,6 @@ import { sendError } from "../http-response.js";
 import type { ConversationService } from "./conversation-service.js";
 
 const ConversationParamsSchema = z.object({ id: z.string().min(1).max(256) }).strict();
-const ConfirmationInputSchema = z.object({
-  confirmationId: z.string().trim().min(1).max(256),
-  approved: z.boolean()
-}).strict();
 const IdempotencyKeySchema = z.string().trim().min(1).max(256);
 
 export interface ConversationRouteDependencies {
@@ -46,7 +43,7 @@ export function registerConversationRoutes(
 
   app.post("/api/conversations/:id/confirm", async (request, reply) => {
     const params = ConversationParamsSchema.safeParse(request.params);
-    const input = ConfirmationInputSchema.safeParse(request.body);
+    const input = ConversationConfirmInputSchema.safeParse(request.body);
     if (!params.success) return invalid(reply, "invalid_conversation_id");
     if (!input.success) return invalid(reply, "invalid_conversation_confirmation_input");
     return execute(reply, 200, () => dependencies.service.confirm(params.data.id, input.data));

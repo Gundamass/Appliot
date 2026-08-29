@@ -30,7 +30,7 @@ export const JobEntryKindSchema = z.enum([
   "application_form"
 ]);
 
-export const JobSourceSchema = z.enum(["moka", "dji"]);
+export const JobSourceSchema = z.enum(["moka", "dji", "baidu"]);
 
 export const JobExpectationCriterionKindSchema = z.enum([
   "target_role",
@@ -159,6 +159,7 @@ export const JobCardSnapshotSchema = z.object({
   title: ShortTextSchema,
   organization: ShortTextSchema,
   location: ShortTextSchema.optional(),
+  employmentType: ShortTextSchema.optional(),
   summary: z.string().max(2_000).optional()
 }).strict();
 

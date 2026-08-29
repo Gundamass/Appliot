@@ -7,6 +7,9 @@ process.on("message", (message: unknown) => {
     requestId: string;
     request: {
       type?: string;
+      taskId?: string;
+      url?: string;
+      navigationPolicy?: string;
     };
   };
   if (request.type === "handshake") {
@@ -49,6 +52,18 @@ process.on("message", (message: unknown) => {
           actions: [],
           errors: []
         }
+      }
+    });
+    return;
+  }
+  if (request.type === "open") {
+    process.send({
+      requestId,
+      response: {
+        type: "opened",
+        taskId: request.taskId!,
+        url: request.url!,
+        title: request.navigationPolicy ?? "default"
       }
     });
     return;

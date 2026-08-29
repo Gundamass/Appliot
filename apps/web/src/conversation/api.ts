@@ -20,7 +20,7 @@ export interface ConversationApi {
   create(): Promise<ConversationSession>;
   get(id: string): Promise<ConversationView>;
   send(id: string, text: string): Promise<ConversationTurnResponse>;
-  confirm(id: string, confirmationId: string, approved: boolean): Promise<ConversationTurnResponse>;
+  confirm(id: string, confirmationId: string, approved: boolean, selectedUrl?: string): Promise<ConversationTurnResponse>;
 }
 
 export function createConversationApi(baseUrl = ""): ConversationApi {
@@ -39,8 +39,12 @@ export function createConversationApi(baseUrl = ""): ConversationApi {
       if (!payload.success) throw new ConversationApiError("消息最多 500 字，请缩短后重试", "conversation_input_invalid", 400);
       return ConversationTurnResponseSchema.parse(await request(`${path(id)}/messages`, json("POST", payload.data)));
     },
-    async confirm(id, confirmationId, approved) {
-      return ConversationTurnResponseSchema.parse(await request(`${path(id)}/confirm`, json("POST", { confirmationId, approved })));
+    async confirm(id, confirmationId, approved, selectedUrl) {
+      return ConversationTurnResponseSchema.parse(await request(`${path(id)}/confirm`, json("POST", {
+        confirmationId,
+        approved,
+        ...(selectedUrl === undefined ? {} : { selectedUrl })
+      })));
     }
   };
 }

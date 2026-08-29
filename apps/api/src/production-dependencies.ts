@@ -64,10 +64,12 @@ import { BoundedJobMatchTraceBuffer } from "./observability/job-match-trace.js";
 import { createConversationGraph } from "./conversations/conversation-graph.js";
 import { createConversationRepository } from "./conversations/conversation-repository.js";
 import { createConversationService, type ConversationService } from "./conversations/conversation-service.js";
+import { createTavilyRecruitmentSiteSearch } from "./recruitment-search/tavily-remote-mcp.js";
+import type { RecruitmentSearchRequest, RecruitmentSiteSearchPort } from "@resume/contracts";
 
 type ProductionBrowserClient = Pick<BrowserWorkerClient, "open" | "observe" | "execute" | "stop">
   & Partial<Pick<BrowserWorkerClient,
-    "invalidateExecution" | "releaseTask" | "onActivity" | "observeJob" | "applyJobFilters" | "advanceJobPage"
+    "openPublic" | "invalidateExecution" | "releaseTask" | "onActivity" | "observeJob" | "applyJobFilters" | "advanceJobPage"
   >>;
 
 export interface ProductionAdapterDependencies {
@@ -75,6 +77,7 @@ export interface ProductionAdapterDependencies {
   evidenceRetrievalFallback?: EvidenceRetrievalPort;
   browserClient?: ProductionBrowserClient;
   browserClientFactory?: () => Promise<ProductionBrowserClient>;
+  recruitmentSiteSearch?: RecruitmentSiteSearchPort;
 }
 
 export interface ProductionDependencies extends AppDependencies {
@@ -287,6 +290,21 @@ export function createProductionDependencies(
         await recycleBrowserClient(client);
       }
       tasksWithOpenAttempt.delete(taskId);
+      tasksWithOpenAttempt.delete(`public:${taskId}`);
+    };
+    const openPublicBrowser = async (taskId: string, url: string) => {
+      const client = await getBrowserClient();
+      if (client.openPublic === undefined) throw new Error("browser_public_open_unavailable");
+      const firstOpenAttempt = !tasksWithOpenAttempt.has(`public:${taskId}`);
+      tasksWithOpenAttempt.add(`public:${taskId}`);
+      try {
+        return await client.openPublic(taskId, url);
+      } catch (error) {
+        if (!firstOpenAttempt) throw error;
+        const recycled = await recycleBrowserClient(client);
+        if (recycled.openPublic === undefined) throw new Error("browser_public_open_unavailable");
+        return recycled.openPublic(taskId, url);
+      }
     };
     const applicationBrowser = {
       async open(taskId: string, url: string) {
@@ -431,7 +449,7 @@ export function createProductionDependencies(
     const jobMatchTrace = new BoundedJobMatchTraceBuffer();
     const jobAdapters = [mokaJobAdapter, djiJobAdapter, baiduJobAdapter] as const;
     const jobBrowser = {
-      open: openBrowser,
+      open: openPublicBrowser,
       async observeJob(ownerId: string) {
         const client = await getBrowserClient();
         if (client.observeJob === undefined) throw new Error("job_browser_observe_unavailable");
@@ -484,6 +502,8 @@ export function createProductionDependencies(
       trace: jobMatchTrace,
       prepareApplicationTask: (input) => applicationService.start(input)
     });
+    const recruitmentSiteSearch = adapters.recruitmentSiteSearch
+      ?? (config.tavily === undefined ? undefined : createTavilyRecruitmentSiteSearch(config.tavily));
     const conversationGraph = createConversationGraph({
       jobMatchRepository,
       applicationTasks: taskRepository,
@@ -491,6 +511,9 @@ export function createProductionDependencies(
       jobMatchService,
       checkpointer: agentCheckpointer,
       traceSink: agentTraceSink,
+      ...(recruitmentSiteSearch === undefined ? {} : {
+        searchRecruitmentSites: (input: RecruitmentSearchRequest) => recruitmentSiteSearch.search(input)
+      }),
       ...(structuredProvider === undefined ? {} : { modelProvider: structuredProvider }),
       confirmationStore: {
         put(conversationId, confirmation) {

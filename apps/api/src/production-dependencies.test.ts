@@ -189,7 +189,46 @@ describe("production dependency composition", () => {
 
       expect(response.statusCode).toBe(200);
       expect(response.json().pendingConfirmation).toBeUndefined();
-      expect(response.json().message.text).toContain("暂时无法");
+      expect(response.json().message.text).toContain("联网搜索尚未配置");
+      expect(browserClientFactory).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("uses the configured Tavily recruitment port before any browser worker starts", async () => {
+    const browserClientFactory = vi.fn(async () => productionBrowserClient());
+    const search = vi.fn(async (input: { companyName: string; recruitmentType: "campus" | "social" | "internship" | "unknown" }) => ({
+      query: `${input.companyName} ${input.recruitmentType}`,
+      candidates: [{
+        title: "百度校园招聘",
+        url: "https://talent.baidu.com/",
+        domain: "talent.baidu.com",
+        snippet: "校园招聘岗位",
+        source: "tavily" as const
+      }]
+    }));
+    const dependencies = createProductionDependencies(loadConfig({
+      DATABASE_FILE: ":memory:",
+      TAVILY_API_KEY: "tvly-test-key"
+    }), {
+      browserClientFactory,
+      recruitmentSiteSearch: { search } as never
+    });
+    const app = await createApp(dependencies);
+
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/conversations" });
+      const sessionId = created.json().id as string;
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${sessionId}/messages`,
+        payload: { text: "帮我投递百度校园招聘" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(search).toHaveBeenCalledWith({ companyName: "百度", recruitmentType: "campus" });
+      expect(response.json().pendingConfirmation.target.kind).toBe("recruitment_site_choices");
       expect(browserClientFactory).not.toHaveBeenCalled();
     } finally {
       await app.close();
@@ -1663,6 +1702,7 @@ function productionBrowserClient(overrides: Record<string, unknown> = {}) {
   });
   return {
     open: vi.fn(async (taskId: string, url: string) => ({ type: "opened" as const, taskId, url, title: "Jobs" })),
+    openPublic: vi.fn(async (taskId: string, url: string) => ({ type: "opened" as const, taskId, url, title: "Jobs" })),
     observe: vi.fn(async (taskId: string) => ({
       type: "snapshot" as const,
       snapshot: {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 

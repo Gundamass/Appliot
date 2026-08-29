@@ -1,4 +1,11 @@
 import { z } from "zod";
+import {
+  RecruitmentCompanySchema,
+  RecruitmentSearchRequestSchema,
+  RecruitmentSearchTypeSchema,
+  RecruitmentSiteCandidateSchema,
+  VerifiedRecruitmentSiteSchema
+} from "./recruitment-search.js";
 
 const IdentifierSchema = z.string().min(1).max(256);
 const TimestampSchema = z.string().datetime({ offset: true });
@@ -10,6 +17,8 @@ export const ConversationIntentKindSchema = z.enum([
   "show_application_task",
   "list_application_tasks",
   "start_application_and_show_status",
+  "discover_recruitment_site",
+  "request_job_recommendations",
   "help",
   "unknown"
 ]);
@@ -17,14 +26,25 @@ export const ConversationIntentKindSchema = z.enum([
 export const ConversationTargetKindSchema = z.enum([
   "recommendation",
   "task",
-  "job_match_session"
+  "job_match_session",
+  "recruitment_site"
 ]);
 
 export const ConversationTargetSchema = z.object({
   kind: ConversationTargetKindSchema,
   id: IdentifierSchema.optional(),
-  ordinal: z.number().int().positive().max(100).optional()
-}).strict();
+  ordinal: z.number().int().positive().max(100).optional(),
+  company: RecruitmentCompanySchema.optional(),
+  recruitmentType: RecruitmentSearchTypeSchema.optional()
+}).strict().superRefine((target, context) => {
+  const hasRecruitmentFields = target.company !== undefined || target.recruitmentType !== undefined;
+  if (target.kind === "recruitment_site" && (target.company === undefined || target.recruitmentType === undefined)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["company"], message: "recruitment_company_required" });
+  }
+  if (target.kind !== "recruitment_site" && hasRecruitmentFields) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["company"], message: "recruitment_fields_not_allowed" });
+  }
+});
 
 export const ConversationIntentSchema = z.object({
   kind: ConversationIntentKindSchema,
@@ -51,28 +71,103 @@ const ApplicationTaskCardSchema = z.object({
   applicationUrl: z.string().url()
 }).strict();
 
-const ConfirmationTargetSchema = z.object({
+const RecommendationConfirmationTargetSchema = z.object({
   kind: z.literal("recommendation"),
   sessionId: IdentifierSchema,
   resultId: IdentifierSchema,
   postingContentHash: z.string().max(256).optional()
 }).strict();
 
-export const ConversationCardSchema = z.discriminatedUnion("type", [
+const RecruitmentSiteChoicesTargetSchema = z.object({
+  kind: z.literal("recruitment_site_choices"),
+  company: RecruitmentCompanySchema,
+  recruitmentType: RecruitmentSearchTypeSchema,
+  query: z.string().trim().min(1).max(200),
+  candidates: z.array(RecruitmentSiteCandidateSchema).min(1).max(3)
+}).strict();
+
+const RecruitmentSiteTargetSchema = z.object({
+  kind: z.literal("recruitment_site"),
+  ...VerifiedRecruitmentSiteSchema.shape
+}).strict();
+
+const RecruitmentSiteCardSchema = z.object({
+  type: z.literal("recruitment_site"),
+  ...VerifiedRecruitmentSiteSchema.shape
+}).strict();
+
+const JobMatchSessionCardSchema = z.object({
+  type: z.literal("job_match_session"),
+  sessionId: IdentifierSchema,
+  initialUrl: z.string().url(),
+  state: z.string().min(1).max(80),
+  postingCount: z.number().int().nonnegative()
+}).strict();
+
+const ConfirmationCardSchema = z.object({
+  type: z.literal("confirmation"),
+  action: z.enum(["start_application", "confirm_recruitment_site", "request_job_recommendations"]),
+  target: z.union([
+    RecommendationConfirmationTargetSchema,
+    RecruitmentSiteChoicesTargetSchema,
+    RecruitmentSiteTargetSchema
+  ])
+}).strict();
+
+export const ConversationCardSchema = z.union([
   RecommendationCardSchema,
   ApplicationTaskCardSchema,
-  z.object({
-    type: z.literal("confirmation"),
-    action: z.literal("start_application"),
-    target: ConfirmationTargetSchema
-  }).strict()
-]);
+  RecruitmentSiteCardSchema,
+  JobMatchSessionCardSchema,
+  ConfirmationCardSchema
+]).superRefine((card, context) => {
+  if (card.type !== "confirmation") return;
+  if (card.action === "start_application" && card.target.kind !== "recommendation") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["target", "kind"],
+      message: "start_application_target_invalid"
+    });
+  }
+  if (card.action === "confirm_recruitment_site" && card.target.kind !== "recruitment_site_choices") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["target", "kind"],
+      message: "recruitment_choices_confirmation_target_invalid"
+    });
+  }
+  if (card.action === "request_job_recommendations" && card.target.kind !== "recruitment_site") {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["target", "kind"],
+      message: "recruitment_confirmation_target_invalid"
+    });
+  }
+});
 
-export const ConversationConfirmationSchema = z.object({
+const StartApplicationConfirmationSchema = z.object({
   confirmationId: IdentifierSchema,
   action: z.literal("start_application"),
-  target: ConfirmationTargetSchema
+  target: RecommendationConfirmationTargetSchema
 }).strict();
+
+const RecruitmentSiteChoicesConfirmationSchema = z.object({
+  confirmationId: IdentifierSchema,
+  action: z.literal("confirm_recruitment_site"),
+  target: RecruitmentSiteChoicesTargetSchema
+}).strict();
+
+const RecruitmentSiteConfirmationSchema = z.object({
+  confirmationId: IdentifierSchema,
+  action: z.literal("request_job_recommendations"),
+  target: RecruitmentSiteTargetSchema
+}).strict();
+
+export const ConversationConfirmationSchema = z.union([
+  StartApplicationConfirmationSchema,
+  RecruitmentSiteChoicesConfirmationSchema,
+  RecruitmentSiteConfirmationSchema
+]);
 
 export const ConversationMessageRoleSchema = z.enum(["user", "assistant"]);
 
@@ -98,6 +193,8 @@ export const ConversationContextSchema = z.object({
   activeJobMatchSessionId: IdentifierSchema.optional(),
   selectedPostingId: IdentifierSchema.optional(),
   activeApplicationTaskId: IdentifierSchema.optional(),
+  verifiedRecruitmentSite: VerifiedRecruitmentSiteSchema.optional(),
+  lastRecruitmentRequest: RecruitmentSearchRequestSchema.optional(),
   recentPostingIds: z.array(IdentifierSchema).max(50).default([]),
   lastIntent: ConversationIntentSchema.nullable().optional(),
   version: z.number().int().nonnegative()
@@ -105,6 +202,20 @@ export const ConversationContextSchema = z.object({
 
 export const ConversationTurnInputSchema = z.object({
   text: z.string().trim().min(1).max(500)
+}).strict();
+
+const HttpsUrlSchema = z.string().url().max(2_048).refine((value) => {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}, "recruitment_url_must_be_https");
+
+export const ConversationConfirmInputSchema = z.object({
+  confirmationId: IdentifierSchema,
+  approved: z.boolean(),
+  selectedUrl: HttpsUrlSchema.optional()
 }).strict();
 
 export const ConversationTurnResponseSchema = z.object({
@@ -133,5 +244,6 @@ export type ConversationMessage = z.infer<typeof ConversationMessageSchema>;
 export type ConversationSession = z.infer<typeof ConversationSessionSchema>;
 export type ConversationContext = z.infer<typeof ConversationContextSchema>;
 export type ConversationTurnInput = z.infer<typeof ConversationTurnInputSchema>;
+export type ConversationConfirmInput = z.infer<typeof ConversationConfirmInputSchema>;
 export type ConversationTurnResponse = z.infer<typeof ConversationTurnResponseSchema>;
 export type ConversationView = z.infer<typeof ConversationViewSchema>;

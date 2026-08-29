@@ -14,6 +14,8 @@ const runtime = vi.hoisted(() => ({
 
 class FakePage extends EventEmitter {
   private closed = false;
+  routeCalls = 0;
+  unrouteCalls = 0;
 
   constructor(readonly name: string, private readonly host = `${name}.example`) {
     super();
@@ -28,6 +30,10 @@ class FakePage extends EventEmitter {
   }
 
   async goto(): Promise<void> {}
+
+  async route(): Promise<void> { this.routeCalls += 1; }
+
+  async unroute(): Promise<void> { this.unrouteCalls += 1; }
 
   async addInitScript(): Promise<void> {}
 
@@ -401,6 +407,21 @@ describe("BrowserSessionManager 页面生命周期", () => {
 
     expect(opened.taskId).toBe("task-2");
     expect(context.closeCalls).toBe(0);
+    await manager.stop();
+  });
+
+  it("only installs the public navigation guard for public recruitment opens", async () => {
+    const initial = new FakePage("initial");
+    const manager = createManager(new FakeContext(initial));
+    await manager.start(approvalKey);
+
+    await manager.open("task-default", "https://jobs.example.test/apply");
+    expect(initial.routeCalls).toBe(0);
+    expect(initial.unrouteCalls).toBe(0);
+
+    await manager.open("task-public", "https://jobs.example.test/apply", "public_https" as never);
+    expect(initial.routeCalls).toBe(1);
+    expect(initial.unrouteCalls).toBe(1);
     await manager.stop();
   });
 });
