@@ -96,43 +96,25 @@ test("identifies job detail, application, login and challenge boundaries without
   detector.dispose();
 });
 
-test("starts job matching from the workspace and never submits the ATS", async ({ page }) => {
-  const taskId = "job-match-entry-flow";
-  await mockProfileAndCreateSession(page, sessionFixture());
-  await page.setViewportSize({ width: 320, height: 800 });
+test("maps the legacy apply view back to chat without exposing a job entry", async ({ page }) => {
   await page.goto(`${webBaseUrl}/?view=apply`);
 
-  await expect(page.getByRole("button", { name: "岗位匹配" })).toHaveAttribute("aria-pressed", "true");
-  await page.getByLabel("招聘链接").fill(`${ats.baseUrl}/job-list.html?page=1&taskId=${taskId}`);
-  await page.getByRole("button", { name: "确认岗位期望并开始匹配" }).click();
-
-  await expect(page).toHaveURL(new RegExp(`/job-match-sessions/${sessionId}$`, "u"));
-  expect(await page.evaluate(() => document.documentElement.scrollWidth > window.innerWidth)).toBe(false);
-  expect(ats.state(taskId).submissionCount).toBe(0);
+  await expect(page.getByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
+  await expect(page.getByRole("button", { name: "岗位匹配" })).toHaveCount(0);
+  await expect(page.getByRole("button", { name: "岗位推荐" })).toBeVisible();
 });
 
-test("prefills an application redirect without creating or submitting a task", async ({ page }) => {
-  const taskId = "job-match-application-redirect";
+test("maps the legacy apply view to chat without creating an application task", async ({ page }) => {
   let applicationCreateCount = 0;
-  await mockProfileAndCreateSession(page, {
-    redirect: "application",
-    applicationUrl: `${ats.baseUrl}/application?taskId=${taskId}`
-  });
   await page.route("**/api/applications", async (route) => {
     if (route.request().method() === "POST") applicationCreateCount += 1;
     await route.fulfill({ status: 500, contentType: "application/json", body: JSON.stringify({ error: "unexpected application create" }) });
   });
   await page.goto(`${webBaseUrl}/?view=apply`);
 
-  await page.getByLabel("招聘链接").fill(`${ats.baseUrl}/application?taskId=${taskId}`);
-  await page.getByRole("button", { name: "确认岗位期望并开始匹配" }).click();
-
-  await expect(page.getByRole("button", { name: "直接投递" })).toHaveAttribute("aria-pressed", "true");
-  await expect(page.getByLabel("投递官网链接")).toHaveValue(`${ats.baseUrl}/application?taskId=${taskId}`);
-  await page.getByLabel("任务名称").fill("人工确认后的投递任务");
-  await expect(page.getByLabel("任务名称")).toHaveValue("人工确认后的投递任务");
+  await expect(page.getByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
+  await expect(page.getByLabel("投递官网链接")).toHaveCount(0);
   expect(applicationCreateCount).toBe(0);
-  expect(ats.state(taskId).submissionCount).toBe(0);
 });
 
 test("reads a synthetic job list and renders recommendation and conflict paths with zero submissions", async ({ page }) => {

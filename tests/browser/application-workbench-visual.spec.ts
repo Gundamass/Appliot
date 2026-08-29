@@ -40,7 +40,7 @@ for (const viewport of viewports) {
     await expect(page.getByRole("heading", { name: "投递任务工作台" })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "候选人工作台" })).toBeVisible();
     await expect(page.getByRole("navigation", { name: "候选人工作台" })
-      .getByRole("button", { name: "投递审核", exact: true }))
+      .getByRole("button", { name: "投递进度", exact: true }))
       .toHaveAttribute("aria-current", "page");
 
     const dimensions = await page.evaluate(() => ({
@@ -65,7 +65,7 @@ for (const viewport of viewports) {
 
     if (viewport.name === "desktop") {
       expect(layout.shellDisplay).toBe("grid");
-      expect(layout.sidebarWidth).toBeGreaterThanOrEqual(220);
+      expect(layout.sidebarWidth).toBe(216);
       expect(layout.workspaceColumns.split(" ")).toHaveLength(2);
     } else if (viewport.name === "tablet") {
       expect(layout.shellDisplay).toBe("grid");

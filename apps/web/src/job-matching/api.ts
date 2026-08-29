@@ -30,7 +30,7 @@ export interface JobMatchSession {
   createdAt: string;
   updatedAt: string;
   entryKind?: "job_list" | "job_detail" | "application_form";
-  source?: "moka" | "dji";
+  source?: "moka" | "dji" | "baidu";
   adapterVersion?: string;
   selectedResultId?: string;
   selectedPostingContentHash?: string;

@@ -169,7 +169,8 @@ export const WorkerRequestSchema = z.discriminatedUnion("type", [
   z.object({
     type: z.literal("open"),
     taskId: z.string(),
-    url: z.string().url()
+    url: z.string().url(),
+    navigationPolicy: z.enum(["default", "public_https"]).default("default")
   }).strict(),
   z.object({
     type: z.literal("capture_snapshot"),

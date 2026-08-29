@@ -111,10 +111,11 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     const name = body.data.name ?? suggestApplicationTaskName(body.data.applicationUrl);
     const taskInput = { id: randomUUID(), name, applicationUrl: body.data.applicationUrl };
     let serviceStarted = false;
+    let task: StoredApplicationTask | undefined;
     try {
+      task = dependencies.tasks.create(taskInput);
       dependencies.applicationService.start({ taskId: taskInput.id, applicationUrl: taskInput.applicationUrl });
       serviceStarted = true;
-      const task = dependencies.tasks.create(taskInput);
       emitState(task.id);
       await dependencies.applicationService.openBrowser(task.id);
       await dependencies.applicationService.runUntilPause(task.id);
@@ -128,10 +129,10 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
         } catch {
           // Cleanup below must still run when cancellation observes a terminal actor.
         } finally {
-          dependencies.applicationService.dispose(taskInput.id);
+          await dependencies.applicationService.dispose(taskInput.id);
         }
       }
-      dependencies.tasks.delete(taskInput.id);
+      if (task !== undefined) dependencies.tasks.delete(taskInput.id);
       const code = error instanceof Error && error.message === "browser_task_in_use"
         ? "browser_task_in_use"
         : "application_task_creation_failed";
@@ -161,8 +162,8 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     if (!(["review_locked", "cancelled", "failed"] as const).includes(state as "review_locked" | "cancelled" | "failed")) {
       return sendError(reply, 409, "Application task cannot be deleted while active", "application_task_delete_not_allowed");
     }
+    await dependencies.applicationService.dispose(task.id);
     dependencies.tasks.delete(task.id);
-    dependencies.applicationService.dispose(task.id);
     return reply.code(204).send();
   });
 
@@ -276,6 +277,7 @@ function commandErrorCode(error: unknown): string {
     "content_review_mismatch",
     "content_review_not_allowed",
     "content_review_persistence_failed",
+    "content_review_rejection_failed",
     "content_review_unsupported_edit",
     "content_review_validation_unavailable",
     "incomplete_question_answers",

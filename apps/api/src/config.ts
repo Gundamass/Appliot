@@ -27,6 +27,28 @@ export interface RemoteOcrAdapterConfig {
   timeoutMs: number;
 }
 
+export interface LightRagRetrievalAdapterConfig {
+  apiToken: string;
+  baseUrl: string;
+  tenantScope: string;
+  timeoutMs: number;
+}
+
+export interface TavilyRemoteMcpConfig {
+  apiKey: string;
+  endpoint: string;
+  timeoutMs: number;
+  maxRetries: 1;
+}
+
+export interface LangSmithConfig {
+  enabled: boolean;
+  apiKey?: string;
+  endpoint?: string;
+  project: string;
+  maxAttempts: number;
+}
+
 export interface ApiConfig {
   databaseFile: string;
   host: "127.0.0.1";
@@ -34,6 +56,9 @@ export interface ApiConfig {
   deepseek?: DeepSeekAdapterConfig;
   embedding?: RemoteEmbeddingAdapterConfig;
   ocr?: RemoteOcrAdapterConfig;
+  lightRag?: LightRagRetrievalAdapterConfig;
+  tavily?: TavilyRemoteMcpConfig;
+  langsmith: LangSmithConfig;
 }
 
 export class ConfigurationError extends Error {
@@ -100,6 +125,42 @@ const ocrSchema = z.object({
   timeoutMs: positiveInteger
 });
 
+const lightRagSchema = z.object({
+  apiToken: nonEmptyString,
+  baseUrl: loopbackTunnelUrl(43122),
+  tenantScope: nonEmptyString.max(200),
+  timeoutMs: positiveInteger
+});
+
+const tavilySchema = z.object({
+  apiKey: nonEmptyString,
+  endpoint: z.string().url().refine((value) => {
+    const parsed = new URL(value);
+    return parsed.protocol === "https:"
+      && parsed.username === ""
+      && parsed.password === ""
+      && parsed.search === ""
+      && parsed.hash === "";
+  }, "https_endpoint_required"),
+  timeoutMs: positiveInteger
+});
+
+const langsmithSchema = z.object({
+  enabled: z.boolean(),
+  apiKey: nonEmptyString.optional(),
+  endpoint: url.optional(),
+  project: nonEmptyString,
+  maxAttempts: positiveInteger.refine((value) => value <= 10)
+}).superRefine((value, context) => {
+  if (!value.enabled) return;
+  if (value.apiKey === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["apiKey"], message: "required" });
+  }
+  if (value.endpoint === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["endpoint"], message: "required" });
+  }
+});
+
 function invalidVariables(result: z.SafeParseError<unknown>, variables: Record<string, string>): string[] {
   const names = result.error.issues.map((issue) => issue.path[0]).filter((name): name is string => typeof name === "string");
   return [...new Set(names.map((name) => variables[name] ?? name))];
@@ -113,6 +174,23 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
   const portResult = tcpPort.safeParse(env.API_PORT ?? "43120");
   const port = portResult.success ? portResult.data : 0;
   if (!portResult.success) coreErrors.push("API_PORT");
+
+  const langsmithEnabled = env.LANGSMITH_TRACING_ENABLED === "true";
+  const langsmithResult = langsmithSchema.safeParse({
+    enabled: langsmithEnabled,
+    ...(env.LANGSMITH_API_KEY === undefined ? {} : { apiKey: env.LANGSMITH_API_KEY }),
+    ...(env.LANGSMITH_ENDPOINT === undefined ? {} : { endpoint: env.LANGSMITH_ENDPOINT }),
+    project: env.LANGSMITH_PROJECT ?? "resume-assistant",
+    maxAttempts: env.LANGSMITH_MAX_ATTEMPTS ?? "3"
+  });
+  if (!langsmithResult.success) {
+    coreErrors.push(...invalidVariables(langsmithResult, {
+      apiKey: "LANGSMITH_API_KEY",
+      endpoint: "LANGSMITH_ENDPOINT",
+      project: "LANGSMITH_PROJECT",
+      maxAttempts: "LANGSMITH_MAX_ATTEMPTS"
+    }));
+  }
 
   const hasDeepSeek = Object.keys(env).some((name) => name.startsWith("DEEPSEEK_"));
   let deepseek: DeepSeekAdapterConfig | undefined;
@@ -191,13 +269,64 @@ export function loadConfig(env: NodeJS.ProcessEnv): ApiConfig {
     }
   }
 
+  const hasLightRag = Object.keys(env).some((name) => name.startsWith("LIGHTRAG_RETRIEVAL_"));
+  let lightRag: LightRagRetrievalAdapterConfig | undefined;
+  if (hasLightRag) {
+    const result = lightRagSchema.safeParse({
+      apiToken: env.LIGHTRAG_RETRIEVAL_API_TOKEN,
+      baseUrl: env.LIGHTRAG_RETRIEVAL_BASE_URL,
+      tenantScope: env.LIGHTRAG_RETRIEVAL_TENANT_SCOPE,
+      timeoutMs: env.LIGHTRAG_RETRIEVAL_TIMEOUT_MS ?? "15000"
+    });
+    if (!result.success) {
+      coreErrors.push(...invalidVariables(result, {
+        apiToken: "LIGHTRAG_RETRIEVAL_API_TOKEN",
+        baseUrl: "LIGHTRAG_RETRIEVAL_BASE_URL",
+        tenantScope: "LIGHTRAG_RETRIEVAL_TENANT_SCOPE",
+        timeoutMs: "LIGHTRAG_RETRIEVAL_TIMEOUT_MS"
+      }));
+    } else {
+      lightRag = result.data;
+    }
+  }
+
+  const hasTavily = Object.keys(env).some((name) => name.startsWith("TAVILY_"));
+  let tavily: TavilyRemoteMcpConfig | undefined;
+  if (hasTavily) {
+    const result = tavilySchema.safeParse({
+      apiKey: env.TAVILY_API_KEY,
+      endpoint: env.TAVILY_MCP_ENDPOINT ?? "https://mcp.tavily.com/mcp/",
+      timeoutMs: env.TAVILY_MCP_TIMEOUT_MS ?? "10000"
+    });
+    if (!result.success) {
+      coreErrors.push(...invalidVariables(result, {
+        apiKey: "TAVILY_API_KEY",
+        endpoint: "TAVILY_MCP_ENDPOINT",
+        timeoutMs: "TAVILY_MCP_TIMEOUT_MS"
+      }));
+    } else {
+      tavily = { ...result.data, maxRetries: 1 };
+    }
+  }
+
   if (coreErrors.length > 0) throw new ConfigurationError([...new Set(coreErrors)]);
+  if (!langsmithResult.success) throw new ConfigurationError(["LANGSMITH_CONFIGURATION"]);
+  const langsmith: LangSmithConfig = {
+    enabled: langsmithResult.data.enabled,
+    project: langsmithResult.data.project,
+    maxAttempts: langsmithResult.data.maxAttempts,
+    ...(langsmithResult.data.apiKey === undefined ? {} : { apiKey: langsmithResult.data.apiKey }),
+    ...(langsmithResult.data.endpoint === undefined ? {} : { endpoint: langsmithResult.data.endpoint })
+  };
   return {
     databaseFile,
     host: "127.0.0.1",
     port,
     ...(deepseek ? { deepseek } : {}),
     ...(embedding ? { embedding } : {}),
-    ...(ocr ? { ocr } : {})
+    ...(ocr ? { ocr } : {}),
+    ...(lightRag ? { lightRag } : {}),
+    ...(tavily ? { tavily } : {}),
+    langsmith
   };
 }

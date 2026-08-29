@@ -7,11 +7,13 @@ import { ProfileApplicationWorkspace } from "./workspace/ProfileApplicationWorks
 import { createJobMatchApi, type JobMatchApi } from "./job-matching/api.js";
 import { JobMatchWorkbench } from "./job-matching/JobMatchWorkbench.js";
 import { useJobMatchSession } from "./job-matching/useJobMatchSession.js";
+import { createConversationApi, type ConversationApi } from "./conversation/api.js";
+import { WorkspaceFrame, type WorkspaceView } from "./workspace/WorkspaceFrame.js";
 
-export function AppRouter({ applicationApi = createApplicationApi(), jobMatchApi = createJobMatchApi() }: { applicationApi?: ApplicationApi; jobMatchApi?: JobMatchApi }) {
+export function AppRouter({ applicationApi = createApplicationApi(), jobMatchApi = createJobMatchApi(), conversationApi = createConversationApi() }: { applicationApi?: ApplicationApi; jobMatchApi?: JobMatchApi; conversationApi?: ConversationApi }) {
   return <BrowserRouter><Routes>
-    <Route path="/" element={<WorkspaceRoute applicationApi={applicationApi} jobMatchApi={jobMatchApi} />} />
-    <Route path="/applications/new" element={<Navigate replace to="/?view=apply" />} />
+    <Route path="/" element={<WorkspaceRoute applicationApi={applicationApi} jobMatchApi={jobMatchApi} conversationApi={conversationApi} />} />
+    <Route path="/applications/new" element={<Navigate replace to="/" />} />
     <Route path="/applications/:taskId" element={<ApplicationTaskRoute api={applicationApi} />} />
     <Route path="/job-match-sessions/:sessionId" element={<JobMatchRoute api={jobMatchApi} />} />
     <Route path="*" element={<Navigate replace to="/" />} />
@@ -19,13 +21,18 @@ export function AppRouter({ applicationApi = createApplicationApi(), jobMatchApi
 }
 
 function JobMatchRoute({ api }: { api: JobMatchApi }) {
+  const navigate = useNavigate();
   const { sessionId } = useParams();
   const loaded = useJobMatchSession(sessionId ?? "", api);
-  if (loaded.status === "loading") return <main className="job-match-workbench"><p>正在读取岗位匹配会话…</p></main>;
-  if (loaded.error || !loaded.session) return <main className="job-match-workbench"><p>岗位匹配会话暂时无法读取。</p></main>;
+  const selectWorkspaceView = (view: WorkspaceView) => {
+    const destination = view === "profile" ? "/?view=profile" : view === "applications" ? "/?view=applications" : "/";
+    navigate(destination);
+  };
+  if (loaded.status === "loading") return <WorkspaceFrame activeView="chat" onSelectView={selectWorkspaceView}><main className="job-match-workbench"><p>正在读取岗位匹配会话…</p></main></WorkspaceFrame>;
+  if (loaded.error || !loaded.session) return <WorkspaceFrame activeView="chat" onSelectView={selectWorkspaceView}><main className="job-match-workbench"><p>岗位匹配会话暂时无法读取。</p></main></WorkspaceFrame>;
   const session = loaded.session;
   const guard = () => ({ sessionVersion: session.version, idempotencyKey: crypto.randomUUID() });
-  return <JobMatchWorkbench session={session} onPause={() => void api.pause(session.id, guard()).then(loaded.refresh)} onContinue={() => void api.continueExtraction(session.id, guard()).then(loaded.refresh)} onSelect={(result) => void api.select(session.id, { ...guard(), resultId: result.id, resultVersion: result.version, postingContentHash: result.postingContentHash }).then(loaded.refresh)} onSelectConflict={(result) => void conflictSummaryHash(result).then((conflictSummaryHash) => api.selectConflict(session.id, { ...guard(), resultId: result.id, resultVersion: result.version, postingContentHash: result.postingContentHash, conflictSummaryHash })).then(loaded.refresh)} onRematch={() => void api.rematch(session.id, guard()).then(loaded.refresh)} onConfirmFilters={() => void api.confirmFilters(session.id, session.expectation, guard()).then(loaded.refresh)} />;
+  return <WorkspaceFrame activeView="chat" onSelectView={selectWorkspaceView}><JobMatchWorkbench session={session} onPause={() => void api.pause(session.id, guard()).then(loaded.refresh)} onContinue={() => void api.continueExtraction(session.id, guard()).then(loaded.refresh)} onSelect={(result) => void api.select(session.id, { ...guard(), resultId: result.id, resultVersion: result.version, postingContentHash: result.postingContentHash }).then(loaded.refresh)} onSelectConflict={(result) => void conflictSummaryHash(result).then((conflictSummaryHash) => api.selectConflict(session.id, { ...guard(), resultId: result.id, resultVersion: result.version, postingContentHash: result.postingContentHash, conflictSummaryHash })).then(loaded.refresh)} onRematch={() => void api.rematch(session.id, guard()).then(loaded.refresh)} onConfirmFilters={() => void api.confirmFilters(session.id, session.expectation, guard()).then(loaded.refresh)} /></WorkspaceFrame>;
 }
 
 async function conflictSummaryHash(result: import("@resume/contracts").JobMatchResult): Promise<string> {
@@ -34,7 +41,7 @@ async function conflictSummaryHash(result: import("@resume/contracts").JobMatchR
   return `sha256:${Array.from(new Uint8Array(bytes), (value) => value.toString(16).padStart(2, "0")).join("")}`;
 }
 
-function WorkspaceRoute({ applicationApi, jobMatchApi }: { applicationApi: ApplicationApi; jobMatchApi: JobMatchApi }) {
+function WorkspaceRoute({ applicationApi, jobMatchApi, conversationApi }: { applicationApi: ApplicationApi; jobMatchApi: JobMatchApi; conversationApi: ConversationApi }) {
   return <ProfileApplicationWorkspace
     profileApi={createProfileApi()}
     applicationApi={applicationApi}
@@ -42,6 +49,7 @@ function WorkspaceRoute({ applicationApi, jobMatchApi }: { applicationApi: Appli
     healthApi={createHealthApi()}
     reviewApi={createSelfEvaluationReviewApi()}
     ragApi={createRagApi()}
+    conversationApi={conversationApi}
   />;
 }
 

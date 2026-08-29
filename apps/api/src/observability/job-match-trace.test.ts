@@ -1,5 +1,6 @@
 import { describe, expect, it } from "vitest";
-import { BoundedJobMatchTraceBuffer } from "./job-match-trace.js";
+import type { TraceSink } from "../agent/trace-sink.js";
+import { BoundedJobMatchTraceBuffer, createJobMatchTraceMirror } from "./job-match-trace.js";
 
 describe("BoundedJobMatchTraceBuffer", () => {
   it("stores only the redacted job-match trace allowlist", () => {
@@ -45,5 +46,29 @@ describe("BoundedJobMatchTraceBuffer", () => {
 
   it("rejects invalid limits", () => {
     expect(() => new BoundedJobMatchTraceBuffer(0)).toThrow("job_match_trace_limit_invalid");
+  });
+
+  it("mirrors graph audit events into the redacted compatibility view", () => {
+    const trace = new BoundedJobMatchTraceBuffer();
+    const primary: TraceSink = {
+      record: () => "trace-1",
+      list: () => []
+    };
+    const mirror = createJobMatchTraceMirror(primary, trace);
+
+    expect(mirror.record({
+      runId: "run-1",
+      taskId: "session-secret",
+      node: "retrieve_evidence",
+      kind: "tool_call",
+      outcome: "completed",
+      reasonCode: "lightrag_retrieval",
+      counts: { fallbackUsed: 0, lightragUsed: 1 }
+    })).toBe("trace-1");
+    expect(trace.snapshot()).toEqual([expect.objectContaining({
+      stage: "retrieve_evidence",
+      counts: { fallbackUsed: 0, lightragUsed: 1 }
+    })]);
+    expect(trace.snapshot()[0]).not.toHaveProperty("sessionId");
   });
 });

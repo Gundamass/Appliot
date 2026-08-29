@@ -1,8 +1,18 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
 import Database from "better-sqlite3";
-import type { FormField, FormSnapshot, JobPageSnapshot, ProfileFact, WorkerActivity } from "@resume/contracts";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type {
+  FormField,
+  FormSnapshot,
+  JobPageSnapshot,
+  ProfileFact,
+  WorkerActivity
+} from "@resume/contracts";
 import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
 import type { FieldSemanticResolver } from "./applications/field-semantic-resolver.js";
+import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
 import { loadConfig } from "./config.js";
 import { createApp } from "./app.js";
 const fixtureNodeRef = {
@@ -42,7 +52,6 @@ vi.mock("./db/migrate.js", async (importOriginal) => {
     }
   };
 });
-
 const {
   createProductionDependencies,
   createProductionFieldResolver,
@@ -125,6 +134,145 @@ describe("production dependency composition", () => {
     await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("browser_task_in_use");
     expect(browserClient.open).not.toHaveBeenCalled();
     await dependencies.close?.();
+  });
+
+  it("registers the Baidu campus adapter in the production job-matching service", async () => {
+    const browserClient = productionBrowserClient({
+      observeJob: vi.fn(async (ownerId: string): Promise<JobPageSnapshot> => ({
+        id: `baidu-snapshot-${ownerId}`,
+        ownerId,
+        url: "https://talent.baidu.com/jobs/list?projectType=3&recruitType=GRADUATE",
+        title: "百度校园招聘",
+        capturedAt: "2026-08-24T00:00:00.000Z",
+        entryHint: "job_list",
+        visibleText: ["职位列表"],
+        jobCards: [],
+        filterState: [],
+        pagination: { kind: "none", hasNext: false },
+        boundaries: []
+      }))
+    });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient
+    });
+    const expectation = confirmedProfileFact("preferences.targetRole", "技术");
+    dependencies.profileRepository.createExtracted({ ...expectation, status: "extracted" });
+    dependencies.profileRepository.confirm(expectation.id);
+
+    const created = await dependencies.jobMatchService.create({
+      url: "https://talent.baidu.com/jobs/list?projectType=3&recruitType=GRADUATE"
+    });
+
+    expect(created).toMatchObject({
+      source: "baidu",
+      adapterVersion: "baidu-job-v1",
+      entryKind: "job_list"
+    });
+    await dependencies.close?.();
+  });
+
+  it("does not start a browser to search for a recruitment site", async () => {
+    const browserClientFactory = vi.fn(async () => productionBrowserClient());
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClientFactory
+    });
+    const app = await createApp(dependencies);
+
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/conversations" });
+      const sessionId = created.json().id as string;
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${sessionId}/messages`,
+        payload: { text: "\u5e2e\u6211\u6295\u9012\u4e00\u4e0b\u767e\u5ea6\u6821\u56ed\u62db\u8058" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().pendingConfirmation).toBeUndefined();
+      expect(response.json().message.text).toContain("联网搜索尚未配置");
+      expect(browserClientFactory).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("uses the configured Tavily recruitment port before any browser worker starts", async () => {
+    const browserClientFactory = vi.fn(async () => productionBrowserClient());
+    const search = vi.fn(async (input: { companyName: string; recruitmentType: "campus" | "social" | "internship" | "unknown" }) => ({
+      query: `${input.companyName} ${input.recruitmentType}`,
+      candidates: [{
+        title: "百度校园招聘",
+        url: "https://talent.baidu.com/",
+        domain: "talent.baidu.com",
+        snippet: "校园招聘岗位",
+        source: "tavily" as const
+      }]
+    }));
+    const dependencies = createProductionDependencies(loadConfig({
+      DATABASE_FILE: ":memory:",
+      TAVILY_API_KEY: "tvly-test-key"
+    }), {
+      browserClientFactory,
+      recruitmentSiteSearch: { search } as never
+    });
+    const app = await createApp(dependencies);
+
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/conversations" });
+      const sessionId = created.json().id as string;
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${sessionId}/messages`,
+        payload: { text: "帮我投递百度校园招聘" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(search).toHaveBeenCalledWith({ companyName: "百度", recruitmentType: "campus" });
+      expect(response.json().pendingConfirmation.target.kind).toBe("recruitment_site_choices");
+      expect(browserClientFactory).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("restores a graph-owned application task after rebuilding production dependencies", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "resume-langgraph-restart-"));
+    const databaseFile = join(directory, "resume.db");
+    const taskId = "2b9c0bfb-3785-4393-8e57-2a3082f29e3c";
+    const config = loadConfig({ DATABASE_FILE: databaseFile });
+    const firstBrowser = productionBrowserClient();
+    const first = createProductionDependencies(config, { browserClient: firstBrowser });
+
+    try {
+      createApplicationTaskRepository(first.database).create({
+        id: taskId,
+        applicationUrl: "https://jobs.example.test/apply"
+      });
+      first.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+      await first.applicationService!.openBrowser(taskId);
+      await first.applicationService!.runUntilPause(taskId);
+      expect(first.applicationService!.state(taskId).value).toBe("awaiting_login");
+      const graphCheckpointCount = first.database.prepare(
+        "SELECT COUNT(*) AS count FROM agent_checkpoints WHERE thread_id = ?"
+      ).get(`application:${taskId}`) as { count: number };
+      const legacyCheckpointCount = first.database.prepare(
+        "SELECT COUNT(*) AS count FROM application_checkpoints WHERE task_id = ?"
+      ).get(taskId) as { count: number };
+      expect(graphCheckpointCount.count).toBeGreaterThan(0);
+      expect(legacyCheckpointCount.count).toBe(0);
+      await first.close?.();
+
+      const second = createProductionDependencies(config, { browserClient: productionBrowserClient() });
+      try {
+        await second.applicationService!.openBrowser(taskId);
+        expect(second.applicationService!.state(taskId).value).toBe("awaiting_login");
+      } finally {
+        await second.close?.();
+      }
+    } finally {
+      await first.close?.();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   beforeEach(() => {
@@ -1554,6 +1702,7 @@ function productionBrowserClient(overrides: Record<string, unknown> = {}) {
   });
   return {
     open: vi.fn(async (taskId: string, url: string) => ({ type: "opened" as const, taskId, url, title: "Jobs" })),
+    openPublic: vi.fn(async (taskId: string, url: string) => ({ type: "opened" as const, taskId, url, title: "Jobs" })),
     observe: vi.fn(async (taskId: string) => ({
       type: "snapshot" as const,
       snapshot: {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 

@@ -1,0 +1,26 @@
+[build-system]
+requires = ["setuptools==80.9.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "resume-lightrag-worker"
+version = "0.1.0"
+requires-python = "==3.12.*"
+dependencies = [
+  "fastapi==0.115.12",
+  "httpx==0.28.1",
+  "lightrag-hku==1.5.6",
+  "numpy==2.2.6",
+  "pydantic==2.11.7",
+  "uvicorn[standard]==0.34.3"
+]
+
+[project.scripts]
+resume-lightrag-worker = "lightrag_worker.__main__:main"
+
+[project.optional-dependencies]
+test = ["pytest==8.4.1"]
+
+[tool.pytest.ini_options]
+pythonpath = ["src"]
+testpaths = ["tests"]

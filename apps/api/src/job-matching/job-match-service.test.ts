@@ -127,6 +127,7 @@ function harness(
     extractDetail: vi.fn()
   };
   const trace = new BoundedJobMatchTraceBuffer();
+  const matcher = { match: vi.fn() };
   const browserOwnershipLease = new BrowserOwnershipLease();
   const service = createJobMatchService({
     repository,
@@ -140,7 +141,7 @@ function harness(
       confirmFilters: vi.fn(),
       runExtraction: vi.fn()
     },
-    matcher: { match: vi.fn() },
+    matcher,
     trace,
     createId: (kind) => kind === "session" ? "session-1" : "application-1",
     submissionCount: () => submissionCount
@@ -153,6 +154,7 @@ function harness(
     browserOwnershipLease,
     adapter: adapterOverride ?? adapter,
     trace,
+    matcher,
     get submissionCount() { return submissionCount; }
   };
 }
@@ -332,5 +334,18 @@ describe("JobMatchService selection and conversion", () => {
     const current = value.service.get("session-1");
     expect(current.results[0]?.stale).toBe(true);
     expect(current.state).toBe("awaiting_job_selection");
+  });
+
+  it("delegates rematching by session id without passing a caller-controlled posting list", async () => {
+    const value = harness();
+    seedSelection(value);
+    const current = value.repository.get("session-1", { required: true });
+
+    await value.service.rematch("session-1", {
+      sessionVersion: current.version,
+      idempotencyKey: "rematch-1"
+    });
+
+    expect(value.matcher.match).toHaveBeenCalledWith("session-1");
   });
 });

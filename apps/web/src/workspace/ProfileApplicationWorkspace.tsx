@@ -1,15 +1,15 @@
-import { FilePlus2 } from "lucide-react";
-import type { ApplicationTask, ProfileCompleteness } from "@resume/contracts";
+import { MessageCircle } from "lucide-react";
+import type { ApplicationTask } from "@resume/contracts";
 import { useEffect, useState } from "react";
 import { useNavigate, useSearchParams } from "react-router-dom";
 import type { HealthApi } from "../api/health-client.js";
 import type { ProfileApi, RagApi, SelfEvaluationReviewApi } from "../api/client.js";
 import type { ApplicationApi } from "../applications/api.js";
 import type { JobMatchApi } from "../job-matching/api.js";
-import { JobMatchStartPanel } from "../job-matching/JobMatchStartPanel.js";
 import { ProfilePage } from "../profile/ProfilePage.js";
 import { ApplicationReviewInbox } from "../applications/ApplicationReviewInbox.js";
-import { ApplicationStartPanel } from "../applications/ApplicationStartPanel.js";
+import type { ConversationApi } from "../conversation/api.js";
+import { ChatHome } from "../conversation/ChatHome.js";
 import { WorkspaceFrame, type WorkspaceView } from "./WorkspaceFrame.js";
 
 interface ProfileApplicationWorkspaceProps {
@@ -19,29 +19,26 @@ interface ProfileApplicationWorkspaceProps {
   healthApi?: HealthApi;
   reviewApi?: SelfEvaluationReviewApi;
   ragApi?: RagApi;
+  conversationApi: ConversationApi;
 }
 
 export function ProfileApplicationWorkspace({
   profileApi,
   applicationApi,
-  jobMatchApi,
   healthApi,
   reviewApi,
-  ragApi
+  ragApi,
+  conversationApi
 }: ProfileApplicationWorkspaceProps) {
   const navigate = useNavigate();
   const [searchParams, setSearchParams] = useSearchParams();
   const requested = searchParams.get("view");
-  const view: WorkspaceView = requested === "apply" || requested === "reviews" ? requested : "profile";
-  const [profileCompleteness, setProfileCompleteness] = useState<ProfileCompleteness>();
+  const view = normalizeWorkspaceView(requested);
   const [tasks, setTasks] = useState<ApplicationTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [tasksError, setTasksError] = useState<string>();
   const [deletingTaskId, setDeletingTaskId] = useState<string>();
   const [taskActionError, setTaskActionError] = useState<string>();
-  const [applicationMode, setApplicationMode] = useState<"job_match" | "direct_application">("job_match");
-  const [prefilledApplicationUrl, setPrefilledApplicationUrl] = useState<string>();
-  const [jobMatchBusy, setJobMatchBusy] = useState(false);
 
   const loadTasks = async () => {
     setTasksLoading(true);
@@ -73,25 +70,26 @@ export function ProfileApplicationWorkspace({
   };
 
   useEffect(() => {
-    if (view === "apply") void profileApi.getCompleteness().then(setProfileCompleteness).catch(() => setProfileCompleteness(undefined));
-    if (view === "reviews") void loadTasks();
+    if (view === "applications") void loadTasks();
   }, [view, profileApi, applicationApi]);
 
   const selectView = (nextView: WorkspaceView) => {
     const next = new URLSearchParams(searchParams);
-    if (nextView === "profile") next.delete("view");
+    if (nextView === "chat") next.delete("view");
     else next.set("view", nextView);
     setSearchParams(next, { replace: false });
   };
+
+  if (view === "chat") return <ChatHome api={conversationApi} onOpenJobMatch={(sessionId) => navigate(`/job-match-sessions/${sessionId}`)} onOpenApplication={(taskId) => navigate(`/applications/${taskId}`)} onNavigate={selectView} />;
 
   return (
     <WorkspaceFrame activeView={view} onSelectView={selectView}>
         {view === "profile" ? (
           <section className="workspace-view" aria-labelledby="workspace-profile-title">
             <header className="workspace-view-header">
-              <div><span>长期资料库</span><h1 id="workspace-profile-title">候选人档案</h1></div>
-              <button className="button primary" type="button" onClick={() => selectView("apply")}>
-                <FilePlus2 aria-hidden="true" size={16} />新建投递
+              <div><span>长期资料库</span><h1 id="workspace-profile-title">我的简历</h1></div>
+              <button className="button primary" type="button" onClick={() => selectView("chat")}>
+                <MessageCircle aria-hidden="true" size={16} />开始对话
               </button>
             </header>
             <ProfilePage
@@ -101,43 +99,6 @@ export function ProfileApplicationWorkspace({
               {...(reviewApi ? { reviewApi } : {})}
               {...(ragApi ? { ragApi } : {})}
             />
-          </section>
-        ) : view === "apply" ? (
-          <section className="workspace-view" aria-labelledby="workspace-apply-title">
-            <header className="workspace-view-header"><div><span>受控浏览器</span><h1 id="workspace-apply-title">新建投递</h1></div></header>
-            <div className="workspace-panel-content">
-              <div className="application-mode-switch" aria-label="新建投递模式">
-                <button
-                  type="button"
-                  aria-pressed={applicationMode === "job_match"}
-                  disabled={jobMatchBusy}
-                  onClick={() => setApplicationMode("job_match")}
-                >岗位匹配</button>
-                <button
-                  type="button"
-                  aria-pressed={applicationMode === "direct_application"}
-                  disabled={jobMatchBusy}
-                  onClick={() => setApplicationMode("direct_application")}
-                >直接投递</button>
-              </div>
-              {applicationMode === "job_match" ? <JobMatchStartPanel
-                profileApi={profileApi}
-                jobMatchApi={jobMatchApi}
-                onSessionCreated={(sessionId) => navigate(`/job-match-sessions/${sessionId}`)}
-                onApplicationForm={(applicationUrl) => {
-                  setPrefilledApplicationUrl(applicationUrl);
-                  setApplicationMode("direct_application");
-                }}
-                onOpenProfile={() => selectView("profile")}
-                onBusyChange={setJobMatchBusy}
-              /> : <ApplicationStartPanel
-                profileCompleteness={profileCompleteness}
-                applicationApi={applicationApi}
-                {...(prefilledApplicationUrl === undefined ? {} : { initialApplicationUrl: prefilledApplicationUrl })}
-                onTaskCreated={(taskId) => navigate(`/applications/${taskId}`)}
-                onViewChange={() => selectView("profile")}
-              />}
-            </div>
           </section>
         ) : (
           <section className="workspace-view" aria-labelledby="workspace-reviews-title">
@@ -156,4 +117,11 @@ export function ProfileApplicationWorkspace({
         )}
     </WorkspaceFrame>
   );
+}
+
+function normalizeWorkspaceView(requested: string | null): WorkspaceView {
+  if (requested === "jobs" || requested === "apply") return "chat";
+  if (requested === "applications" || requested === "reviews") return "applications";
+  if (requested === "profile") return "profile";
+  return "chat";
 }

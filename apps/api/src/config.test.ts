@@ -19,6 +19,7 @@ describe("API configuration", () => {
       databaseFile: "data/resume-assistant.sqlite",
       host: "127.0.0.1",
       port: 43120,
+      langsmith: { enabled: false, project: "resume-assistant", maxAttempts: 3 },
       deepseek: {
         apiKey: "test-key",
         baseUrl: "https://api.deepseek.com",
@@ -28,6 +29,58 @@ describe("API configuration", () => {
         timeoutMs: 60_000,
         maxRetries: 2
       }
+    });
+  });
+
+  it("loads Tavily Remote MCP from an API key without exposing the key in errors", () => {
+    expect(loadConfig({ TAVILY_API_KEY: "tvly-test-secret" })).toMatchObject({
+      tavily: {
+        apiKey: "tvly-test-secret",
+        endpoint: "https://mcp.tavily.com/mcp/",
+        timeoutMs: 10_000,
+        maxRetries: 1
+      }
+    });
+
+    const secret = "tvly-should-never-leak";
+    const message = captureError(() => loadConfig({
+      TAVILY_API_KEY: secret,
+      TAVILY_MCP_TIMEOUT_MS: "invalid"
+    }));
+    expect(message).toContain("TAVILY_MCP_TIMEOUT_MS");
+    expect(message).not.toContain(secret);
+  });
+
+  it("keeps Tavily disabled when no TAVILY variables are present and rejects unsafe endpoints", () => {
+    expect(loadConfig({}).tavily).toBeUndefined();
+    expect(() => loadConfig({
+      TAVILY_API_KEY: "key",
+      TAVILY_MCP_ENDPOINT: "http://localhost:3000/mcp"
+    })).toThrow("TAVILY_MCP_ENDPOINT");
+    expect(() => loadConfig({ TAVILY_MCP_TIMEOUT_MS: "10000" }))
+      .toThrow("TAVILY_API_KEY");
+  });
+
+  it("keeps LangSmith disabled by default and validates credentials only when enabled", () => {
+    expect(loadConfig({}).langsmith).toEqual({
+      enabled: false,
+      project: "resume-assistant",
+      maxAttempts: 3
+    });
+    expect(() => loadConfig({ LANGSMITH_TRACING_ENABLED: "true" }))
+      .toThrow("LANGSMITH_API_KEY");
+    expect(loadConfig({
+      LANGSMITH_TRACING_ENABLED: "true",
+      LANGSMITH_API_KEY: "test-key",
+      LANGSMITH_ENDPOINT: "https://api.smith.langchain.com",
+      LANGSMITH_PROJECT: "agent-review",
+      LANGSMITH_MAX_ATTEMPTS: "5"
+    }).langsmith).toEqual({
+      enabled: true,
+      apiKey: "test-key",
+      endpoint: "https://api.smith.langchain.com",
+      project: "agent-review",
+      maxAttempts: 5
     });
   });
 
@@ -79,6 +132,28 @@ describe("API configuration", () => {
       modelRevision: OCR_REVISION,
       timeoutMs: 180_000
     });
+  });
+
+  it("loads a local LightRAG retrieval worker only from its complete configuration group", () => {
+    expect(loadConfig({
+      LIGHTRAG_RETRIEVAL_API_TOKEN: "lightrag-test-token",
+      LIGHTRAG_RETRIEVAL_BASE_URL: "http://127.0.0.1:43122",
+      LIGHTRAG_RETRIEVAL_TENANT_SCOPE: "tenant-a",
+      LIGHTRAG_RETRIEVAL_TIMEOUT_MS: "15000"
+    }).lightRag).toEqual({
+      apiToken: "lightrag-test-token",
+      baseUrl: "http://127.0.0.1:43122",
+      tenantScope: "tenant-a",
+      timeoutMs: 15_000
+    });
+    expect(loadConfig({}).lightRag).toBeUndefined();
+    expect(() => loadConfig({ LIGHTRAG_RETRIEVAL_BASE_URL: "http://127.0.0.1:43122" }))
+      .toThrow("LIGHTRAG_RETRIEVAL_API_TOKEN");
+    expect(() => loadConfig({
+      LIGHTRAG_RETRIEVAL_API_TOKEN: "lightrag-test-token",
+      LIGHTRAG_RETRIEVAL_BASE_URL: "http://example.test:43122",
+      LIGHTRAG_RETRIEVAL_TENANT_SCOPE: "tenant-a"
+    })).toThrow("LIGHTRAG_RETRIEVAL_BASE_URL");
   });
 
   it("allows absent remote groups but rejects partial groups without reflecting secrets", () => {

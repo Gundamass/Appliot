@@ -117,7 +117,7 @@ export const jobMatchSessions = sqliteTable("job_match_sessions", {
   version: integer("version").notNull().default(0),
   state: text("state").notNull(),
   entryKind: text("entry_kind", { enum: ["job_list", "job_detail", "application_form"] }),
-  source: text("source", { enum: ["moka", "dji"] }),
+  source: text("source", { enum: ["moka", "dji", "baidu"] }),
   initialUrl: text("initial_url").notNull(),
   adapterVersion: text("adapter_version"),
   scoringVersion: text("scoring_version").notNull().default("job-match-v1"),
@@ -159,7 +159,7 @@ export const jobMatchExpectationSnapshots = sqliteTable("job_match_expectation_s
 export const jobPostings = sqliteTable("job_postings", {
   id: text("id").primaryKey(),
   sessionId: text("session_id").notNull().references(() => jobMatchSessions.id, { onDelete: "cascade" }),
-  source: text("source", { enum: ["moka", "dji"] }).notNull(),
+  source: text("source", { enum: ["moka", "dji", "baidu"] }).notNull(),
   sourceJobId: text("source_job_id"),
   canonicalUrl: text("canonical_url").notNull(),
   contentHash: text("content_hash").notNull(),
@@ -168,7 +168,7 @@ export const jobPostings = sqliteTable("job_postings", {
 }, (table) => [
   unique("job_postings_session_url_hash_unique").on(table.sessionId, table.source, table.canonicalUrl, table.contentHash),
   index("job_postings_session_id_idx").on(table.sessionId, table.id),
-  check("job_postings_source_valid", sql`${table.source} IN ('moka', 'dji')`),
+  check("job_postings_source_valid", sql`${table.source} IN ('moka', 'dji', 'baidu')`),
   check("job_postings_payload_valid", sql`json_valid(${table.payloadJson})`)
 ]);
 

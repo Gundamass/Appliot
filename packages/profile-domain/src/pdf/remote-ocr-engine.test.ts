@@ -30,6 +30,8 @@ function ocrResponse(overrides: Record<string, unknown> = {}): Response {
     modelRevision: OCR_REVISION,
     mode: "document_to_markdown",
     elapsedMs: 1200,
+    runtime: "pytorch",
+    blocks: [],
     ...overrides
   }), { status: 200, headers: { "Content-Type": "application/json" } });
 }
@@ -81,11 +83,27 @@ describe("RemoteOcrEngine", () => {
     expect(fetch.mock.calls[0]![1]!.body).toBe(JPEG_BYTES);
   });
 
+  it("exposes detailed runtime and block metadata without changing recognize", async () => {
+    const fetch = fakeFetch([ocrResponse({
+      runtime: "mindspore_lite",
+      blocks: [{ text: "Ada", bbox: [1, 2, 30, 40] }]
+    })]);
+    const engine = new RemoteOcrEngine(testConfig(), { fetch: fetch as typeof globalThis.fetch });
+
+    await expect(engine.recognizeDetailed(PNG_BYTES)).resolves.toMatchObject({
+      text: "# Resume\nAda Lovelace",
+      runtime: "mindspore_lite",
+      blocks: [{ text: "Ada", bbox: [1, 2, 30, 40] }]
+    });
+  });
+
   it.each([
     ["empty output", ocrResponse({ text: "   " })],
     ["wrong model", ocrResponse({ model: "other-model" })],
     ["wrong revision", ocrResponse({ modelRevision: "other-revision" })],
     ["wrong mode", ocrResponse({ mode: "plain_text" })],
+    ["wrong runtime", ocrResponse({ runtime: "other" })],
+    ["malformed block", ocrResponse({ blocks: [{ text: "Ada", bbox: [1, 2, 3] }] })],
     ["unexpected response field", ocrResponse({ extra: true })],
     ["malformed JSON", new Response("not-json", { status: 200 })],
     ["unauthorized", new Response(RESPONSE_SECRET, { status: 401 })],

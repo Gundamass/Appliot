@@ -53,6 +53,22 @@ describe("BrowserWorkerClient", () => {
     });
   });
 
+  it("uses the public HTTPS navigation policy for confirmed recruitment entries", async () => {
+    const profileDir = await mkdtemp(join(tmpdir(), "resume-browser-public-navigation-"));
+    temporaryDirectories.push(profileDir);
+    const client = await BrowserWorkerClient.start({
+      profileDir,
+      headless: true,
+      workerEntry: fileURLToPath(new URL("./fixtures/activity-worker.ts", import.meta.url))
+    });
+    clients.push(client);
+
+    await expect(client.openPublic("task-public", "https://jobs.example.test/apply")).resolves.toMatchObject({
+      type: "opened",
+      title: "public_https"
+    });
+  });
+
   it("rejects forged request-bound activity without resolving a pending request", async () => {
     const profileDir = await mkdtemp(join(tmpdir(), "resume-browser-activity-"));
     temporaryDirectories.push(profileDir);

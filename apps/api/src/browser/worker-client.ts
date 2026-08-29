@@ -124,7 +124,7 @@ export class BrowserWorkerClient {
 
   async open(taskId: string, url: string): Promise<Extract<WorkerResponse, { type: "opened" }>> {
     validateWebUrl(url);
-    const response = await this.request({ type: "open", taskId, url });
+    const response = await this.request({ type: "open", taskId, url, navigationPolicy: "default" });
     if (response.type !== "opened") {
       throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
     }
@@ -134,6 +134,15 @@ export class BrowserWorkerClient {
   async observe(taskId: string): Promise<Extract<WorkerResponse, { type: "snapshot" }>> {
     const response = await this.request({ type: "capture_snapshot", taskId });
     if (response.type !== "snapshot") {
+      throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
+    }
+    return response;
+  }
+
+  async openPublic(taskId: string, url: string): Promise<Extract<WorkerResponse, { type: "opened" }>> {
+    validateWebUrl(url);
+    const response = await this.request({ type: "open", taskId, url, navigationPolicy: "public_https" });
+    if (response.type !== "opened") {
       throw new Error(`浏览器 Worker 返回了意外响应：${response.type}`);
     }
     return response;

@@ -110,3 +110,14 @@ Tasks 1-6: local code complete. Candidate profile changes now advance a durable 
 Safety boundaries: existing page values and user edits remain authoritative; review-locked, cancelled, login-waiting, and failed tasks are excluded from automatic refresh; explicit failed-task recovery re-observes the live page and stops at `review_locked`. Local-at-rest encryption and sensitive-data routing to DeepSeek/vector services remain intentionally deferred by user decision.
 
 Fresh verification: `pnpm test` passed across all workspaces (API 374, Web 164, Browser Worker 67, plus package suites); `pnpm typecheck`, `pnpm build`, `pnpm audit --prod --audit-level high`, and `git diff --check` passed. `pnpm test:e2e` passed 18/18, including DJI-style coverage, Mokahr repeated sections/PDF upload, profile-completion retry, browser stability, and terminal-submit refusal. Real local task UI inspection at 1280x800 and 390x844 found no horizontal overflow, out-of-bounds elements, or submit controls.
+
+---
+
+Program: LangGraph agent architecture upgrade
+Plan: docs/superpowers/plans/2026-08-21-langgraph-agent-architecture-upgrade.md
+Branch start: f715ecb
+
+Task 1: complete (commit 3c9d9b8; contracts tests 76/76 and contracts typecheck passed)
+Task 2: complete (commit 57bec39; TraceSink/tool registry focused tests 6/6, migration tests 11/11, API typecheck passed)
+Task 2A: complete (commit 6ddbadc; LangSmith/config/outbox focused tests 36/36, API typecheck passed)
+Task 3: complete (commit 9938f37; SQLite LangGraph Checkpointer, migration compatibility, and restart persistence; focused tests 20/20, API typecheck, and diff check passed)

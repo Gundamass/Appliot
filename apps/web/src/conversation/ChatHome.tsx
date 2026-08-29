@@ -1,0 +1,109 @@
+import type { ConversationCard, ConversationConfirmation, ConversationContext, ConversationMessage, ConversationSession } from "@resume/contracts";
+import { useCallback, useEffect, useState } from "react";
+import { ConversationApiError, type ConversationApi } from "./api.js";
+import { ChatMessageList } from "./ChatMessageList.js";
+import { ConversationComposer } from "./ConversationComposer.js";
+import { QuickStartCards } from "./ConversationCards.js";
+import { WorkspaceFrame, type WorkspaceView } from "../workspace/WorkspaceFrame.js";
+
+interface ChatHomeProps {
+  api: ConversationApi;
+  onOpenJobMatch(sessionId: string): void;
+  onOpenApplication(taskId: string): void;
+  onNavigate?(view: WorkspaceView): void;
+}
+
+export function ChatHome({ api, onOpenJobMatch, onOpenApplication, onNavigate }: ChatHomeProps) {
+  const [session, setSession] = useState<ConversationSession>();
+  const [messages, setMessages] = useState<ConversationMessage[]>([]);
+  const [context, setContext] = useState<ConversationContext>({ version: 0, recentPostingIds: [] });
+  const [pendingConfirmation, setPendingConfirmation] = useState<ConversationConfirmation>();
+  const [sending, setSending] = useState(false);
+  const [error, setError] = useState<string>();
+
+  const load = useCallback(async () => {
+    try {
+      const created = await api.create();
+      const view = await api.get(created.id);
+      setSession(view.session); setMessages(view.messages); setContext(view.context); setError(undefined);
+    } catch (cause) { setError(toUserError(cause)); }
+  }, [api]);
+
+  useEffect(() => { void load(); }, [load]);
+
+  const send = async (text: string) => {
+    if (!session || sending) return;
+    setSending(true); setError(undefined);
+    const optimistic: ConversationMessage = { id: `local-user-${Date.now()}`, sessionId: session.id, sequence: (messages.at(-1)?.sequence ?? 0) + 1, role: "user", text, cards: [], createdAt: new Date().toISOString() };
+    setMessages((current) => [...current, optimistic]);
+    try {
+      const response = await api.send(session.id, text);
+      setMessages((current) => [...current, response.message]); setContext(response.context); setPendingConfirmation(response.pendingConfirmation); setError(undefined);
+    } catch (cause) { setError(toUserError(cause)); }
+    finally { setSending(false); }
+  };
+
+  const confirm = async (confirmationId: string, approved: boolean, selectedUrl?: string) => {
+    if (!session || sending) return;
+    setSending(true); setError(undefined);
+    try {
+      const response = selectedUrl === undefined
+        ? await api.confirm(session.id, confirmationId, approved)
+        : await api.confirm(session.id, confirmationId, approved, selectedUrl);
+      setMessages((current) => [...current, response.message]); setContext(response.context); setPendingConfirmation(undefined); setError(undefined);
+    } catch (cause) { setError(toUserError(cause)); }
+    finally { setSending(false); }
+  };
+
+  const sendRecommendationRequest = (company: string) => { void send(`我想投递${company}`); };
+  const sendProgressRequest = () => { void send("我投了哪些岗位？对应的网站有哪些？"); };
+  const startApplication = (card: Extract<ConversationCard, { type: "recommendation" }>) => { void send(`开始投递${card.title}`); };
+
+  return <WorkspaceFrame activeView="chat" onSelectView={(view) => onNavigate?.(view)}>
+    <div className="conversation-content-layout">
+      <main className="conversation-main"><header className="conversation-main-heading"><div><h1>和助手聊聊你的求职计划</h1><p>可以从岗位推荐、投递进度或简历开始</p></div><span className="conversation-ready">● 已就绪</span></header><div className="conversation-message-area"><div className="conversation-date">今天</div><QuickStartCards onQuickRecommendation={sendRecommendationRequest} onQuickProgress={sendProgressRequest} /><ChatMessageList messages={messages} {...(pendingConfirmation === undefined ? {} : { pendingConfirmation })} onOpenJobMatch={onOpenJobMatch} onOpenApplication={onOpenApplication} onStartApplication={startApplication} onConfirm={confirm} />{error ? <p className="conversation-error" role="alert">{error}</p> : null}</div><ConversationComposer sending={sending} onSend={(text) => void send(text)} /></main>
+      <aside className="conversation-context"><h2>当前上下文</h2><section><span>最近推荐</span><strong>{context.recentPostingIds.length > 0 ? `${context.recentPostingIds.length} 个岗位推荐` : "暂无岗位推荐"}</strong><small>{context.activeJobMatchSessionId ? "最近一次匹配会话" : "开始岗位推荐后会显示"}</small></section><section><span>当前投递</span><strong>{context.activeApplicationTaskId ? "有一个进行中的任务" : "暂无进行中的任务"}</strong><small>{context.activeApplicationTaskId ?? "确认后会出现在这里"}</small></section><section><span>简历</span><strong>产品经理简历 · v3</strong><small>当前用于岗位匹配</small></section></aside>
+    </div>
+  </WorkspaceFrame>;
+}
+
+function toUserError(error: unknown): string {
+  if (error instanceof ConversationApiError) {
+    switch (error.code) {
+      case "recommendation_context_missing":
+      case "recommendation_ordinal_1_missing":
+      case "recommendation_not_found":
+        return "当前没有可确定的目标岗位，请先打开岗位匹配结果。";
+      case "recommendation_stale":
+      case "job_match_posting_changed":
+        return "岗位匹配结果已变化，请刷新岗位匹配后再试。";
+      case "browser_worker_unavailable":
+      case "browser_open_unavailable":
+        return "受控浏览器暂时不可用，可以稍后重试或打开已有投递任务。";
+      case "challenge_required":
+      case "browser_challenge_required":
+        return "投递页面需要额外验证，请手动接管浏览器完成验证后再继续。";
+      case "policy_rejected":
+      case "application_submission_locked":
+        return "当前策略不允许提交，提交已锁定；请先检查投递审核要求。";
+      case "conversation_confirmation_invalid":
+      case "confirmation_invalid":
+        return "这条确认已失效或已经使用，请重新发起投递。";
+      case "conversation_input_invalid":
+        return "消息最多 500 字，请缩短后重试。";
+      case "TAVILY_NOT_CONFIGURED":
+        return "联网搜索尚未配置。你可以配置 Tavily，或粘贴该公司的官方招聘链接。";
+      case "TAVILY_TIMEOUT":
+      case "TAVILY_UNAVAILABLE":
+        return "招聘入口搜索暂时不可用。你可以稍后重试，或粘贴该公司的官方招聘链接。";
+      case "TAVILY_PROTOCOL_ERROR":
+      case "NO_SAFE_CANDIDATE":
+        return "暂时没有找到可确认的招聘入口。请换一种公司名称，或粘贴官方招聘链接。";
+      case "recruitment_site_selection_invalid":
+        return "所选招聘入口已失效，请重新搜索并确认。";
+      default:
+        return "对话暂时不可用，请稍后重试。";
+    }
+  }
+  return "对话暂时不可用，请稍后重试";
+}

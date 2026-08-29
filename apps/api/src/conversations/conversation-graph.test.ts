@@ -1,0 +1,466 @@
+import { describe, expect, it, vi } from "vitest";
+import { MemorySaver } from "@langchain/langgraph-checkpoint";
+import type { ConversationContext, ConversationTurnResponse, RecruitmentSiteSearchResult, VerifiedRecruitmentSite } from "@resume/contracts";
+import type { JobMatchAggregate, JobMatchRepository } from "../job-matching/job-match-repository.js";
+import { createConversationToolRegistry } from "./conversation-tools.js";
+import { createConversationGraph, type ConversationGraphDependencies } from "./conversation-graph.js";
+
+const baseContext: ConversationContext = {
+  version: 0,
+  activeJobMatchSessionId: "match-1",
+  recentPostingIds: ["posting-1"]
+};
+
+function fakeDependencies(): ConversationGraphDependencies & {
+  createFromJob: ReturnType<typeof vi.fn>;
+  startApplication: ReturnType<typeof vi.fn>;
+  traceRecord: ReturnType<typeof vi.fn>;
+} {
+  const createFromJob = vi.fn(() => ({
+    id: "task-created",
+    name: "Frontend Engineer",
+    applicationUrl: "https://jobs.example.test/apply/frontend",
+    createdAt: "2026-08-22T00:00:00.000Z",
+    updatedAt: "2026-08-22T00:00:00.000Z",
+    orchestrator: "langgraph-v1" as const,
+    profileRevisionApplied: 0,
+    profileSyncStatus: "current" as const
+  }));
+  const startApplication = vi.fn();
+  const traceRecord = vi.fn(() => "trace-1");
+
+  return {
+    jobMatchRepository: {
+      get: vi.fn((sessionId: string): JobMatchAggregate | undefined => sessionId === "match-1" ? ({
+        id: "match-1",
+        version: 3,
+        state: "awaiting_job_selection",
+        initialUrl: "https://jobs.example.test/list",
+        scoringVersion: "job-match-v1",
+        profileRevision: 0,
+        expectationRevision: 0,
+        executionEpoch: 0,
+        createdAt: "2026-08-22T00:00:00.000Z",
+        updatedAt: "2026-08-22T00:00:00.000Z",
+        expectation: {
+          revision: 0,
+          criteria: [],
+          confirmedAt: "2026-08-22T00:00:00.000Z"
+        },
+        postings: [{
+          id: "posting-1",
+          source: "moka",
+          canonicalUrl: "https://jobs.example.test/apply/frontend",
+          title: "Frontend Engineer",
+          organization: "Example Labs",
+          description: "Build the product UI.",
+          requirements: [],
+          adapterVersion: "moka-v1",
+          contentHash: "hash-1",
+          extractedAt: "2026-08-22T00:00:00.000Z"
+        }],
+        results: [{
+          id: "result-1",
+          version: 0,
+          sessionId: "match-1",
+          postingId: "posting-1",
+          fitScore: 88,
+          confidence: 92,
+          rankingScore: 90,
+          outcomes: [],
+          evidence: [{
+            requirementId: "requirement-1",
+            evidenceId: "evidence-1",
+            source: "confirmed_fact",
+            quality: 1,
+            summary: "bounded evidence"
+          }],
+          gaps: [],
+          scoringVersion: "job-match-v1",
+          profileRevision: 0,
+          expectationRevision: 0,
+          postingContentHash: "hash-1",
+          stale: false
+        }],
+        events: []
+      }) : undefined) as unknown as JobMatchRepository["get"]
+    },
+    applicationTasks: {
+      list: vi.fn(() => [{
+        id: "task-1",
+        name: "Already applied",
+        applicationUrl: "https://jobs.example.test/apply/already",
+        createdAt: "2026-08-21T00:00:00.000Z",
+        updatedAt: "2026-08-21T00:00:00.000Z",
+        orchestrator: "langgraph-v1" as const,
+        profileRevisionApplied: 0,
+        profileSyncStatus: "current" as const
+      }]),
+      get: vi.fn(),
+      createFromJob
+    },
+    createFromJob,
+    applicationService: {
+      start: startApplication
+    },
+    startApplication,
+    traceRecord,
+    traceSink: {
+      record: traceRecord,
+      list: vi.fn(() => [])
+    }
+  };
+}
+
+function createRegistryDependencies() {
+  const dependencies = fakeDependencies();
+  return { dependencies, registry: createConversationToolRegistry(dependencies) };
+}
+
+async function runConversationTurn(
+  dependencies: ConversationGraphDependencies,
+  text: string,
+  context: ConversationContext = baseContext
+): Promise<ConversationTurnResponse> {
+  const graph = createConversationGraph(dependencies);
+  const state = await graph.invoke({
+    conversationId: "conversation-1",
+    text,
+    context
+  });
+  return state.response;
+}
+
+describe("conversation graph", () => {
+  it("discovers a company recruitment entry and requires two explicit approvals before matching", async () => {
+    const base = fakeDependencies();
+    const candidate = {
+      title: "Baidu Campus Recruitment",
+      url: "https://campus.baidu.com/",
+      domain: "campus.baidu.com",
+      snippet: "Campus recruitment roles",
+      source: "tavily" as const
+    };
+    const site: VerifiedRecruitmentSite = {
+      company: "Baidu",
+      recruitmentType: "campus",
+      query: "Baidu campus recruitment official",
+      ...candidate
+    };
+    const aggregate = base.jobMatchRepository.get("match-1");
+    if (aggregate === undefined) throw new Error("fixture_missing");
+    const searchRecruitmentSites = vi.fn(async (): Promise<RecruitmentSiteSearchResult> => ({
+      query: site.query,
+      candidates: [candidate]
+    }));
+    const create = vi.fn(async () => ({ ...aggregate, initialUrl: site.url }));
+    const graph = createConversationGraph({
+      ...base,
+      searchRecruitmentSites,
+      jobMatchService: {
+        create,
+        select: vi.fn(),
+        convert: vi.fn()
+      }
+    });
+
+    const discovered = (await graph.invoke({
+      conversationId: "conversation-recruitment",
+      text: "帮我投递一下百度校园招聘",
+      context: { version: 0, recentPostingIds: [] }
+    })).response;
+    expect(searchRecruitmentSites).toHaveBeenCalledWith({ companyName: "百度", recruitmentType: "campus" });
+    expect(discovered.cards).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        type: "confirmation",
+        action: "confirm_recruitment_site",
+        target: expect.objectContaining({ kind: "recruitment_site_choices", candidates: [candidate] })
+      })
+    ]));
+    expect(discovered.pendingConfirmation?.action).toBe("confirm_recruitment_site");
+    expect(discovered.context.verifiedRecruitmentSite).toBeUndefined();
+    expect(create).not.toHaveBeenCalled();
+
+    const selectedUrl = "https://campus.baidu.com/";
+    const siteApproved = (await graph.invoke({
+      conversationId: "conversation-recruitment",
+      confirmationId: discovered.confirmationId,
+      approved: true,
+      selectedUrl,
+      context: discovered.context
+    })).response;
+    expect(siteApproved.context.verifiedRecruitmentSite?.url).toBe(selectedUrl);
+    expect(siteApproved.pendingConfirmation?.action).toBe("request_job_recommendations");
+    expect(siteApproved.cards).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "recruitment_site", url: site.url }),
+      expect.objectContaining({ type: "confirmation", action: "request_job_recommendations" })
+    ]));
+    expect(create).not.toHaveBeenCalled();
+
+    const matching = (await graph.invoke({
+      conversationId: "conversation-recruitment",
+      confirmationId: siteApproved.confirmationId,
+      approved: true,
+      context: siteApproved.context
+    })).response;
+    expect(create).toHaveBeenCalledWith({ url: site.url });
+    expect(matching.cards).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "job_match_session", sessionId: "match-1" })
+    ]));
+    expect(matching.context.activeJobMatchSessionId).toBe("match-1");
+  });
+
+  it("does not create a matching session when the recruitment entry is declined", async () => {
+    const base = fakeDependencies();
+    const site: VerifiedRecruitmentSite = {
+      company: "Baidu",
+      recruitmentType: "campus",
+      query: "Baidu campus recruitment official",
+      title: "Baidu Campus Recruitment",
+      url: "https://campus.baidu.com/",
+      domain: "campus.baidu.com",
+      snippet: "Campus recruitment roles",
+      source: "tavily"
+    };
+    const create = vi.fn(async () => base.jobMatchRepository.get("match-1")!);
+    const graph = createConversationGraph({
+      ...base,
+      searchRecruitmentSites: vi.fn(async () => ({
+        query: site.query,
+        candidates: [{
+          title: site.title,
+          url: site.url,
+          domain: site.domain,
+          snippet: site.snippet,
+          source: site.source
+        }]
+      })),
+      jobMatchService: { create, select: vi.fn(), convert: vi.fn() }
+    });
+    const discovered = (await graph.invoke({
+      conversationId: "conversation-recruitment-decline",
+      text: "我想投递百度校招",
+      context: { version: 0, recentPostingIds: [] }
+    })).response;
+    const declined = (await graph.invoke({
+      conversationId: "conversation-recruitment-decline",
+      confirmationId: discovered.confirmationId,
+      approved: false,
+      context: discovered.context
+    })).response;
+
+    expect(declined.pendingConfirmation).toBeUndefined();
+    expect(create).not.toHaveBeenCalled();
+    expect(declined.context.activeJobMatchSessionId).toBeUndefined();
+  });
+
+  it("rejects a selected URL that is not one of the pending candidates", async () => {
+    const base = fakeDependencies();
+    const searchRecruitmentSites = vi.fn(async (): Promise<RecruitmentSiteSearchResult> => ({
+      query: "百度 校园招聘 招聘 官网",
+      candidates: [{
+        title: "百度校园招聘",
+        url: "https://campus.baidu.com/",
+        domain: "campus.baidu.com",
+        snippet: "校园招聘岗位",
+        source: "tavily"
+      }]
+    }));
+    const graph = createConversationGraph({ ...base, searchRecruitmentSites });
+    const discovered = (await graph.invoke({
+      conversationId: "conversation-recruitment-invalid-selection",
+      text: "帮我投递百度校园招聘",
+      context: { version: 0, recentPostingIds: [] }
+    })).response;
+
+    const rejected = (await graph.invoke({
+      conversationId: "conversation-recruitment-invalid-selection",
+      confirmationId: discovered.confirmationId,
+      approved: true,
+      selectedUrl: "https://attacker.example/",
+      context: discovered.context
+    })).response;
+
+    expect(rejected.message.text).toContain("所选招聘入口已失效");
+    expect(rejected.context.verifiedRecruitmentSite).toBeUndefined();
+    expect(rejected.pendingConfirmation).toBeUndefined();
+  });
+
+  it("turns a user-provided public HTTPS link into the same candidate confirmation", async () => {
+    const base = fakeDependencies();
+    const searchRecruitmentSites = vi.fn(async (): Promise<RecruitmentSiteSearchResult> => ({
+      query: "百度 校园招聘 招聘 官网",
+      candidates: [{
+        title: "百度校园招聘",
+        url: "https://campus.baidu.com/",
+        domain: "campus.baidu.com",
+        snippet: "校园招聘岗位",
+        source: "tavily"
+      }]
+    }));
+    const validatePublicHttpsUrl = vi.fn(async () => ({
+      url: "https://jobs.baidu.com/",
+      domain: "jobs.baidu.com"
+    }));
+    const graph = createConversationGraph({ ...base, searchRecruitmentSites, validatePublicHttpsUrl });
+    const discovered = (await graph.invoke({
+      conversationId: "conversation-recruitment-manual-link",
+      text: "帮我投递百度校园招聘",
+      context: { version: 0, recentPostingIds: [] }
+    })).response;
+
+    const recovered = (await graph.invoke({
+      conversationId: "conversation-recruitment-manual-link",
+      text: "官方入口是 https://jobs.baidu.com/",
+      context: discovered.context
+    })).response;
+
+    expect(validatePublicHttpsUrl).toHaveBeenCalledWith("https://jobs.baidu.com/");
+    expect(searchRecruitmentSites).toHaveBeenCalledOnce();
+    expect(recovered.pendingConfirmation?.target).toMatchObject({
+      kind: "recruitment_site_choices",
+      candidates: [{ source: "user", url: "https://jobs.baidu.com/" }]
+    });
+    expect(recovered.context.verifiedRecruitmentSite).toBeUndefined();
+  });
+
+  it.each([
+    ["帮我投递百度社会招聘", "social" as const],
+    ["帮我看看腾讯实习招聘", "internship" as const],
+    ["查找大疆招聘官网", "unknown" as const]
+  ])("maps %s to the shared recruitment search type", async (text, recruitmentType) => {
+    const base = fakeDependencies();
+    const searchRecruitmentSites = vi.fn(async (): Promise<RecruitmentSiteSearchResult> => ({
+      query: "招聘",
+      candidates: [{
+        title: "招聘入口",
+        url: "https://jobs.example.com/",
+        domain: "jobs.example.com",
+        snippet: "招聘岗位",
+        source: "tavily"
+      }]
+    }));
+    const response = (await createConversationGraph({ ...base, searchRecruitmentSites }).invoke({
+      conversationId: `conversation-${recruitmentType}`,
+      text,
+      context: { version: 0, recentPostingIds: [] }
+    })).response;
+
+    expect(response.message.intent?.target?.recruitmentType).toBe(recruitmentType);
+    expect(searchRecruitmentSites).toHaveBeenCalledWith(expect.objectContaining({ recruitmentType }));
+  });
+
+  it("does not expose arbitrary browser operations", async () => {
+    const { registry } = createRegistryDependencies();
+
+    expect(registry.names()).toEqual([
+      "discover_recruitment_site",
+      "create_job_match_session",
+      "list_recommendations",
+      "show_recommendation",
+      "list_application_tasks",
+      "show_application_task",
+      "create_application_task"
+    ]);
+    await expect(registry.invoke("page.evaluate" as never, {}, {
+      conversationId: "conversation-1",
+      recentPostingIds: []
+    })).rejects.toThrow("tool_not_allowed");
+  });
+
+  it("turns a combined first-application request into a confirmation", async () => {
+    const dependencies = fakeDependencies();
+
+    const response = await runConversationTurn(
+      dependencies,
+      "投递第一份，帮我查看投递进度"
+    );
+
+    expect(response.pendingConfirmation?.action).toBe("start_application");
+    expect(response.pendingConfirmation?.target).toMatchObject({
+      kind: "recommendation",
+      resultId: "result-1"
+    });
+    expect(response.message.intent?.kind).toBe("start_application_and_show_status");
+    expect(dependencies.createFromJob).not.toHaveBeenCalled();
+    expect(dependencies.startApplication).not.toHaveBeenCalled();
+  });
+
+  it("executes a read-only status query without confirmation", async () => {
+    const dependencies = fakeDependencies();
+
+    const response = await runConversationTurn(dependencies, "我投了哪些岗位", {
+      version: 0,
+      recentPostingIds: []
+    });
+
+    expect(response.cards).toHaveLength(1);
+    expect(response.cards.every((card) => card.type === "application_task")).toBe(true);
+    expect(response.pendingConfirmation).toBeUndefined();
+    expect(dependencies.createFromJob).not.toHaveBeenCalled();
+  });
+
+  it("falls back to unknown when a structured model returns an invalid intent", async () => {
+    const dependencies = fakeDependencies();
+    dependencies.modelProvider = {
+      generateStructured: vi.fn(async () => ({ kind: "run_browser_command", tool: "page.evaluate" }))
+    };
+
+    const response = await runConversationTurn(dependencies, "帮我做点别的事情", {
+      version: 0,
+      recentPostingIds: []
+    });
+
+    expect(response.message.intent?.kind).toBe("unknown");
+    expect(response.cards).toEqual([]);
+    expect(response.message.text).toContain("目前只能");
+  });
+
+  it("keeps the response when tracing fails", async () => {
+    const dependencies = fakeDependencies();
+    dependencies.traceSink = {
+      record: vi.fn(() => {
+        throw new Error("trace_sink_unavailable");
+      }),
+      list: vi.fn(() => [])
+    };
+
+    const response = await runConversationTurn(dependencies, "我投了哪些岗位", {
+      version: 0,
+      recentPostingIds: []
+    });
+
+    expect(response.cards[0]).toMatchObject({ type: "application_task", taskId: "task-1" });
+  });
+
+  it("records a bounded trace event for each tool call", async () => {
+    const dependencies = fakeDependencies();
+
+    await runConversationTurn(dependencies, "我投了哪些岗位", {
+      version: 0,
+      recentPostingIds: []
+    });
+
+    expect(dependencies.traceRecord).toHaveBeenCalledWith(expect.objectContaining({
+      kind: "tool_call",
+      toolName: "list_application_tasks",
+      outcome: "completed",
+      durationMs: expect.any(Number)
+    }));
+  });
+
+  it("uses the configured checkpoint saver for conversation state", async () => {
+    const dependencies = fakeDependencies();
+    const checkpointer = new MemorySaver();
+    const graph = createConversationGraph({ ...dependencies, checkpointer });
+
+    await graph.invoke({
+      conversationId: "conversation-1",
+      text: "我投了哪些岗位",
+      context: { version: 0, recentPostingIds: [] }
+    }, { configurable: { thread_id: "conversation-1" } });
+
+    await expect(checkpointer.getTuple({ configurable: { thread_id: "conversation-1" } }))
+      .resolves.toBeDefined();
+  });
+});

@@ -13,7 +13,7 @@ from starlette.datastructures import Headers
 from starlette.types import ASGIApp, Message, Receive, Scope, Send
 
 from .auth import require_bearer_token
-from .types import OcrBackend, WorkerSettings
+from .types import OCR_RUNTIMES, OcrBackend, OcrBlock, OcrResult, WorkerSettings
 
 
 LOGGER = logging.getLogger("resume_ocr_worker")
@@ -153,27 +153,32 @@ def create_app(backend: OcrBackend, settings: WorkerSettings) -> FastAPI:
 
         try:
             async with app.state.inference_lock:
-                text = await asyncio.to_thread(backend.recognize, image_bytes)
-            if not isinstance(text, str) or not text.strip():
-                raise InvalidBackendOutput()
+                raw_result = await asyncio.to_thread(backend.recognize, image_bytes)
+            result = _coerce_backend_result(raw_result, backend, settings)
         except Exception as error:
             return _backend_failure_response(error, request_id, started)
 
         elapsed_ms = round((time.perf_counter() - started) * 1000)
         LOGGER.info(
-            "ocr request completed request_id=%s status_code=%d model=%s revision=%s elapsed_ms=%d",
+            "ocr request completed request_id=%s status_code=%d model=%s revision=%s runtime=%s elapsed_ms=%d",
             request_id,
             status.HTTP_200_OK,
             settings.model,
             settings.revision,
+            result.runtime,
             elapsed_ms,
         )
         return {
-            "text": text,
+            "text": result.text,
             "model": settings.model,
             "modelRevision": settings.revision,
             "mode": "document_to_markdown",
             "elapsedMs": elapsed_ms,
+            "runtime": result.runtime,
+            "blocks": [
+                {"text": block.text, "bbox": list(block.bbox)}
+                for block in result.blocks
+            ],
         }
 
     return app
@@ -182,6 +187,42 @@ def create_app(backend: OcrBackend, settings: WorkerSettings) -> FastAPI:
 def _validate_backend_metadata(backend: OcrBackend, settings: WorkerSettings) -> None:
     if backend.model != settings.model or backend.revision != settings.revision:
         raise ValueError("Backend metadata does not match Worker settings.")
+    runtime = getattr(backend, "runtime", None)
+    if runtime is not None and runtime != settings.runtime:
+        raise ValueError("Backend runtime does not match Worker settings.")
+
+
+def _coerce_backend_result(raw_result: object, backend: OcrBackend, settings: WorkerSettings) -> OcrResult:
+    if isinstance(raw_result, str):
+        result = OcrResult(
+            text=raw_result,
+            blocks=[],
+            model=backend.model,
+            revision=backend.revision,
+            runtime=getattr(backend, "runtime", settings.runtime),
+        )
+    elif isinstance(raw_result, OcrResult):
+        result = raw_result
+    else:
+        raise InvalidBackendOutput()
+
+    if not result.text.strip():
+        raise InvalidBackendOutput()
+    if result.model != settings.model or result.revision != settings.revision:
+        raise InvalidBackendOutput()
+    if result.runtime not in OCR_RUNTIMES or result.runtime != settings.runtime:
+        raise InvalidBackendOutput()
+    if not isinstance(result.blocks, list) or len(result.blocks) > 10_000:
+        raise InvalidBackendOutput()
+    for block in result.blocks:
+        if not isinstance(block, OcrBlock) or not block.text.strip() or len(block.bbox) != 4:
+            raise InvalidBackendOutput()
+        if any(isinstance(value, bool) or not isinstance(value, int) for value in block.bbox):
+            raise InvalidBackendOutput()
+        left, top, right, bottom = block.bbox
+        if left < 0 or top < 0 or right <= left or bottom <= top:
+            raise InvalidBackendOutput()
+    return result
 
 
 def _is_valid_image(image_bytes: bytes, settings: WorkerSettings) -> bool:

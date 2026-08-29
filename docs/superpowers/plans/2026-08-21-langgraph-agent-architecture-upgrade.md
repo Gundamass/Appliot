@@ -4,9 +4,9 @@
 
 **Goal:** Replace the fragmented XState/service orchestration with one auditable LangGraph runtime while preserving resume parsing, evidence grounding, ATS matching, controlled Playwright filling, challenge handoff, and the permanent ban on automatic submission.
 
-**Architecture:** The API owns a typed LangGraph main graph and three bounded subgraphs: resume ingestion, job matching, and application execution. Existing deterministic domain services remain behind restricted ports; graph state stores references and decisions, SQLite stores checkpoints, business records, traces, and a LangSmith export outbox, and every model or side-effect boundary emits a redacted audit event. LangSmith is an optional observation/evaluation sink; local TraceSink remains authoritative and the OCR HTTP contract stays runtime-neutral so PyTorch remains the production baseline while a MindSpore Lite backend is evaluated behind an explicit rollout gate.
+**Architecture:** The API owns a typed LangGraph main graph and three bounded subgraphs: resume ingestion, job matching, and application execution. Existing deterministic domain services remain behind restricted ports; graph state stores references and decisions, SQLite stores checkpoints, business records, traces, and a LangSmith export outbox, and every model or side-effect boundary emits a redacted audit event. Job matching uses a local LightRAG worker through a versioned evidence-retrieval port: LightRAG handles semantic and graph-aware evidence recall, while ATS normalization, hard-condition filtering, evidence validation, and final scoring remain deterministic application responsibilities. LangSmith is an optional observation/evaluation sink; local TraceSink remains authoritative and the OCR HTTP contract stays runtime-neutral so PyTorch remains the production baseline while a MindSpore Lite backend is evaluated behind an explicit rollout gate.
 
-**Tech Stack:** TypeScript 5.8.3, Node.js >=24.14.1, `@langchain/langgraph` 1.4.12, `@langchain/langgraph-checkpoint` 1.1.5, `@langchain/core` 1.2.9, `langsmith` 0.9.0, Zod 3.25.76, SQLite/better-sqlite3 11.10.0, Vitest 3.2.4, Python 3.12, FastAPI, PyTorch 2.6, optional externally packaged MindSpore Lite runtime, Playwright 1.53.1.
+**Tech Stack:** TypeScript 5.8.3, Node.js >=24.14.1, `@langchain/langgraph` 1.4.12, `@langchain/langgraph-checkpoint` 1.1.5, `@langchain/core` 1.2.9, `langsmith` 0.9.0, Zod 3.25.76, SQLite/better-sqlite3 11.10.0, Vitest 3.2.4, Python 3.12, FastAPI, LightRAG with a lockfile-pinned retrieval-worker environment, PyTorch 2.6, optional externally packaged MindSpore Lite runtime, Playwright 1.53.1.
 
 ## Global Constraints
 
@@ -14,6 +14,10 @@
 - Model code may classify, rank, and draft, but it never receives browser write, navigation, approval-token, execution-epoch, or submission capabilities.
 - No layer may automatically submit an application. `submit`, `final_submit`, and equivalent controls must remain denied by graph routing, Action Policy, and Browser Worker.
 - Every model result must pass a strict Zod schema and may reference only candidate IDs and evidence IDs supplied in its request.
+- LightRAG is a retrieval provider only. Its generated answer is never treated as a fact or as the final match score; the graph consumes bounded evidence records and source references.
+- LightRAG indexes are local, tenant-scoped, document-versioned, and built from normalized job/profile evidence rather than raw ATS HTML or unbounded resume text. Index updates and deletes must be idempotent and auditable.
+- Hard conflicts for education, major, years, location, or other configured constraints are resolved before LightRAG retrieval and cannot be overturned by semantic arbitration.
+- LightRAG failure, missing index, invalid metadata, or unavailable embedding/model dependencies must degrade to the existing deterministic retrieval path and must be visible in the trace.
 - Objective facts without confirmed evidence cause an interrupt; they are never guessed or silently defaulted.
 - Challenge detection invalidates the execution epoch before the graph records an interrupt.
 - Checkpoint payloads contain small state and object IDs, not PDF bytes, page images, full resume text, access tokens, or raw secrets.
@@ -53,10 +57,16 @@
 ### Subgraphs
 
 - Create `apps/api/src/agent/subgraphs/resume-ingestion.ts`: text-first/OCR-fallback extraction orchestration.
-- Create `apps/api/src/agent/subgraphs/job-matching.ts`: ATS extraction, deterministic filtering, hybrid retrieval, and evidence-constrained advisory.
+- Create `apps/api/src/agent/subgraphs/job-matching.ts`: ATS extraction, deterministic filtering, LightRAG evidence retrieval, and evidence-constrained advisory.
+- Create `apps/api/src/job-matching/lightrag-retrieval-client.ts`: authenticated client for the retrieval-worker contract with schema validation, timeout, retry, and fallback classification.
 - Create `apps/api/src/agent/subgraphs/application-execution.ts`: observe, resolve, authorize, execute, double-readback, audit, and final-review routing.
 - Create `apps/api/src/agent/application-tools.ts`: deterministic application ports extracted from the current service.
 - Create `apps/api/src/agent/graph-service.ts`: stable facade used by HTTP routes and task events.
+
+### Retrieval
+
+- Create `services/lightrag-worker/`: local LightRAG index lifecycle and context-only retrieval API for job/profile evidence.
+- Create `services/lightrag-worker/tests/`: index isolation, metadata validation, stale-version rejection, and failure behavior.
 
 ### Cutover
 
@@ -168,7 +178,9 @@ export const JobMatchingStateSchema = z.object({
   sessionId: z.string(), postingIds: z.array(z.string()).optional(),
   recommendedResultIds: z.array(z.string()).optional(), conflictResultIds: z.array(z.string()).optional(),
   adapterVersion: z.string().optional(), scoringVersion: z.literal("job-match-v1").optional(),
-  embeddingHealthy: z.boolean().optional()
+  retrievalProvider: z.enum(["lightrag", "deterministic_fallback"]).optional(),
+  retrievalVersion: z.string().optional(), retrievalHealthy: z.boolean().optional(),
+  fallbackUsed: z.boolean().optional()
 }).strict();
 export const ApplicationExecutionStateSchema = z.object({
   applicationUrl: z.string().url(), snapshotId: z.string().optional(), executionEpoch: z.number().int().nonnegative(),
@@ -418,7 +430,7 @@ rtk git commit -m "feat: add optional LangSmith review outbox"
 - Consumes: `BaseCheckpointSaver`, `Checkpoint`, `CheckpointMetadata`, `CheckpointTuple`, `PendingWrite`, `RunnableConfig`, and existing `SqliteDatabase`.
 - Produces: `SqliteAgentCheckpointer extends BaseCheckpointSaver` with `getTuple`, `list`, `put`, `putWrites`, and `deleteThread`.
 
-- [ ] **Step 1: Write a failing round-trip and thread-isolation test**
+- [x] **Step 1: Write a failing round-trip and thread-isolation test**
 
 ```ts
 it("round-trips checkpoints and pending writes by thread and namespace", async () => {
@@ -435,13 +447,13 @@ it("round-trips checkpoints and pending writes by thread and namespace", async (
 });
 ```
 
-- [ ] **Step 2: Run the test and confirm the saver is missing**
+- [x] **Step 2: Run the test and confirm the saver is missing**
 
 Run: `rtk corepack pnpm --filter @resume/api test -- src/agent/sqlite-checkpointer.test.ts`
 
 Expected: FAIL with missing `SqliteAgentCheckpointer`.
 
-- [ ] **Step 3: Add checkpoint tables and implement the saver**
+- [x] **Step 3: Add checkpoint tables and implement the saver**
 
 Add tables keyed exactly like LangGraph configuration:
 
@@ -464,7 +476,7 @@ CREATE TABLE IF NOT EXISTS agent_checkpoint_writes (
 
 Use `this.serde.dumpsTyped`/`loadsTyped` for all checkpoint, metadata, and write values. `put` must return `{ configurable: { thread_id, checkpoint_ns, checkpoint_id: checkpoint.id } }`; `getTuple` must select the requested ID or latest ID; `list` must yield newest first and honor `limit`, `before`, and metadata filter options; `putWrites` must preserve input order through `write_index`; `deleteThread` must delete all namespaces in one transaction. Reject missing `thread_id` with `agent_thread_id_required`.
 
-- [ ] **Step 4: Run round-trip, migration, and type checks**
+- [x] **Step 4: Run round-trip, migration, and type checks**
 
 Run: `rtk corepack pnpm --filter @resume/api test -- src/agent/sqlite-checkpointer.test.ts src/db/migrate.test.ts`
 
@@ -474,7 +486,7 @@ Run: `rtk corepack pnpm --filter @resume/api typecheck`
 
 Expected: exit 0 against the pinned checkpoint interfaces.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 rtk git add apps/api/src/agent/sqlite-checkpointer.ts apps/api/src/agent/sqlite-checkpointer.test.ts apps/api/src/db/migrate.ts apps/api/src/db/migrate.test.ts
@@ -603,6 +615,115 @@ rtk git add apps/api/src/agent/subgraphs/resume-ingestion.ts apps/api/src/agent/
 rtk git commit -m "feat: orchestrate resume ingestion with LangGraph"
 ```
 
+### Task 6A: Build the LightRAG Evidence Retrieval Port
+
+**Files:**
+- Create: `services/lightrag-worker/pyproject.toml`
+- Create: `services/lightrag-worker/requirements.lock`
+- Create: `services/lightrag-worker/src/lightrag_worker/types.py`
+- Create: `services/lightrag-worker/src/lightrag_worker/index_manager.py`
+- Create: `services/lightrag-worker/src/lightrag_worker/retriever.py`
+- Create: `services/lightrag-worker/src/lightrag_worker/app.py`
+- Create: `services/lightrag-worker/tests/test_index_manager.py`
+- Create: `services/lightrag-worker/tests/test_retriever.py`
+- Create: `services/lightrag-worker/tests/test_app.py`
+- Create: `apps/api/src/job-matching/lightrag-retrieval-client.ts`
+- Create: `apps/api/src/job-matching/lightrag-retrieval-client.test.ts`
+- Modify: `apps/api/src/production-dependencies.ts`
+
+**Interfaces:**
+- Consumes: normalized `JobSpec`, profile fact/evidence references, the existing embedding provider contract, and local LightRAG configuration.
+- Produces: an authenticated context-only retrieval API and `EvidenceRetrievalPort` for the job-matching graph.
+
+```ts
+export interface EvidenceRetrievalPort {
+  retrieve(input: {
+    query: string;
+    scope: "profile" | "job";
+    profileRevision?: number;
+    postingId?: string;
+    topK: number;
+    indexVersion?: string;
+  }): Promise<{
+    provider: "lightrag" | "deterministic_fallback";
+    retrievalVersion: string;
+    evidence: Array<{
+      evidenceId: string;
+      documentId: string;
+      page?: number;
+      blockId?: string;
+      quoteHash: string;
+      score: number;
+    }>;
+  }>;
+}
+```
+
+- [ ] **Step 1: Write failing contract and isolation tests**
+
+```ts
+it("returns only versioned evidence references from LightRAG", async () => {
+  const result = await client.retrieve({
+    query: "distributed systems project experience", scope: "profile", topK: 5
+  });
+  expect(result.provider).toBe("lightrag");
+  expect(result.evidence[0]).toEqual(expect.objectContaining({
+    evidenceId: expect.any(String), documentId: expect.any(String), quoteHash: expect.any(String)
+  }));
+});
+
+it("rejects evidence outside the requested posting and profile revision", async () => {
+  await expect(client.retrieve({
+    query: "requirements", scope: "profile", profileRevision: 3, postingId: "job-1", topK: 5
+  })).rejects.toThrow("retrieval_scope_mismatch");
+});
+
+it("falls back when LightRAG is unavailable", async () => {
+  const result = await createClient({ transport: failingTransport, fallback: deterministicFallback })
+    .retrieve({ query: "python", scope: "profile", topK: 5 });
+  expect(result.provider).toBe("deterministic_fallback");
+});
+```
+
+- [ ] **Step 2: Run focused tests and confirm the retrieval boundary is absent**
+
+Run: `rtk py -m pytest services/lightrag-worker/tests -q`
+
+Expected: FAIL because the worker package and API contract are absent.
+
+Run: `rtk corepack pnpm --filter @resume/api test -- src/job-matching/lightrag-retrieval-client.test.ts`
+
+Expected: FAIL with module resolution or contract errors.
+
+- [ ] **Step 3: Implement a local LightRAG worker with explicit index lifecycle**
+
+Pin LightRAG and all Python dependencies in the worker lockfile. Keep the worker behind a small FastAPI contract with authenticated endpoints for `upsert`, `delete`, `retrieve`, and `health`. Build two logically isolated indexes, `profile_evidence` and `job_requirements`; each indexed record must contain only normalized text plus stable metadata: `tenantScope`, `documentId`, `postingId`, `profileRevision`, `page`, `blockId`, `evidenceId`, `contentHash`, and `indexVersion`. Raw ATS HTML, access tokens, and unbounded personal fields are rejected before indexing.
+
+Use LightRAG's hybrid/context-only query path. The worker may use its graph and vector stores internally, but the API response must contain bounded evidence references and scores, never a generated answer. Every relation returned by graph retrieval must retain the source evidence IDs that support it. Upserts and deletes are idempotent; a new index is built as `building`, checked against the manifest, then atomically promoted to `active`. Retired indexes remain available for replay until the retention policy expires.
+
+- [ ] **Step 4: Add the TypeScript client and failure classification**
+
+Validate every response with a strict Zod schema. Enforce request timeout, one bounded retry for transient worker failures, and reject invalid scope, stale profile revision, unknown posting IDs, nonfinite scores, duplicate evidence IDs, and excessive result sizes. Classify failures as `retrieval_timeout`, `retrieval_unavailable`, `retrieval_scope_mismatch`, `retrieval_invalid_response`, or `retrieval_index_missing`. The client must never silently convert a LightRAG generated answer into a `ProfileFact` or a match decision.
+
+Wire the client through the restricted tool registry as `retrieve_job_evidence`, allowed to the graph caller only. Model callers receive only the evidence IDs selected by the graph; they cannot invoke the worker directly or change the retrieval scope.
+
+- [ ] **Step 5: Verify worker and client behavior**
+
+Run: `rtk py -m pytest services/lightrag-worker/tests -q`
+
+Expected: PASS for index isolation, metadata validation, idempotent upsert/delete, context-only results, stale-version rejection, authentication, request limits, and health reporting.
+
+Run: `rtk corepack pnpm --filter @resume/api test -- src/job-matching/lightrag-retrieval-client.test.ts src/agent/tool-registry.test.ts`
+
+Expected: PASS for schema validation, timeout/retry classification, deterministic fallback, and model caller restrictions.
+
+- [ ] **Step 6: Commit**
+
+```bash
+rtk git add services/lightrag-worker apps/api/src/job-matching/lightrag-retrieval-client.ts apps/api/src/job-matching/lightrag-retrieval-client.test.ts apps/api/src/production-dependencies.ts
+rtk git commit -m "feat: add LightRAG evidence retrieval port"
+```
+
 ### Task 6: Migrate ATS Job Matching into a LangGraph Subgraph
 
 **Files:**
@@ -614,10 +735,10 @@ rtk git commit -m "feat: orchestrate resume ingestion with LangGraph"
 - Modify: `apps/api/src/observability/job-match-trace.ts`
 
 **Interfaces:**
-- Consumes: existing ATS adapters, filter/extraction coordinators, repository, Trigram retrieval, embedding search, `scoreJobMatch`, and restricted advisor.
+- Consumes: existing ATS adapters, filter/extraction coordinators, repository, `EvidenceRetrievalPort`, deterministic fallback retrieval, `scoreJobMatch`, and restricted advisor.
 - Produces: `createJobMatchingSubgraph(deps)` and `JobRequirementAdvisory` restricted to supplied requirement/evidence IDs.
 
-- [ ] **Step 1: Write failing tests for adapter boundaries, tri-state constraints, hybrid fallback, and constrained reranking**
+- [ ] **Step 1: Write failing tests for adapter boundaries, hard filters, LightRAG evidence, fallback, and constrained reranking**
 
 ```ts
 it("never asks the model to parse unsupported ATS HTML", async () => {
@@ -632,6 +753,20 @@ it("keeps unknown hard constraints rankable and conflict constraints separate", 
   expect(result.recommended.map((item) => item.postingId)).toContain(unknownPosting.id);
   expect(result.conflicts.map((item) => item.postingId)).toContain(conflictPosting.id);
 });
+
+it("does not let semantic arbitration override a hard conflict", async () => {
+  const advisor = { advise: vi.fn().mockResolvedValue({ decision: "match" }) };
+  const result = await createJobMatchingTestGraph({ postings: [conflictPosting], advisor }).invoke(jobInputFixture);
+  expect(result.conflicts.map((item) => item.postingId)).toContain(conflictPosting.id);
+  expect(advisor.advise).not.toHaveBeenCalled();
+});
+
+it("passes only validated LightRAG evidence to the advisor", async () => {
+  const advisor = { advise: vi.fn().mockResolvedValue({ decision: "match", evidenceIds: ["evidence-1"] }) };
+  const result = await createJobMatchingTestGraph({ advisor, retrievalProvider: "lightrag" }).invoke(jobInputFixture);
+  expect(result.jobMatching.retrievalProvider).toBe("lightrag");
+  expect(advisor.advise).toHaveBeenCalledWith(expect.objectContaining({ evidenceIds: ["evidence-1"] }));
+});
 ```
 
 - [ ] **Step 2: Run focused tests and confirm missing subgraph**
@@ -640,9 +775,13 @@ Run: `rtk corepack pnpm --filter @resume/api test -- src/agent/subgraphs/job-mat
 
 Expected: FAIL with missing job-matching subgraph.
 
-- [ ] **Step 3: Implement nodes and constrain advisor inputs**
+- [ ] **Step 3: Implement nodes and constrain retrieval/advisor inputs**
 
-Use nodes `observe_ats -> select_adapter -> apply_filter_plan -> extract_postings -> match_candidates -> persist_results`. ATS adapters alone may convert site snapshots to `JobPosting`; unsupported snapshots end with `adapter_contract_mismatch`. Keep education, major, and years outcomes as `satisfied | conflict | unknown`. Run Trigram and Dense retrieval independently, merge deterministically, and score with `scoreJobMatch`. Call DeepSeek only for unknown outcomes with at most three supplied evidence IDs. In this migration phase parse the result through `validateAdvisory` and keep it advisory-only; malformed or unavailable responses become `UNKNOWN_ADVISORY` without changing deterministic ranking. A later Top-K semantic rerank is allowed only as a separately versioned experiment after the evaluation gate proves it improves ranking without overriding hard conflicts. Emit counts and version IDs through the unified `TraceSink`, while retaining `BoundedJobMatchTraceBuffer` as a compatibility view during this phase.
+Use nodes `observe_ats -> select_adapter -> normalize_job_spec -> apply_hard_filter -> retrieve_evidence -> validate_evidence -> arbitrate_unknowns -> rank_and_persist`. ATS adapters alone may convert site snapshots to `JobPosting`; unsupported snapshots end with `adapter_contract_mismatch`. Keep education, major, and years outcomes as `satisfied | conflict | unknown`; hard conflicts are excluded before retrieval and cannot be changed by the model.
+
+Use `EvidenceRetrievalPort` for two bounded directions: query the job index with the profile summary to find relevant postings, then query the profile index with each accepted posting's requirements to obtain supporting resume evidence. Validate every returned evidence ID against the requested posting/profile revision and evidence repository before it reaches the advisor. LightRAG is the primary semantic retrieval provider; the existing Trigram and Dense implementations remain a deterministic fallback and evaluation baseline, not the main ranking path.
+
+Call DeepSeek only for `unknown` outcomes with a bounded set of validated evidence IDs. Parse the result through `validateAdvisory`; the model may explain or rerank accepted candidates but may not promote a hard conflict, invent evidence, or write directly to the repository. Malformed, unavailable, or low-confidence responses become `UNKNOWN_ADVISORY` and preserve deterministic ordering. Emit provider, index version, fallback status, counts, and decision version through the unified `TraceSink`, while retaining `BoundedJobMatchTraceBuffer` as a compatibility view during this phase.
 
 - [ ] **Step 4: Run matching regressions**
 
@@ -652,7 +791,7 @@ Expected: PASS for adapter fixtures, deterministic scoring, advisory validation,
 
 Run: `rtk corepack pnpm --filter @resume/api test -- src/job-matching/match-coordinator.test.ts src/job-matching/job-match-service.test.ts src/agent/subgraphs/job-matching.test.ts`
 
-Expected: PASS with Dense failure degrading to deterministic results and no model call for conflict outcomes.
+Expected: PASS with LightRAG failure degrading to deterministic results, stale evidence being rejected, and no model call for conflict outcomes.
 
 - [ ] **Step 5: Commit**
 
@@ -985,12 +1124,14 @@ Each JSONL row must contain `caseId`, `suiteVersion`, input fixture/object IDs, 
 - Core fact accuracy = correct normalized core fields / labeled core fields.
 - Evidence grounding = correctly located evidence spans / extracted facts accepted as correct.
 - Recall@3 = cases where any expected posting appears in top 3 / ranking cases.
+- LightRAG evidence hit rate = accepted recommendations with at least one validated supporting evidence / recommendations requiring semantic evidence.
+- Retrieval fallback rate = fallback retrieval runs / total retrieval runs; report separately from ranking quality.
 - First-pass readback = fields stable after the first double-readback transaction / attempted fields.
 - Mis-submission count = observed submit commands or submit side effects; release threshold is exactly 0.
 - OCR character accuracy = `1 - character_edit_distance / reference_character_count`.
 - OCR parity regression = candidate accuracy minus PyTorch baseline accuracy on the identical corpus.
 
-Add `evals/agent/langsmith-review.jsonl` with only versioned case IDs, input hashes and expected labels. Implement `evals/agent/langsmith-review.test.ts` to verify that a local Trace sequence and its LangSmith projection preserve run/node/tool parentage, event order, graph/model/tool versions and terminal outcome; inject names, phone numbers, email addresses, prompts, DOM fragments and evidence quotes and require export rejection. Use an injected fake LangSmith client to test timeout, rate-limit, auth failure, duplicate flush and dead-letter behavior. The evaluation report must record `langsmithEnabled`, outbox sent/retried/dead-letter counts, privacy rejection count, and local-versus-remote correlation mismatches.
+Add `evals/agent/langsmith-review.jsonl` with only versioned case IDs, input hashes and expected labels. Include LightRAG provider, index version, evidence IDs, fallback status, and expected ranking/evidence labels in `evals/agent/job-matching.jsonl`; raw candidate PII remains forbidden. Implement `evals/agent/langsmith-review.test.ts` to verify that a local Trace sequence and its LangSmith projection preserve run/node/tool parentage, event order, graph/model/tool/retrieval versions and terminal outcome; inject names, phone numbers, email addresses, prompts, DOM fragments and evidence quotes and require export rejection. Use an injected fake LangSmith client to test timeout, rate-limit, auth failure, duplicate flush and dead-letter behavior. The evaluation report must record `retrievalProvider`, `retrievalVersion`, `fallbackCount`, `langsmithEnabled`, outbox sent/retried/dead-letter counts, privacy rejection count, and local-versus-remote correlation mismatches.
 
 Write reports under `docs/superpowers/evaluations/<dataset-hash>/` and include git commit, dataset SHA-256, graph version, adapter versions, model revisions, OCR runtime, case counts, failures, and confidence intervals. Never overwrite a report directory whose dataset hash already exists.
 
@@ -1051,7 +1192,10 @@ rtk git commit -m "test: add reproducible agent evaluation gates"
 - [ ] LangSmith timeout, rate limit, authentication failure, duplicate delivery, and dead-letter behavior do not affect graph execution or Checkpoint recovery.
 - [ ] Local Trace and LangSmith projections preserve parentage, ordering, versions, and terminal outcomes for the same run.
 - [ ] Existing ATS adapters remain the only HTML-to-`JobPosting` boundary.
-- [ ] Dense/model outages degrade to deterministic matching without turning `unknown` into `conflict`.
+- [ ] LightRAG returns context/evidence references only; generated answers never become facts or final match scores.
+- [ ] LightRAG indexes are local, tenant-scoped, versioned, idempotently updatable, and auditable.
+- [ ] LightRAG outages, missing indexes, invalid scopes, and malformed responses degrade to Trigram/Dense deterministic fallback without turning `unknown` into `conflict`.
+- [ ] Semantic arbitration receives only validated candidate/evidence IDs and cannot override hard conflicts.
 - [ ] PyTorch OCR remains deployable and behaviorally compatible after backend extraction.
 - [ ] MindSpore Lite cannot start without a reviewed offline runtime, signed model manifest, and parity report.
 - [ ] XState is removed only after the legacy-task drain query returns zero.
@@ -1060,4 +1204,4 @@ rtk git commit -m "test: add reproducible agent evaluation gates"
 
 ## Execution Order
 
-Execute Tasks 1-2A first as the foundation. Task 3 then adds persistent checkpoints; Task 4 follows with graph routing. Tasks 5 and 6 may then run in parallel because both are read-oriented and depend only on the foundation. Task 7 follows the foundation and receives a dedicated safety review. Task 8 starts only after Tasks 5-7 pass parity suites. Task 9 may run in parallel with Tasks 5-7 because the HTTP compatibility contract isolates it. Task 10 runs last and is the release gate for architecture, LangSmith privacy, and resume metrics.
+Execute Tasks 1-2A first as the foundation. Task 3 then adds persistent checkpoints; Task 4 follows with graph routing. Task 5 and Task 6A may then run in parallel because both are read-oriented and depend only on the foundation. Task 6 starts after Task 6A's retrieval contract and fallback tests pass. Task 7 follows the foundation and receives a dedicated safety review. Task 8 starts only after Tasks 5-7 pass parity suites. Task 9 may run in parallel with Tasks 5-7 because the HTTP compatibility contract isolates it. Task 10 runs last and is the release gate for architecture, LightRAG evidence grounding, LangSmith privacy, and resume metrics.

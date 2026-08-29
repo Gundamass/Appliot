@@ -13,6 +13,6 @@
     "@resume/form-semantics": "workspace:*",
     "@resume/model-provider": "workspace:*",
     "pdfjs-dist": "5.3.31",
-    "zod": "3.25.67"
+    "zod": "3.25.76"
   }
 }
