@@ -13,6 +13,8 @@ import {
   type ConversationConfirmation,
   type ConversationContext,
   type ConversationIntent,
+  type ConversationProcessStage,
+  type ConversationProcessStatus,
   type ConversationTarget,
   type ConversationTurnResponse,
   type RecruitmentSearchRequest,
@@ -28,6 +30,7 @@ import {
   type ConversationToolName,
   type ConversationToolResult
 } from "./conversation-tools.js";
+import type { ConversationProcessEventBus } from "./conversation-events.js";
 import { z } from "zod";
 import { validatePublicHttpsUrl } from "../recruitment-search/public-https-url.js";
 
@@ -64,6 +67,7 @@ export type ConversationGraphInput = z.input<typeof ConversationGraphInputSchema
 export interface ConversationGraphDependencies extends ConversationToolDependencies {
   checkpointer?: BaseCheckpointSaver;
   traceSink?: TraceSink;
+  processEvents?: ConversationProcessEventBus;
   now?: () => Date;
   validatePublicHttpsUrl?: typeof validatePublicHttpsUrl;
   confirmationStore?: ConversationConfirmationStore;
@@ -121,6 +125,7 @@ interface GraphState {
   intent?: ConversationIntent;
   target?: ResolvedTarget;
   resolutionError?: string;
+  failureCode?: string;
   route: Route;
   cards: ConversationCard[];
   assistantText?: string;
@@ -148,6 +153,7 @@ const GraphStateAnnotation = Annotation.Root({
   intent: Annotation<ConversationIntent | undefined>({ reducer: replaceValue, default: () => undefined }),
   target: Annotation<ResolvedTarget | undefined>({ reducer: replaceValue, default: () => undefined }),
   resolutionError: Annotation<string | undefined>({ reducer: replaceValue, default: () => undefined }),
+  failureCode: Annotation<string | undefined>({ reducer: replaceValue, default: () => undefined }),
   route: Annotation<Route>({ reducer: replaceValue, default: () => "persist" }),
   cards: Annotation<ConversationCard[]>({ reducer: replaceValue, default: () => [] }),
   assistantText: Annotation<string | undefined>({ reducer: replaceValue, default: () => undefined }),
@@ -195,11 +201,24 @@ export function createConversationGraph(dependencies: ConversationGraphDependenc
       const graphInput = {
         conversationId: parsed.conversationId,
         context: parsed.context,
-        ...(parsed.text === undefined ? {} : { text: parsed.text }),
-        ...(parsed.sequence === undefined ? {} : { sequence: parsed.sequence }),
-        ...(parsed.confirmationId === undefined ? {} : { confirmationId: parsed.confirmationId }),
-        ...(parsed.approved === undefined ? {} : { approved: parsed.approved }),
-        ...(parsed.selectedUrl === undefined ? {} : { selectedUrl: parsed.selectedUrl })
+        text: parsed.text,
+        sequence: parsed.sequence ?? 0,
+        confirmationId: parsed.confirmationId,
+        approved: parsed.approved,
+        selectedUrl: parsed.selectedUrl,
+        intent: undefined,
+        target: undefined,
+        resolutionError: undefined,
+        failureCode: undefined,
+        route: "persist" as const,
+        cards: [],
+        assistantText: undefined,
+        pendingConfirmation: undefined,
+        consumedConfirmationId: undefined,
+        contextPatch: undefined,
+        toolResult: undefined,
+        response: undefined,
+        traceIds: []
       };
       const result = await compiled.invoke(graphInput, config as never);
       const output = result as unknown as Partial<GraphState>;
@@ -220,6 +239,7 @@ function loadContext(
 ): Partial<GraphState> {
   const parsed = ConversationContextSchema.parse(state.context);
   const inputKind: InputKind = state.confirmationId === undefined ? "message" : "confirmation";
+  emitProcessEvent(dependencies, state, "understanding_request", "running");
   const traceIds = trace(dependencies, {
     conversationId: state.conversationId,
     node: "load_context",
@@ -301,6 +321,7 @@ function resolveTarget(
   state: GraphState
 ): Partial<GraphState> {
   const intent = state.intent ?? unknownIntent();
+  emitProcessEvent(dependencies, state, "understanding_request", "completed");
   if (state.inputKind === "confirmation") {
     const pending = confirmations.peek(state.conversationId, state.confirmationId!);
     if (pending === undefined) return { resolutionError: "confirmation_invalid" };
@@ -420,6 +441,8 @@ async function executeRead(
   state: GraphState
 ): Promise<Partial<GraphState>> {
   const intent = state.intent ?? unknownIntent();
+  const processStage = readProcessStage(intent.kind);
+  emitProcessEvent(dependencies, state, processStage, "running");
   let traceIds = state.traceIds;
   try {
     let toolResult: ConversationToolResult = { cards: [] };
@@ -442,15 +465,18 @@ async function executeRead(
       traceIds = invocation.traceIds;
       if (!invocation.ok) {
         const code = errorCode(invocation.error);
+        emitProcessEvent(dependencies, state, processStage, "failed");
         return {
           cards: [],
           assistantText: userFacingError(code),
+          failureCode: code,
           traceIds: trace(dependencies, nodeEvent(state, "execute_read", "failed", code), traceIds)
         };
       }
       toolResult = invocation.result;
     }
     const text = readText(intent.kind, toolResult.cards.length);
+    emitProcessEvent(dependencies, state, processStage, "completed");
     return {
       cards: toolResult.cards,
       toolResult,
@@ -459,9 +485,11 @@ async function executeRead(
     };
   } catch (error) {
     const code = errorCode(error);
+    emitProcessEvent(dependencies, state, processStage, "failed");
     return {
       cards: [],
       assistantText: userFacingError(code),
+      failureCode: code,
       traceIds: trace(dependencies, nodeEvent(state, "execute_read", "failed", code), traceIds)
     };
   }
@@ -473,6 +501,9 @@ async function prepareSideEffect(
   confirmations: ConversationConfirmationStore,
   state: GraphState
 ): Promise<Partial<GraphState>> {
+  if (state.inputKind === "confirmation") {
+    emitProcessEvent(dependencies, state, "processing_confirmation", "running");
+  }
   const pending = state.inputKind === "confirmation"
     ? confirmations.peek(state.conversationId, state.confirmationId!)
     : undefined;
@@ -482,20 +513,23 @@ async function prepareSideEffect(
   }
 
   if (state.inputKind !== "confirmation" && state.intent?.kind === "request_job_recommendations") {
-    return prepareRecruitmentRequestConfirmation(confirmations, state);
+    return prepareRecruitmentRequestConfirmation(dependencies, confirmations, state);
   }
 
   if (pending?.action === "start_application") {
     const consumed = confirmations.consume(state.conversationId, state.confirmationId!);
     if (consumed === undefined) {
+      emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
       return {
         cards: [],
         assistantText: "这条确认已失效或已经使用，请重新发起投递。",
         consumedConfirmationId: state.confirmationId!,
+        failureCode: "confirmation_invalid",
         traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "rejected", "confirmation_invalid"), state.traceIds)
       };
     }
     if (state.approved !== true) {
+      emitProcessEvent(dependencies, state, "processing_confirmation", "completed");
       return {
         cards: [],
         assistantText: "已取消进入投递，当前没有创建新的投递任务。",
@@ -515,14 +549,17 @@ async function prepareSideEffect(
       });
       if (!invocation.ok) {
         const code = errorCode(invocation.error);
+        emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
         return {
           cards: [],
           assistantText: userFacingError(code),
           consumedConfirmationId: consumed.confirmationId,
+          failureCode: code,
           traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "failed", code), invocation.traceIds)
         };
       }
       const toolResult = invocation.result;
+      emitProcessEvent(dependencies, state, "processing_confirmation", "completed");
       return {
         cards: toolResult.cards,
         toolResult,
@@ -537,10 +574,12 @@ async function prepareSideEffect(
       };
     } catch (error) {
       const code = errorCode(error);
+      emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
       return {
         cards: [],
         assistantText: userFacingError(code),
         consumedConfirmationId: consumed.confirmationId,
+        failureCode: code,
         traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "failed", code), state.traceIds)
       };
     }
@@ -554,6 +593,7 @@ async function prepareSideEffect(
     return {
       cards: [],
       assistantText: "请先从当前岗位推荐中明确选择一个岗位。",
+      failureCode: "recommendation_target_required",
       traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "clarification", "recommendation_target_required"), state.traceIds)
     };
   }
@@ -571,9 +611,11 @@ async function prepareSideEffect(
   confirmations.put(state.conversationId, confirmation);
   const card = ConversationCardSchema.parse({
     type: "confirmation",
+    confirmationId: confirmation.confirmationId,
     action: "start_application",
     target: confirmation.target
   });
+  emitProcessEvent(dependencies, state, "waiting_for_confirmation", "running");
   return {
     cards: [card],
     pendingConfirmation: confirmation,
@@ -609,30 +651,38 @@ async function prepareRecruitmentDiscovery(
       manualUrl
     );
   }
+  emitProcessEvent(dependencies, state, "searching_recruitment_site", "running");
   const invocation = await invokeTool(dependencies, registry, state, "prepare_side_effect", "discover_recruitment_site", {
     company,
     recruitmentType
   });
   if (!invocation.ok) {
     const code = errorCode(invocation.error);
+    emitProcessEvent(dependencies, state, "searching_recruitment_site", "failed");
     return {
       cards: [],
       assistantText: userFacingError(code),
+      failureCode: code,
       contextPatch: { lastRecruitmentRequest: request, verifiedRecruitmentSite: undefined },
       traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "failed", code), invocation.traceIds)
     };
   }
   const search = invocation.result.recruitmentSearch;
   if (search === undefined || search.candidates.length === 0) {
+    emitProcessEvent(dependencies, state, "searching_recruitment_site", "completed");
     return {
       cards: [],
       assistantText: userFacingError("NO_SAFE_CANDIDATE"),
+      failureCode: "NO_SAFE_CANDIDATE",
       contextPatch: { lastRecruitmentRequest: request, verifiedRecruitmentSite: undefined },
       traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "failed", "NO_SAFE_CANDIDATE"), invocation.traceIds)
     };
   }
   const confirmation = recruitmentChoicesConfirmation(company, recruitmentType, search);
   confirmations.put(state.conversationId, confirmation);
+  emitProcessEvent(dependencies, state, "searching_recruitment_site", "completed");
+  emitProcessEvent(dependencies, state, "recruitment_site_found", "completed");
+  emitProcessEvent(dependencies, state, "waiting_for_confirmation", "running");
   return {
     cards: [confirmationCard(confirmation)],
     toolResult: invocation.result,
@@ -658,6 +708,7 @@ async function prepareManualRecruitmentLink(
     return {
       cards: [],
       assistantText: userFacingError("unsafe_recruitment_url"),
+      failureCode: "unsafe_recruitment_url",
       contextPatch: { lastRecruitmentRequest: request, verifiedRecruitmentSite: undefined },
       traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "rejected", "unsafe_recruitment_url"), state.traceIds)
     };
@@ -675,6 +726,8 @@ async function prepareManualRecruitmentLink(
   });
   const confirmation = recruitmentChoicesConfirmation(request.companyName, request.recruitmentType, search);
   confirmations.put(state.conversationId, confirmation);
+  emitProcessEvent(dependencies, state, "recruitment_site_found", "completed");
+  emitProcessEvent(dependencies, state, "waiting_for_confirmation", "running");
   return {
     cards: [confirmationCard(confirmation)],
     pendingConfirmation: confirmation,
@@ -685,6 +738,7 @@ async function prepareManualRecruitmentLink(
 }
 
 function prepareRecruitmentRequestConfirmation(
+  dependencies: ConversationGraphDependencies,
   confirmations: ConversationConfirmationStore,
   state: GraphState
 ): Partial<GraphState> {
@@ -692,11 +746,13 @@ function prepareRecruitmentRequestConfirmation(
   if (site === undefined) {
     return {
       cards: [],
-      assistantText: userFacingError("recruitment_site_confirmation_required")
+      assistantText: userFacingError("recruitment_site_confirmation_required"),
+      failureCode: "recruitment_site_confirmation_required"
     };
   }
   const confirmation = recruitmentConfirmation("request_job_recommendations", site);
   confirmations.put(state.conversationId, confirmation);
+  emitProcessEvent(dependencies, state, "waiting_for_confirmation", "running");
   return {
     cards: [recruitmentSiteCard(site), confirmationCard(confirmation)],
     pendingConfirmation: confirmation,
@@ -713,22 +769,27 @@ async function prepareRecruitmentConfirmation(
   pending: ConversationConfirmation | undefined
 ): Promise<Partial<GraphState>> {
   if (pending === undefined || (pending.target.kind !== "recruitment_site" && pending.target.kind !== "recruitment_site_choices")) {
+    emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
     return {
       cards: [],
       assistantText: userFacingError("confirmation_invalid"),
+      failureCode: "confirmation_invalid",
       ...(state.confirmationId === undefined ? {} : { consumedConfirmationId: state.confirmationId })
     };
   }
   const consumed = confirmations.consume(state.conversationId, pending.confirmationId);
   if (consumed === undefined) {
+    emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
     return {
       cards: [],
       assistantText: userFacingError("confirmation_invalid"),
+      failureCode: "confirmation_invalid",
       consumedConfirmationId: pending.confirmationId
     };
   }
   if (pending.target.kind === "recruitment_site_choices") {
     if (state.approved !== true) {
+      emitProcessEvent(dependencies, state, "processing_confirmation", "completed");
       return {
         cards: [],
         assistantText: "已取消使用这些招聘入口候选，不会创建岗位匹配会话。",
@@ -737,9 +798,11 @@ async function prepareRecruitmentConfirmation(
       };
     }
     if (state.selectedUrl === undefined) {
+      emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
       return {
         cards: [],
         assistantText: userFacingError("recruitment_site_selection_invalid"),
+        failureCode: "recruitment_site_selection_invalid",
         consumedConfirmationId: consumed.confirmationId
       };
     }
@@ -748,9 +811,11 @@ async function prepareRecruitmentConfirmation(
       ? undefined
       : pending.target.candidates.find((item) => item.url === selectedUrl);
     if (candidate === undefined) {
+      emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
       return {
         cards: [],
         assistantText: userFacingError("recruitment_site_selection_invalid"),
+        failureCode: "recruitment_site_selection_invalid",
         consumedConfirmationId: consumed.confirmationId
       };
     }
@@ -762,6 +827,7 @@ async function prepareRecruitmentConfirmation(
     });
     const nextConfirmation = recruitmentConfirmation("request_job_recommendations", site);
     confirmations.put(state.conversationId, nextConfirmation);
+    emitProcessEvent(dependencies, state, "processing_confirmation", "completed");
     return {
       cards: [recruitmentSiteCard(site), confirmationCard(nextConfirmation)],
       pendingConfirmation: nextConfirmation,
@@ -772,13 +838,17 @@ async function prepareRecruitmentConfirmation(
   }
   const site = siteFromConfirmationTarget(pending.target);
   if (site === undefined) {
+    emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
     return {
       cards: [],
       assistantText: userFacingError("recruitment_site_invalid"),
+      failureCode: "recruitment_site_invalid",
       consumedConfirmationId: consumed.confirmationId
     };
   }
   if (state.approved !== true) {
+    emitProcessEvent(dependencies, state, "processing_confirmation", "completed");
+    emitProcessEvent(dependencies, state, "completed", "completed");
     return {
       cards: [recruitmentSiteCard(site)],
       assistantText: pending.action === "confirm_recruitment_site"
@@ -793,6 +863,8 @@ async function prepareRecruitmentConfirmation(
   if (pending.action === "confirm_recruitment_site") {
     const nextConfirmation = recruitmentConfirmation("request_job_recommendations", site);
     confirmations.put(state.conversationId, nextConfirmation);
+    emitProcessEvent(dependencies, state, "processing_confirmation", "completed");
+    emitProcessEvent(dependencies, state, "waiting_for_confirmation", "running");
     return {
       cards: [recruitmentSiteCard(site), confirmationCard(nextConfirmation)],
       pendingConfirmation: nextConfirmation,
@@ -802,25 +874,35 @@ async function prepareRecruitmentConfirmation(
     };
   }
 
+  emitProcessEvent(dependencies, state, "creating_job_match_session", "running");
   const invocation = await invokeTool(dependencies, registry, state, "prepare_side_effect", "create_job_match_session", {});
   if (!invocation.ok) {
     const code = errorCode(invocation.error);
+    emitProcessEvent(dependencies, state, "creating_job_match_session", "failed");
+    emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
     return {
       cards: [],
       assistantText: userFacingError(code),
+      failureCode: code,
       consumedConfirmationId: consumed.confirmationId,
       traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "failed", code), invocation.traceIds)
     };
   }
   const session = invocation.result.jobMatchSession;
   if (session === undefined) {
+    emitProcessEvent(dependencies, state, "creating_job_match_session", "failed");
+    emitProcessEvent(dependencies, state, "processing_confirmation", "failed");
     return {
       cards: [],
       assistantText: userFacingError("job_match_session_missing"),
+      failureCode: "job_match_session_missing",
       consumedConfirmationId: consumed.confirmationId,
       traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "failed", "job_match_session_missing"), invocation.traceIds)
     };
   }
+  emitProcessEvent(dependencies, state, "creating_job_match_session", "completed");
+  emitProcessEvent(dependencies, state, "job_match_session_ready", "completed");
+  emitProcessEvent(dependencies, state, "processing_confirmation", "completed");
   return {
     cards: invocation.result.cards,
     toolResult: invocation.result,
@@ -867,6 +949,7 @@ function recruitmentChoicesConfirmation(
 function confirmationCard(confirmation: ConversationConfirmation): ConversationCard {
   return ConversationCardSchema.parse({
     type: "confirmation",
+    confirmationId: confirmation.confirmationId,
     action: confirmation.action,
     target: confirmation.target
   });
@@ -934,8 +1017,9 @@ function persistTurn(
   state: GraphState
 ): Partial<GraphState> {
   const intent = state.intent ?? unknownIntent();
+  const failureCode = state.failureCode ?? state.resolutionError;
   const assistantText = state.assistantText
-    ?? (state.resolutionError === undefined ? defaultAssistantText(intent.kind) : userFacingError(state.resolutionError));
+    ?? (failureCode === undefined ? defaultAssistantText(intent.kind) : userFacingError(failureCode));
   const cards = (Array.isArray(state.cards) ? state.cards : []).map((card) => ConversationCardSchema.parse(card));
   const sequence = Number.isSafeInteger(state.sequence) && state.sequence >= 0 ? state.sequence : 0;
   const nextContext = ConversationContextSchema.parse({
@@ -961,6 +1045,10 @@ function persistTurn(
     ...(state.pendingConfirmation === undefined ? {} : { pendingConfirmation: state.pendingConfirmation, confirmationId: state.pendingConfirmation.confirmationId }),
     ...(state.consumedConfirmationId === undefined ? {} : { consumedConfirmationId: state.consumedConfirmationId })
   });
+  if (state.pendingConfirmation === undefined) {
+    if (failureCode === undefined) emitProcessEvent(dependencies, state, "completed", "completed");
+    else emitProcessEvent(dependencies, state, "failed", "failed");
+  }
   return {
     context: nextContext,
     response,
@@ -1136,6 +1224,65 @@ function toolContext(state: GraphState): ConversationToolContext {
   };
 }
 
+function emitProcessEvent(
+  dependencies: ConversationGraphDependencies,
+  state: GraphState,
+  stage: ConversationProcessStage,
+  status: ConversationProcessStatus
+): void {
+  try {
+    const summary = processStageSummary(stage, status);
+    dependencies.processEvents?.emit({
+      conversationId: state.conversationId,
+      turnSequence: Math.max(1, state.sequence ?? 1),
+      stepId: stage.replaceAll("_", "-"),
+      stage,
+      status,
+      summary,
+      ...(status === "failed"
+        ? {
+            failure: {
+              code: "PROCESS_STEP_FAILED",
+              summary,
+              retryable: true
+            }
+          }
+        : {})
+    });
+  } catch {
+    // Process visibility is best effort and must not change the conversation result.
+  }
+}
+
+function processStageSummary(
+  stage: ConversationProcessStage,
+  status: ConversationProcessStatus
+): string {
+  if (status === "failed") return "当前执行步骤未能完成";
+  if (stage === "understanding_request") return status === "completed" ? "已理解你的请求" : "正在理解你的请求";
+  if (stage === "searching_recruitment_site") return status === "completed" ? "招聘入口搜索完成" : "正在搜索官方招聘入口";
+  if (stage === "recruitment_site_found") return "已找到招聘入口候选";
+  if (stage === "waiting_for_confirmation") return "等待你的确认";
+  if (stage === "processing_confirmation") return status === "completed" ? "确认已处理" : "正在处理你的确认";
+  if (stage === "creating_job_match_session") return status === "completed" ? "岗位匹配已准备好" : "正在准备岗位匹配";
+  if (stage === "job_match_session_ready") return "岗位匹配工作台已准备好";
+  if (stage === "loading_recommendations") return "正在读取岗位推荐";
+  if (stage === "matching_jobs") return "正在匹配岗位";
+  if (stage === "loading_application_progress") return "正在读取投递进度";
+  if (stage === "creating_application_task") return "正在创建受控投递任务";
+  if (stage === "generating_response") return "正在生成回复";
+  if (stage === "validating_recruitment_site") return "正在校验招聘入口";
+  if (stage === "reading_recruitment_site") return "正在读取招聘页面";
+  if (stage === "completed") return "本轮处理已完成";
+  return "正在处理请求";
+}
+
+function readProcessStage(kind: ConversationIntent["kind"]): ConversationProcessStage {
+  return kind === "list_application_tasks" || kind === "show_application_task"
+    ? "loading_application_progress"
+    : "loading_recommendations";
+}
+
 function readText(kind: ConversationIntent["kind"], count: number): string {
   if (kind === "discover_recruitment_site") return "正在查找官方校园招聘入口。";
   if (kind === "request_job_recommendations") return "请确认是否继续进行岗位推荐。";
@@ -1164,6 +1311,8 @@ function userFacingError(code: string): string {
   if (code === "recruitment_site_confirmation_required") return "请先确认已找到的官方招聘入口。";
   if (code === "recruitment_site_invalid") return "招聘入口校验失败，请重新搜索官方入口。";
   if (code === "job_match_create_unavailable") return "岗位匹配服务暂时不可用，请稍后重试。";
+  if (code === "job_expectation_required") return "开始岗位推荐前，请先补充并确认岗位期望（例如工作城市或职位方向）。";
+  if (code === "unsupported_job_entry") return "当前招聘页面结构尚未识别，请确认链接打开的是岗位列表或岗位详情页。";
   if (code === "job_match_application_redirect") return "当前入口直接打开了申请页面，暂时无法从这里生成岗位推荐。";
   if (code === "job_match_session_missing") return "岗位匹配会话没有成功创建，请稍后重试。";
   switch (code) {

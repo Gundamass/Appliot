@@ -110,7 +110,7 @@ const CreateApplicationTaskInputSchema = z.object({
   postingContentHash: z.string().min(1).max(256)
 }).strict();
 
-const DiscoverRecruitmentSiteInputSchema = z.object({
+export const DiscoverRecruitmentSiteInputSchema = z.object({
   company: z.string().trim().min(1).max(80),
   recruitmentType: z.enum(["campus", "social", "internship", "unknown"])
 }).strict();

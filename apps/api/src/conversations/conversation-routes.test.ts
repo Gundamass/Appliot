@@ -16,6 +16,7 @@ import { createAdapterHealthRegistry } from "../health/adapter-health.js";
 import { createLocalOriginalDocumentStore } from "../profile/original-document-store.js";
 import { createProfileRepository } from "../profile/profile-repository.js";
 import { createConversationRepository } from "./conversation-repository.js";
+import { createConversationProcessEventBus, type ConversationProcessEventBus } from "./conversation-events.js";
 import {
   createConversationService,
   type ConversationService
@@ -199,6 +200,69 @@ describe("conversation routes", () => {
     });
     expect(JSON.stringify(response.json())).not.toContain("conversation_graph_unavailable");
   });
+
+  it("replays process events after Last-Event-ID and streams future events", async () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createConversationRepository(database);
+    const session = repository.createConversation();
+    const service = fakeService();
+    vi.mocked(service.get).mockReturnValue({
+      session,
+      messages: [],
+      context: ConversationContextSchema.parse({ version: 0 })
+    });
+    const processEvents = createConversationProcessEventBus(database);
+    const first = processEvents.emit({
+      conversationId: session.id,
+      turnSequence: 1,
+      stepId: "understanding-request",
+      stage: "understanding_request",
+      status: "running",
+      summary: "正在理解你的请求"
+    });
+    const second = processEvents.emit({
+      conversationId: session.id,
+      turnSequence: 1,
+      stepId: "completed",
+      stage: "completed",
+      status: "completed",
+      summary: "本轮处理已完成"
+    });
+    const app = await buildApp(service, database, processEvents);
+    const address = await app.listen({ host: "127.0.0.1", port: 0 });
+    const abort = new AbortController();
+    const response = await fetch(`${address}/api/conversations/${session.id}/events`, {
+      headers: { "Last-Event-ID": first.id },
+      signal: abort.signal
+    });
+
+    expect(response.status).toBe(200);
+    expect(response.headers.get("content-type")).toContain("text/event-stream");
+    const reader = response.body!.getReader();
+    const replay = await readUntil(reader, (text) => text.includes(`id: ${second.id}\n`));
+    expect(replay).not.toContain(`id: ${first.id}\n`);
+
+    const future = processEvents.emit({
+      conversationId: session.id,
+      turnSequence: 1,
+      stepId: "failed",
+      stage: "failed",
+      status: "failed",
+      summary: "本轮处理失败",
+      failure: {
+        code: "PROCESS_FAILED",
+        summary: "本轮处理失败",
+        retryable: true
+      }
+    });
+    const futureFrame = await readUntil(reader, (text) => text.includes(`id: ${future.id}\n`));
+    expect(futureFrame).toContain('"stage":"failed"');
+
+    abort.abort();
+    await reader.cancel().catch(() => undefined);
+    await waitFor(() => processEvents.subscriberCount(session.id) === 0);
+  });
 });
 
 function fakeService() {
@@ -272,7 +336,8 @@ function graphOutput(
 
 async function buildApp(
   conversationService: ConversationService,
-  existingDatabase?: InstanceType<typeof Database>
+  existingDatabase?: InstanceType<typeof Database>,
+  processEvents?: ConversationProcessEventBus
 ) {
   const database = existingDatabase ?? new Database(":memory:");
   if (existingDatabase === undefined) migrateDatabase(database);
@@ -284,8 +349,37 @@ async function buildApp(
     originalDocumentStore: createLocalOriginalDocumentStore(storageRoot),
     extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }),
     extractFacts: async () => [],
-    conversationService
+    conversationService,
+    ...(processEvents === undefined ? {} : { conversationProcessEvents: processEvents })
   } as never);
   resources.push({ app, database, storageRoot });
   return app;
+}
+
+async function readUntil(
+  reader: ReadableStreamDefaultReader<Uint8Array>,
+  predicate: (text: string) => boolean,
+  timeoutMs = 1_000
+): Promise<string> {
+  const decoder = new TextDecoder();
+  let text = "";
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate(text)) {
+    if (Date.now() >= deadline) throw new Error(`stream_timeout: ${text}`);
+    const result = await Promise.race([
+      reader.read(),
+      new Promise<never>((_resolve, reject) => setTimeout(() => reject(new Error("stream_timeout")), 100))
+    ]);
+    if (result.done) throw new Error(`stream_ended: ${text}`);
+    text += decoder.decode(result.value, { stream: true });
+  }
+  return text;
+}
+
+async function waitFor(predicate: () => boolean, timeoutMs = 1_000): Promise<void> {
+  const deadline = Date.now() + timeoutMs;
+  while (!predicate()) {
+    if (Date.now() >= deadline) throw new Error("condition_timeout");
+    await new Promise((resolve) => setTimeout(resolve, 10));
+  }
 }
