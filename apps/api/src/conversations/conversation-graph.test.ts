@@ -482,23 +482,103 @@ describe("conversation graph", () => {
     const graph = createConversationGraph({
       ...dependencies,
       processEvents,
-      searchRecruitmentSites
+      searchRecruitmentSites,
+      jobMatchService: {
+        create: vi.fn(async () => dependencies.jobMatchRepository.get("match-1")!),
+        select: vi.fn(),
+        convert: vi.fn()
+      }
     } as never);
-    await graph.invoke({
+    const discovered = await graph.invoke({
       conversationId: "conversation-process",
       turnSequence: 1,
       text: "帮我投递百度校园招聘",
       context: { version: 0, recentPostingIds: [] }
     });
+    const siteApproved = await graph.invoke({
+      conversationId: "conversation-process",
+      turnSequence: 2,
+      confirmationSourceTurnSequence: 1,
+      confirmationId: discovered.response.confirmationId,
+      approved: true,
+      selectedUrl: candidate.url,
+      context: discovered.response.context
+    });
+    await graph.invoke({
+      conversationId: "conversation-process",
+      turnSequence: 3,
+      confirmationSourceTurnSequence: 2,
+      confirmationId: siteApproved.response.confirmationId,
+      approved: true,
+      context: siteApproved.response.context
+    });
 
-    expect(processEvents.replay("conversation-process").events.map(({ stage, status }) => ({ stage, status }))).toEqual([
-      { stage: "understanding_request", status: "running" },
-      { stage: "understanding_request", status: "completed" },
-      { stage: "searching_recruitment_site", status: "running" },
-      { stage: "searching_recruitment_site", status: "completed" },
-      { stage: "recruitment_site_found", status: "completed" },
-      { stage: "waiting_for_confirmation", status: "running" }
+    const events = processEvents.replay("conversation-process").events;
+    const firstTurn = events.filter((event) => event.turnSequence === 1);
+    expect(firstTurn.map(({ stage, status }) => [stage, status])).toEqual([
+      ["understanding_request", "running"],
+      ["understanding_request", "completed"],
+      ["searching_recruitment_site", "running"],
+      ["searching_recruitment_site", "completed"],
+      ["validating_recruitment_site", "running"],
+      ["validating_recruitment_site", "completed"],
+      ["waiting_for_confirmation", "running"],
+      ["waiting_for_confirmation", "waiting"],
+      ["generating_response", "running"],
+      ["generating_response", "completed"]
     ]);
+    const tavilyLifecycle = firstTurn.filter((event) => event.tool?.name === "tavily_search");
+    expect(new Set(tavilyLifecycle.map(({ stepId }) => stepId)).size).toBe(1);
+    expect(firstTurn.find((event) => event.tool?.name === "tavily_search")?.tool).toEqual(expect.objectContaining({
+      result: expect.any(String)
+    }));
+    expect(JSON.stringify(firstTurn)).not.toMatch(/tavilyApiKey|authorization|cookie|rawResponse/i);
+    expect(new Set(events.filter((event) => event.turnSequence === 3).map(({ stepId }) => stepId)).size).toBeGreaterThan(1);
+  });
+
+  it("shows a response lifecycle for ordinary chat without inventing a tool call", async () => {
+    const processEvents = createConversationProcessEventBus();
+    const graph = createConversationGraph({ ...fakeDependencies(), processEvents } as never);
+
+    await graph.invoke({
+      conversationId: "conversation-ordinary",
+      turnSequence: 1,
+      text: "你好",
+      context: { version: 0, recentPostingIds: [] }
+    });
+
+    const events = processEvents.replay("conversation-ordinary").events;
+    expect(events.map(({ stage, status }) => [stage, status])).toEqual([
+      ["understanding_request", "running"],
+      ["understanding_request", "completed"],
+      ["generating_response", "running"],
+      ["generating_response", "completed"]
+    ]);
+    expect(events.some((event) => event.tool !== undefined)).toBe(false);
+  });
+
+  it("records a sanitized failed tool step without changing the response", async () => {
+    const dependencies = fakeDependencies();
+    dependencies.applicationTasks.list = vi.fn(() => {
+      throw new Error("application_task_unavailable");
+    });
+    const processEvents = createConversationProcessEventBus();
+    const graph = createConversationGraph({ ...dependencies, processEvents } as never);
+
+    const response = await graph.invoke({
+      conversationId: "conversation-tool-failure",
+      turnSequence: 1,
+      text: "我投了哪些岗位",
+      context: { version: 0, recentPostingIds: [] }
+    });
+
+    const failure = processEvents.replay("conversation-tool-failure").events
+      .find((event) => event.stage === "loading_application_progress" && event.status === "failed");
+    expect(failure).toMatchObject({
+      tool: { name: "application_progress" },
+      failure: { code: "PROCESS_STEP_FAILED", retryable: true }
+    });
+    expect(response.response.message.text).toContain("无法");
   });
 
   it("explains missing job expectations and ends the process chain when matching fails", async () => {

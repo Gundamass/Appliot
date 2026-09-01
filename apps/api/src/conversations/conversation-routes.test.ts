@@ -227,7 +227,12 @@ describe("conversation routes", () => {
       stepId: "completed",
       stage: "completed",
       status: "completed",
-      summary: "本轮处理已完成"
+      summary: "本轮处理已完成",
+      tool: {
+        name: "job_matching",
+        input: [{ label: "操作", value: "读取岗位推荐" }],
+        result: "返回 2 条记录"
+      }
     });
     const app = await buildApp(service, database, processEvents);
     const address = await app.listen({ host: "127.0.0.1", port: 0 });
@@ -242,6 +247,9 @@ describe("conversation routes", () => {
     const reader = response.body!.getReader();
     const replay = await readUntil(reader, (text) => text.includes(`id: ${second.id}\n`));
     expect(replay).not.toContain(`id: ${first.id}\n`);
+    expect(replay).toContain('"turnSequence":1');
+    expect(replay).toContain('"stepId":"completed"');
+    expect(replay).toContain('"tool":{"name":"job_matching"');
 
     const future = processEvents.emit({
       conversationId: session.id,
