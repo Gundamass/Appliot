@@ -1,35 +1,76 @@
-import type { ConversationCard, ConversationConfirmation, ConversationContext, ConversationMessage, ConversationSession } from "@resume/contracts";
-import { useCallback, useEffect, useState } from "react";
+import type { ConversationCard, ConversationConfirmation, ConversationContext, ConversationMessage, ConversationProcessEvent, ConversationSession, ConversationView } from "@resume/contracts";
+import { LoaderCircle, Wifi, WifiOff } from "lucide-react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 import { ConversationApiError, type ConversationApi } from "./api.js";
 import { ChatMessageList } from "./ChatMessageList.js";
 import { ConversationComposer } from "./ConversationComposer.js";
 import { QuickStartCards } from "./ConversationCards.js";
+import { useConversationProcessEvents } from "./conversation-process-events.js";
+import { groupConversationProcessEvents } from "./conversation-process-model.js";
 import { WorkspaceFrame, type WorkspaceView } from "../workspace/WorkspaceFrame.js";
 
 interface ChatHomeProps {
   api: ConversationApi;
+  initialSessionId?: string;
+  onSessionResolved?(sessionId: string): void;
   onOpenJobMatch(sessionId: string): void;
   onOpenApplication(taskId: string): void;
   onNavigate?(view: WorkspaceView): void;
 }
 
-export function ChatHome({ api, onOpenJobMatch, onOpenApplication, onNavigate }: ChatHomeProps) {
+export function ChatHome({ api, initialSessionId, onSessionResolved, onOpenJobMatch, onOpenApplication, onNavigate }: ChatHomeProps) {
   const [session, setSession] = useState<ConversationSession>();
   const [messages, setMessages] = useState<ConversationMessage[]>([]);
   const [context, setContext] = useState<ConversationContext>({ version: 0, recentPostingIds: [] });
   const [pendingConfirmation, setPendingConfirmation] = useState<ConversationConfirmation>();
   const [sending, setSending] = useState(false);
   const [error, setError] = useState<string>();
+  const [processEvents, setProcessEvents] = useState<ConversationProcessEvent[]>([]);
+  const resolvedSessionId = useRef<string | undefined>(undefined);
 
-  const load = useCallback(async () => {
-    try {
-      const created = await api.create();
-      const view = await api.get(created.id);
-      setSession(view.session); setMessages(view.messages); setContext(view.context); setError(undefined);
-    } catch (cause) { setError(toUserError(cause)); }
-  }, [api]);
+  const onProcessEvent = useCallback((event: ConversationProcessEvent) => {
+    setProcessEvents((current) => {
+      if (current.some((candidate) => candidate.id === event.id)) return current;
+      return [...current, event].slice(-200);
+    });
+  }, []);
+  const onProcessHistoryReset = useCallback(() => {
+    setProcessEvents([]);
+  }, []);
+  const processConnectionStatus = useConversationProcessEvents(session?.id, {
+    onEvent: onProcessEvent,
+    onHistoryReset: onProcessHistoryReset
+  });
+  const processByTurn = useMemo(() => groupConversationProcessEvents(processEvents), [processEvents]);
 
-  useEffect(() => { void load(); }, [load]);
+  useEffect(() => {
+    if (initialSessionId !== undefined && resolvedSessionId.current === initialSessionId) return;
+    let active = true;
+    const load = async () => {
+      try {
+        let view: ConversationView | undefined;
+        if (initialSessionId !== undefined) {
+          try {
+            view = await api.get(initialSessionId);
+          } catch (cause) {
+            if (!isMissingConversation(cause)) throw cause;
+          }
+        }
+        if (view === undefined) {
+          const created = await api.create();
+          view = await api.get(created.id);
+        }
+        if (!active) return;
+        resolvedSessionId.current = view.session.id;
+        setSession(view.session); setMessages(view.messages); setContext(view.context); setPendingConfirmation(view.pendingConfirmation); setProcessEvents([]); setError(undefined);
+        onSessionResolved?.(view.session.id);
+      } catch (cause) {
+        if (active) setError(toUserError(cause));
+      }
+    };
+    void load();
+    return () => { active = false; };
+  }, [api, initialSessionId, onSessionResolved]);
 
   const send = async (text: string) => {
     if (!session || sending) return;
@@ -46,11 +87,14 @@ export function ChatHome({ api, onOpenJobMatch, onOpenApplication, onNavigate }:
   const confirm = async (confirmationId: string, approved: boolean, selectedUrl?: string) => {
     if (!session || sending) return;
     setSending(true); setError(undefined);
+    const decisionText = approved ? "确认开始投递" : "取消开始投递";
+    const optimistic: ConversationMessage = { id: `local-confirmation-${Date.now()}`, sessionId: session.id, sequence: (messages.at(-1)?.sequence ?? 0) + 1, role: "user", text: decisionText, cards: [], createdAt: new Date().toISOString() };
+    setMessages((current) => [...current, optimistic]);
     try {
       const response = selectedUrl === undefined
         ? await api.confirm(session.id, confirmationId, approved)
         : await api.confirm(session.id, confirmationId, approved, selectedUrl);
-      setMessages((current) => [...current, response.message]); setContext(response.context); setPendingConfirmation(undefined); setError(undefined);
+      setMessages((current) => [...current, response.message]); setContext(response.context); setPendingConfirmation(response.pendingConfirmation); setError(undefined);
     } catch (cause) { setError(toUserError(cause)); }
     finally { setSending(false); }
   };
@@ -61,10 +105,16 @@ export function ChatHome({ api, onOpenJobMatch, onOpenApplication, onNavigate }:
 
   return <WorkspaceFrame activeView="chat" onSelectView={(view) => onNavigate?.(view)}>
     <div className="conversation-content-layout">
-      <main className="conversation-main"><header className="conversation-main-heading"><div><h1>和助手聊聊你的求职计划</h1><p>可以从岗位推荐、投递进度或简历开始</p></div><span className="conversation-ready">● 已就绪</span></header><div className="conversation-message-area"><div className="conversation-date">今天</div><QuickStartCards onQuickRecommendation={sendRecommendationRequest} onQuickProgress={sendProgressRequest} /><ChatMessageList messages={messages} {...(pendingConfirmation === undefined ? {} : { pendingConfirmation })} onOpenJobMatch={onOpenJobMatch} onOpenApplication={onOpenApplication} onStartApplication={startApplication} onConfirm={confirm} />{error ? <p className="conversation-error" role="alert">{error}</p> : null}</div><ConversationComposer sending={sending} onSend={(text) => void send(text)} /></main>
+      <main className="conversation-main"><header className="conversation-main-heading"><div><h1>和助手聊聊你的求职计划</h1><p>可以从岗位推荐、投递进度或简历开始</p></div><div className="conversation-heading-status"><span className="conversation-ready">● 已就绪</span>{session === undefined ? null : <ProcessConnectionStatus status={processConnectionStatus} />}</div></header><div className="conversation-message-area"><div className="conversation-date">今天</div><QuickStartCards onQuickRecommendation={sendRecommendationRequest} onQuickProgress={sendProgressRequest} /><ChatMessageList messages={messages} processByTurn={processByTurn} {...(messages.filter(({ role }) => role === "user").at(-1)?.sequence === undefined ? {} : { latestUserSequence: messages.filter(({ role }) => role === "user").at(-1)!.sequence })} {...(pendingConfirmation === undefined ? {} : { pendingConfirmation })} onOpenJobMatch={onOpenJobMatch} onOpenApplication={onOpenApplication} onStartApplication={startApplication} onConfirm={confirm} />{error ? <p className="conversation-error" role="alert">{error}</p> : null}</div><ConversationComposer sending={sending} onSend={(text) => void send(text)} /></main>
       <aside className="conversation-context"><h2>当前上下文</h2><section><span>最近推荐</span><strong>{context.recentPostingIds.length > 0 ? `${context.recentPostingIds.length} 个岗位推荐` : "暂无岗位推荐"}</strong><small>{context.activeJobMatchSessionId ? "最近一次匹配会话" : "开始岗位推荐后会显示"}</small></section><section><span>当前投递</span><strong>{context.activeApplicationTaskId ? "有一个进行中的任务" : "暂无进行中的任务"}</strong><small>{context.activeApplicationTaskId ?? "确认后会出现在这里"}</small></section><section><span>简历</span><strong>产品经理简历 · v3</strong><small>当前用于岗位匹配</small></section></aside>
     </div>
   </WorkspaceFrame>;
+}
+
+function ProcessConnectionStatus({ status }: { status: "connecting" | "connected" | "disconnected" }) {
+  if (status === "connected") return <span className="conversation-process-connection connected"><Wifi aria-hidden="true" size={14} />实时连接</span>;
+  if (status === "connecting") return <span className="conversation-process-connection connecting"><LoaderCircle aria-hidden="true" size={14} />正在连接实时过程</span>;
+  return <span className="conversation-process-connection disconnected"><WifiOff aria-hidden="true" size={14} />实时连接中断，历史过程仍可查看</span>;
 }
 
 function toUserError(error: unknown): string {
@@ -106,4 +156,8 @@ function toUserError(error: unknown): string {
     }
   }
   return "对话暂时不可用，请稍后重试";
+}
+
+function isMissingConversation(error: unknown): boolean {
+  return error instanceof ConversationApiError && error.status === 404;
 }
