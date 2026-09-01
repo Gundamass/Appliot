@@ -106,6 +106,7 @@ const JobMatchSessionCardSchema = z.object({
 
 const ConfirmationCardSchema = z.object({
   type: z.literal("confirmation"),
+  confirmationId: IdentifierSchema.optional(),
   action: z.enum(["start_application", "confirm_recruitment_site", "request_job_recommendations"]),
   target: z.union([
     RecommendationConfirmationTargetSchema,
@@ -148,18 +149,21 @@ export const ConversationCardSchema = z.union([
 const StartApplicationConfirmationSchema = z.object({
   confirmationId: IdentifierSchema,
   action: z.literal("start_application"),
+  sourceTurnSequence: z.number().int().positive().optional(),
   target: RecommendationConfirmationTargetSchema
 }).strict();
 
 const RecruitmentSiteChoicesConfirmationSchema = z.object({
   confirmationId: IdentifierSchema,
   action: z.literal("confirm_recruitment_site"),
+  sourceTurnSequence: z.number().int().positive().optional(),
   target: RecruitmentSiteChoicesTargetSchema
 }).strict();
 
 const RecruitmentSiteConfirmationSchema = z.object({
   confirmationId: IdentifierSchema,
   action: z.literal("request_job_recommendations"),
+  sourceTurnSequence: z.number().int().positive().optional(),
   target: RecruitmentSiteTargetSchema
 }).strict();
 
@@ -200,6 +204,85 @@ export const ConversationContextSchema = z.object({
   version: z.number().int().nonnegative()
 }).strict();
 
+export const ConversationProcessStageSchema = z.enum([
+  "understanding_request",
+  "searching_recruitment_site",
+  "validating_recruitment_site",
+  "recruitment_site_found",
+  "waiting_for_confirmation",
+  "processing_confirmation",
+  "reading_recruitment_site",
+  "loading_recommendations",
+  "matching_jobs",
+  "loading_application_progress",
+  "creating_job_match_session",
+  "job_match_session_ready",
+  "creating_application_task",
+  "generating_response",
+  "completed",
+  "failed"
+]);
+
+const ProcessSummarySchema = z.string().trim().min(1).max(500);
+const ProcessStepIdSchema = z.string().trim().min(1).max(96)
+  .regex(/^[a-z0-9][a-z0-9._:-]*$/u);
+
+export const ConversationProcessToolNameSchema = z.enum([
+  "tavily_search",
+  "url_guard",
+  "browser_worker",
+  "job_matching",
+  "application_progress",
+  "controlled_application"
+]);
+
+export const ConversationProcessToolSummarySchema = z.object({
+  name: ConversationProcessToolNameSchema,
+  input: z.array(z.object({
+    label: z.string().trim().min(1).max(40),
+    value: z.string().trim().min(1).max(200)
+  }).strict()).max(8),
+  result: ProcessSummarySchema.optional()
+}).strict();
+
+export const ConversationProcessFailureSchema = z.object({
+  code: z.string().regex(/^[A-Z0-9_]+$/u).max(64),
+  summary: ProcessSummarySchema,
+  retryable: z.boolean()
+}).strict();
+
+export const ConversationProcessStatusSchema = z.enum(["running", "completed", "waiting", "failed"]);
+
+export const ConversationProcessEventSchema = z.object({
+  id: z.string().regex(/^\d+$/u),
+  conversationId: IdentifierSchema,
+  turnSequence: z.number().int().positive(),
+  stepId: ProcessStepIdSchema,
+  type: z.literal("process_changed"),
+  stage: ConversationProcessStageSchema,
+  status: ConversationProcessStatusSchema,
+  summary: ProcessSummarySchema,
+  tool: ConversationProcessToolSummarySchema.optional(),
+  durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
+  failure: ConversationProcessFailureSchema.optional(),
+  createdAt: TimestampSchema
+}).strict().superRefine((event, context) => {
+  if (event.status === "failed" && event.failure === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["failure"], message: "process_failure_required" });
+  }
+  if (event.status !== "failed" && event.failure !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["failure"], message: "process_failure_unexpected" });
+  }
+});
+
+export const ConversationProcessHistoryResetSchema = z.object({
+  type: z.literal("history_reset"),
+  conversationId: IdentifierSchema,
+  reason: z.literal("history_gap"),
+  requestedLastEventId: z.string().regex(/^\d+$/u),
+  oldestAvailableId: z.string().regex(/^\d+$/u)
+}).strict();
+
 export const ConversationTurnInputSchema = z.object({
   text: z.string().trim().min(1).max(500)
 }).strict();
@@ -230,7 +313,8 @@ export const ConversationTurnResponseSchema = z.object({
 export const ConversationViewSchema = z.object({
   session: ConversationSessionSchema,
   messages: z.array(ConversationMessageSchema).max(10_000),
-  context: ConversationContextSchema
+  context: ConversationContextSchema,
+  pendingConfirmation: ConversationConfirmationSchema.optional()
 }).strict();
 
 export type ConversationIntentKind = z.infer<typeof ConversationIntentKindSchema>;
@@ -243,6 +327,13 @@ export type ConversationMessageRole = z.infer<typeof ConversationMessageRoleSche
 export type ConversationMessage = z.infer<typeof ConversationMessageSchema>;
 export type ConversationSession = z.infer<typeof ConversationSessionSchema>;
 export type ConversationContext = z.infer<typeof ConversationContextSchema>;
+export type ConversationProcessStage = z.infer<typeof ConversationProcessStageSchema>;
+export type ConversationProcessStatus = z.infer<typeof ConversationProcessStatusSchema>;
+export type ConversationProcessToolName = z.infer<typeof ConversationProcessToolNameSchema>;
+export type ConversationProcessToolSummary = z.infer<typeof ConversationProcessToolSummarySchema>;
+export type ConversationProcessFailure = z.infer<typeof ConversationProcessFailureSchema>;
+export type ConversationProcessEvent = z.infer<typeof ConversationProcessEventSchema>;
+export type ConversationProcessHistoryReset = z.infer<typeof ConversationProcessHistoryResetSchema>;
 export type ConversationTurnInput = z.infer<typeof ConversationTurnInputSchema>;
 export type ConversationConfirmInput = z.infer<typeof ConversationConfirmInputSchema>;
 export type ConversationTurnResponse = z.infer<typeof ConversationTurnResponseSchema>;

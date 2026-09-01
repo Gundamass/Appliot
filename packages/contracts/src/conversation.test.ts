@@ -6,10 +6,13 @@ import {
   ConversationContextSchema,
   ConversationIntentSchema,
   ConversationMessageSchema,
+  ConversationProcessEventSchema,
+  ConversationProcessHistoryResetSchema,
   ConversationSessionSchema,
   ConversationTargetSchema,
   ConversationTurnInputSchema,
-  ConversationTurnResponseSchema
+  ConversationTurnResponseSchema,
+  ConversationViewSchema
 } from "./conversation.js";
 
 describe("conversation contracts", () => {
@@ -29,6 +32,117 @@ describe("conversation contracts", () => {
   it("rejects unbounded message input", () => {
     expect(() => ConversationTurnInputSchema.parse({ text: "x".repeat(501) })).toThrow();
     expect(() => ConversationTurnInputSchema.parse({ text: "   " })).toThrow();
+  });
+
+  it("accepts only bounded process events", () => {
+    expect(ConversationProcessEventSchema.parse({
+      id: "7",
+      conversationId: "conversation-1",
+      turnSequence: 1,
+      stepId: "recruitment-search-1",
+      type: "process_changed",
+      stage: "searching_recruitment_site",
+      status: "completed",
+      summary: "找到 3 个候选招聘入口",
+      tool: {
+        name: "tavily_search",
+        input: [
+          { label: "公司", value: "百度" },
+          { label: "招聘类型", value: "校园招聘" }
+        ],
+        result: "3 个候选，优先域名 talent.baidu.com"
+      },
+      durationMs: 4820,
+      createdAt: "2026-08-22T00:00:00.000Z"
+    })).toMatchObject({ stage: "searching_recruitment_site", status: "completed", turnSequence: 1 });
+
+    expect(ConversationProcessEventSchema.parse({
+      id: "8",
+      conversationId: "conversation-1",
+      turnSequence: 1,
+      stepId: "wait-recruitment-confirmation",
+      type: "process_changed",
+      stage: "waiting_for_confirmation",
+      status: "waiting",
+      summary: "等待你确认招聘入口",
+      createdAt: "2026-08-22T00:00:00.000Z"
+    })).toMatchObject({ status: "waiting" });
+
+    expect(() => ConversationProcessEventSchema.parse({
+      id: "9",
+      conversationId: "conversation-1",
+      turnSequence: 1,
+      stepId: "search-failed",
+      type: "process_changed",
+      stage: "searching_recruitment_site",
+      status: "failed",
+      summary: "招聘入口搜索失败",
+      failure: {
+        code: "TAVILY_TIMEOUT",
+        summary: "服务暂时不可用，可以稍后重试",
+        retryable: true
+      },
+      createdAt: "2026-08-22T00:00:00.000Z"
+    })).not.toThrow();
+
+    expect(() => ConversationProcessEventSchema.parse({
+      id: "10",
+      conversationId: "conversation-1",
+      turnSequence: 0,
+      stepId: "invalid-turn",
+      type: "process_changed",
+      stage: "searching_recruitment_site",
+      status: "running",
+      summary: "搜索中",
+      createdAt: "2026-08-22T00:00:00.000Z"
+    })).toThrow();
+
+    expect(() => ConversationProcessEventSchema.parse({
+      id: "11",
+      conversationId: "conversation-1",
+      turnSequence: 1,
+      stepId: "invalid-tool",
+      type: "process_changed",
+      stage: "searching_recruitment_site",
+      status: "completed",
+      summary: "搜索完成",
+      tool: {
+        name: "raw_shell",
+        input: [{ label: "命令", value: "private prompt" }]
+      },
+      createdAt: "2026-08-22T00:00:00.000Z"
+    })).toThrow();
+
+    expect(() => ConversationProcessEventSchema.parse({
+      id: "12",
+      conversationId: "conversation-1",
+      turnSequence: 1,
+      stepId: "invalid-duration",
+      type: "process_changed",
+      stage: "searching_recruitment_site",
+      status: "completed",
+      summary: "搜索完成",
+      durationMs: -1,
+      createdAt: "2026-08-22T00:00:00.000Z"
+    })).toThrow();
+
+    expect(() => ConversationProcessEventSchema.parse({
+      id: "8",
+      conversationId: "conversation-1",
+      type: "process_changed",
+      stage: "model_reasoning",
+      status: "running",
+      message: "private prompt",
+      createdAt: "2026-08-22T00:00:00.000Z"
+    })).toThrow();
+
+    expect(ConversationProcessHistoryResetSchema.parse({
+      type: "history_reset",
+      conversationId: "conversation-1",
+      reason: "history_gap",
+      requestedLastEventId: "1",
+      oldestAvailableId: "4"
+    })).toMatchObject({ type: "history_reset", oldestAvailableId: "4" });
   });
 
   it("accepts only known target references", () => {
@@ -72,6 +186,7 @@ describe("conversation contracts", () => {
     const confirmation = ConversationConfirmationSchema.parse({
       confirmationId: "confirmation-1",
       action: "request_job_recommendations",
+      sourceTurnSequence: 1,
       target: { kind: "recruitment_site", ...site }
     });
     expect(confirmation.action).toBe("request_job_recommendations");
@@ -206,5 +321,53 @@ describe("conversation contracts", () => {
     expect(response.message.id).toBe("message-1");
     expect(response.context.version).toBe(0);
     expect(() => ConversationMessageSchema.parse({ ...message, prompt: "private" })).toThrow();
+  });
+
+  it("preserves the current confirmation in a loaded conversation view", () => {
+    const session = ConversationSessionSchema.parse({
+      id: "conversation-1",
+      title: "Job search",
+      createdAt: "2026-08-22T00:00:00.000Z",
+      updatedAt: "2026-08-22T00:00:00.000Z"
+    });
+    const confirmation = ConversationConfirmationSchema.parse({
+      confirmationId: "confirmation-1",
+      action: "request_job_recommendations",
+      target: {
+        kind: "recruitment_site",
+        company: "Baidu",
+        recruitmentType: "campus",
+        query: "Baidu campus recruitment official",
+        title: "Baidu Campus Recruitment",
+        url: "https://campus.baidu.com/",
+        domain: "campus.baidu.com",
+        snippet: "Campus recruitment roles",
+        source: "tavily"
+      }
+    });
+    const view = ConversationViewSchema.parse({
+      session,
+      messages: [
+        {
+          id: "message-1",
+          sessionId: session.id,
+          sequence: 1,
+          role: "assistant",
+          text: "Recruitment entry confirmed.",
+          cards: [{
+            type: "confirmation",
+            confirmationId: confirmation.confirmationId,
+            action: confirmation.action,
+            target: confirmation.target
+          }],
+          createdAt: session.updatedAt
+        }
+      ],
+      context: { version: 1, recentPostingIds: [] },
+      pendingConfirmation: confirmation
+    });
+
+    expect(view.pendingConfirmation).toEqual(confirmation);
+    expect(view.messages[0]?.cards[0]).toMatchObject({ confirmationId: confirmation.confirmationId });
   });
 });
