@@ -17,6 +17,8 @@ describe("migrateDatabase", () => {
       { name: "conversation_confirmations" },
       { name: "conversation_contexts" },
       { name: "conversation_messages" },
+      { name: "conversation_process_event_cursors" },
+      { name: "conversation_process_events" },
       { name: "conversation_sessions" },
       { name: "conversation_turns" }
     ]);
@@ -29,12 +31,16 @@ describe("migrateDatabase", () => {
       { name: "conversation_messages_session_id_idx" },
       { name: "conversation_contexts_session_id_idx" },
       { name: "conversation_confirmations_conversation_status_idx" },
+      { name: "conversation_process_events_conversation_id_idx" },
+      { name: "conversation_process_events_turn_idx" },
       { name: "conversation_turns_conversation_request_unique" }
     ]));
     expect(database.prepare("PRAGMA foreign_key_list(conversation_messages)").all())
       .toContainEqual(expect.objectContaining({ from: "session_id", table: "conversation_sessions", on_delete: "CASCADE" }));
     expect(database.prepare("PRAGMA foreign_key_list(conversation_contexts)").all())
       .toContainEqual(expect.objectContaining({ from: "session_id", table: "conversation_sessions", on_delete: "CASCADE" }));
+    expect(database.prepare("PRAGMA foreign_key_list(conversation_process_events)").all())
+      .toContainEqual(expect.objectContaining({ from: "conversation_id", table: "conversation_sessions", on_delete: "CASCADE" }));
     expect(() => database.prepare(`
       INSERT INTO conversation_sessions (id, title, created_at, updated_at)
       VALUES ('session-1', 'Test', '2026-08-22T00:00:00.000Z', '2026-08-22T00:00:00.000Z')
@@ -44,6 +50,42 @@ describe("migrateDatabase", () => {
         (id, session_id, sequence, role, text, cards_json, intent_json, created_at)
       VALUES ('message-1', 'session-1', 1, 'assistant', 'hello', 'not-json', NULL, '2026-08-22T00:00:00.000Z')
     `).run()).toThrow();
+    database.close();
+  });
+
+  it("upgrades global process events without guessing their message owner", () => {
+    const database = new Database(":memory:");
+    database.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE conversation_sessions (
+        id TEXT PRIMARY KEY,
+        title TEXT NOT NULL,
+        created_at TEXT NOT NULL,
+        updated_at TEXT NOT NULL
+      );
+      CREATE TABLE conversation_process_events (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        conversation_id TEXT NOT NULL,
+        type TEXT NOT NULL,
+        stage TEXT NOT NULL,
+        status TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO conversation_sessions
+        VALUES ('c1', '会话', '2026-09-01T00:00:00.000Z', '2026-09-01T00:00:00.000Z');
+      INSERT INTO conversation_process_events
+        (conversation_id, type, stage, status, created_at)
+        VALUES ('c1', 'process_changed', 'understanding_request', 'running', '2026-09-01T00:00:00.000Z');
+    `);
+
+    migrateDatabase(database);
+
+    const columns = database.prepare("PRAGMA table_info(conversation_process_events)").all() as Array<{ name: string }>;
+    expect(columns.map(({ name }) => name)).toEqual(expect.arrayContaining([
+      "turn_sequence", "step_id", "summary", "details_json"
+    ]));
+    expect(database.prepare("SELECT COUNT(*) AS count FROM conversation_process_events").get()).toEqual({ count: 0 });
+    expect(database.prepare("SELECT id FROM conversation_sessions").all()).toEqual([{ id: "c1" }]);
     database.close();
   });
 

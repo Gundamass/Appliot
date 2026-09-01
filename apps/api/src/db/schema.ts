@@ -306,3 +306,39 @@ export const conversationContexts = sqliteTable("conversation_contexts", {
   check("conversation_contexts_version_nonnegative", sql`${table.version} >= 0`),
   check("conversation_contexts_json_valid", sql`json_valid(${table.contextJson}) AND json_type(${table.contextJson}) = 'object'`)
 ]);
+
+export const conversationProcessEvents = sqliteTable("conversation_process_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  conversationId: text("conversation_id").notNull().references(() => conversationSessions.id, { onDelete: "cascade" }),
+  turnSequence: integer("turn_sequence").notNull(),
+  stepId: text("step_id").notNull(),
+  type: text("type").notNull(),
+  stage: text("stage").notNull(),
+  status: text("status").notNull(),
+  summary: text("summary").notNull(),
+  detailsJson: text("details_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  index("conversation_process_events_conversation_id_idx").on(table.conversationId, table.id),
+  index("conversation_process_events_turn_idx").on(table.conversationId, table.turnSequence, table.id),
+  check("conversation_process_events_turn_sequence_positive", sql`${table.turnSequence} > 0`),
+  check("conversation_process_events_step_id_bounded", sql`length(${table.stepId}) BETWEEN 1 AND 96`),
+  check("conversation_process_events_type_valid", sql`${table.type} = 'process_changed'`),
+  check("conversation_process_events_stage_valid", sql`${table.stage} IN (
+    'understanding_request', 'searching_recruitment_site', 'validating_recruitment_site',
+    'recruitment_site_found', 'waiting_for_confirmation', 'processing_confirmation',
+    'reading_recruitment_site', 'loading_recommendations', 'matching_jobs',
+    'loading_application_progress', 'creating_job_match_session', 'job_match_session_ready',
+    'creating_application_task', 'generating_response', 'completed', 'failed'
+  )`),
+  check("conversation_process_events_status_valid", sql`${table.status} IN ('running', 'completed', 'waiting', 'failed')`),
+  check("conversation_process_events_summary_bounded", sql`length(${table.summary}) BETWEEN 1 AND 500`),
+  check("conversation_process_events_details_json_valid", sql`json_valid(${table.detailsJson}) AND json_type(${table.detailsJson}) = 'object'`)
+]);
+
+export const conversationProcessEventCursors = sqliteTable("conversation_process_event_cursors", {
+  conversationId: text("conversation_id").primaryKey().references(() => conversationSessions.id, { onDelete: "cascade" }),
+  discardedThroughId: integer("discarded_through_id").notNull()
+}, (table) => [
+  check("conversation_process_event_cursors_id_positive", sql`${table.discardedThroughId} > 0`)
+]);

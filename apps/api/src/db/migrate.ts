@@ -1,6 +1,7 @@
 import type { SqliteDatabase } from "./client.js";
 
 export function migrateDatabase(database: SqliteDatabase): void {
+  upgradeConversationProcessEvents(database);
   database.exec(`
     PRAGMA foreign_keys = ON;
 
@@ -422,6 +423,34 @@ export function migrateDatabase(database: SqliteDatabase): void {
     );
     CREATE INDEX IF NOT EXISTS conversation_confirmations_conversation_status_idx
       ON conversation_confirmations(conversation_id, status, created_at);
+
+    CREATE TABLE IF NOT EXISTS conversation_process_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      turn_sequence INTEGER NOT NULL CHECK (turn_sequence > 0),
+      step_id TEXT NOT NULL CHECK (length(step_id) BETWEEN 1 AND 96),
+      type TEXT NOT NULL CHECK (type = 'process_changed'),
+      stage TEXT NOT NULL CHECK (stage IN (
+        'understanding_request', 'searching_recruitment_site', 'validating_recruitment_site',
+        'recruitment_site_found', 'waiting_for_confirmation', 'processing_confirmation',
+        'reading_recruitment_site', 'loading_recommendations', 'matching_jobs',
+        'loading_application_progress', 'creating_job_match_session', 'job_match_session_ready',
+        'creating_application_task', 'generating_response', 'completed', 'failed'
+      )),
+      status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'waiting', 'failed')),
+      summary TEXT NOT NULL CHECK (length(summary) BETWEEN 1 AND 500),
+      details_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(details_json) AND json_type(details_json) = 'object'),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS conversation_process_events_conversation_id_idx
+      ON conversation_process_events(conversation_id, id);
+    CREATE INDEX IF NOT EXISTS conversation_process_events_turn_idx
+      ON conversation_process_events(conversation_id, turn_sequence, id);
+
+    CREATE TABLE IF NOT EXISTS conversation_process_event_cursors (
+      conversation_id TEXT PRIMARY KEY REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      discarded_through_id INTEGER NOT NULL CHECK (discarded_through_id > 0)
+    );
   `);
 
   const agentCheckpointColumns = database.prepare("PRAGMA table_info(agent_checkpoints)").all() as Array<{ name: string }>;
@@ -631,6 +660,21 @@ function upgradeFactForeignKeys(database: SqliteDatabase): void {
       COMMIT;
     `);
   }
+}
+
+function upgradeConversationProcessEvents(database: SqliteDatabase): void {
+  const existing = database.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'conversation_process_events'"
+  ).get();
+  if (existing === undefined) return;
+
+  const columns = database.prepare("PRAGMA table_info(conversation_process_events)").all() as Array<{ name: string }>;
+  if (columns.some(({ name }) => name === "turn_sequence")) return;
+
+  database.exec(`
+    DROP TABLE IF EXISTS conversation_process_event_cursors;
+    DROP TABLE conversation_process_events;
+  `);
 }
 
 function upgradeJobSourceConstraints(database: SqliteDatabase): void {
