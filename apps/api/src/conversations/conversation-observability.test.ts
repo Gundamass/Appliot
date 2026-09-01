@@ -71,6 +71,7 @@ describe("conversation observability", () => {
 
     await graph.invoke({
       conversationId: "conversation-1",
+      turnSequence: 1,
       text: "我投了哪些岗位",
       context: { version: 0, recentPostingIds: [] }
     });

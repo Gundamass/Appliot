@@ -73,6 +73,7 @@ export function createConversationService(
         const context = dependencies.repository.getContext(id);
         const output = await dependencies.graph.invoke({
           conversationId: id,
+          turnSequence: nextSequence,
           text,
           context,
           sequence: nextSequence
@@ -116,6 +117,10 @@ export function createConversationService(
         const context = dependencies.repository.getContext(id);
         const output = await dependencies.graph.invoke({
           conversationId: id,
+          turnSequence: nextSequence,
+          ...(pending.sourceTurnSequence === undefined
+            ? {}
+            : { confirmationSourceTurnSequence: pending.sourceTurnSequence }),
           context,
           sequence: nextSequence,
           confirmationId: input.confirmationId,
@@ -147,6 +152,7 @@ export function createConversationService(
           context: response.context,
           response
         });
+        persistConfirmation(dependencies.repository, id, response.pendingConfirmation);
         dependencies.repository.consumeConfirmation(id, pending.confirmationId);
         return stored.response;
       });
@@ -157,12 +163,66 @@ export function createConversationService(
 function readView(repository: ConversationRepository, conversationId: string): ConversationView {
   const id = requireConversationId(conversationId);
   const session = requireConversation(repository, id);
+  const pendingConfirmation = repository.findPendingConfirmation(id);
   const view = {
     session,
-    messages: repository.listMessages(id),
-    context: repository.getContext(id)
+    messages: hydrateLegacyConfirmationCards(repository.listMessages(id), pendingConfirmation),
+    context: repository.getContext(id),
+    ...(pendingConfirmation === undefined ? {} : { pendingConfirmation })
   };
   return ConversationViewSchema.parse(view);
+}
+
+function hydrateLegacyConfirmationCards(
+  messages: ConversationMessage[],
+  pending: ConversationConfirmation | undefined
+): ConversationMessage[] {
+  if (pending === undefined) return messages;
+  const messageIndex = messages.findLastIndex((message) => message.role === "assistant"
+    && message.cards.some((card) => card.type === "confirmation" && matchesPendingConfirmation(card, pending)));
+  if (messageIndex < 0) return messages;
+
+  return messages.map((message, index) => index !== messageIndex
+    ? message
+    : {
+        ...message,
+        cards: message.cards.map((card) => card.type === "confirmation" && matchesPendingConfirmation(card, pending)
+          ? { ...card, confirmationId: pending.confirmationId }
+          : card)
+      });
+}
+
+function matchesPendingConfirmation(
+  card: Extract<ConversationMessage["cards"][number], { type: "confirmation" }>,
+  pending: ConversationConfirmation
+): boolean {
+  if (card.confirmationId !== undefined || card.action !== pending.action) return false;
+  const target = card.target;
+  const pendingTarget = pending.target;
+  if (target.kind !== pendingTarget.kind) return false;
+  if (target.kind === "recommendation" && pendingTarget.kind === "recommendation") {
+    return target.sessionId === pendingTarget.sessionId
+      && target.resultId === pendingTarget.resultId
+      && target.postingContentHash === pendingTarget.postingContentHash;
+  }
+  if (target.kind === "recruitment_site_choices" && pendingTarget.kind === "recruitment_site_choices") {
+    return target.company === pendingTarget.company
+      && target.recruitmentType === pendingTarget.recruitmentType
+      && target.query === pendingTarget.query
+      && JSON.stringify(target.candidates) === JSON.stringify(pendingTarget.candidates);
+  }
+  if (target.kind === "recruitment_site" && pendingTarget.kind === "recruitment_site") {
+    return target.company === pendingTarget.company
+      && target.recruitmentType === pendingTarget.recruitmentType
+      && target.query === pendingTarget.query
+      && target.title === pendingTarget.title
+      && target.url === pendingTarget.url
+      && target.domain === pendingTarget.domain
+      && target.snippet === pendingTarget.snippet
+      && target.source === pendingTarget.source
+      && target.sourceScore === pendingTarget.sourceScore;
+  }
+  return false;
 }
 
 function requireConversationId(value: string): string {

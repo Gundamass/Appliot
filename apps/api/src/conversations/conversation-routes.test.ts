@@ -21,7 +21,7 @@ import {
   createConversationService,
   type ConversationService
 } from "./conversation-service.js";
-import type { ConversationGraphOutput } from "./conversation-graph.js";
+import type { ConversationGraphInput, ConversationGraphOutput } from "./conversation-graph.js";
 
 const resources: Array<{
   app: Awaited<ReturnType<typeof createApp>>;
@@ -285,10 +285,11 @@ function fakeService() {
 
 function fakeGraph(options: { pendingConfirmation?: boolean; confirmed?: boolean } = {}) {
   return {
-    invoke: vi.fn(async (input: { conversationId: string; context: ConversationContext; sequence?: number; confirmationId?: string }) => {
+    invoke: vi.fn(async (input: ConversationGraphInput) => {
+      const context = ConversationContextSchema.parse(input.context);
       const nextContext = ConversationContextSchema.parse({
-        ...input.context,
-        version: input.context.version + 1
+        ...context,
+        version: context.version + 1
       });
       return graphOutput(input.conversationId, nextContext, {
         pendingConfirmation: options.pendingConfirmation === true && input.confirmationId === undefined,

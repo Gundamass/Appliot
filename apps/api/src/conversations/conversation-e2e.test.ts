@@ -105,7 +105,7 @@ function dependencies(options: {
 }
 
 async function send(graph: ReturnType<typeof createConversationGraph>, text: string, inputContext = context): Promise<ConversationTurnResponse> {
-  return (await graph.invoke({ conversationId: "conversation-e2e", text, context: inputContext })).response;
+  return (await graph.invoke({ conversationId: "conversation-e2e", turnSequence: 1, text, context: inputContext })).response;
 }
 
 describe("conversation recommendation to application task handoff", () => {
@@ -122,6 +122,7 @@ describe("conversation recommendation to application task handoff", () => {
 
     const confirmed = (await graph.invoke({
       conversationId: "conversation-e2e",
+      turnSequence: 2,
       confirmationId: pending.confirmationId,
       approved: true,
       context: pending.context
@@ -141,12 +142,14 @@ describe("conversation recommendation to application task handoff", () => {
 
     await graph.invoke({
       conversationId: "conversation-e2e",
+      turnSequence: 2,
       confirmationId: pending.confirmationId,
       approved: true,
       context: pending.context
     });
     const replay = (await graph.invoke({
       conversationId: "conversation-e2e",
+      turnSequence: 3,
       confirmationId: pending.confirmationId,
       approved: true,
       context: pending.context
@@ -179,6 +182,7 @@ describe("conversation recommendation to application task handoff", () => {
     const pending = await send(graph, "投递第一份");
     const response = (await graph.invoke({
       conversationId: "conversation-e2e",
+      turnSequence: 2,
       confirmationId: pending.confirmationId,
       approved: true,
       context: pending.context
@@ -195,6 +199,7 @@ describe("conversation recommendation to application task handoff", () => {
     const challengePending = await send(challengeGraph, "投递第一份");
     const challengeResponse = (await challengeGraph.invoke({
       conversationId: "conversation-e2e",
+      turnSequence: 2,
       confirmationId: challengePending.confirmationId,
       approved: true,
       context: challengePending.context
@@ -205,6 +210,7 @@ describe("conversation recommendation to application task handoff", () => {
     const policyPending = await send(policyGraph, "投递第一份");
     const policyResponse = (await policyGraph.invoke({
       conversationId: "conversation-e2e",
+      turnSequence: 2,
       confirmationId: policyPending.confirmationId,
       approved: true,
       context: policyPending.context

@@ -46,6 +46,8 @@ const HttpsUrlSchema = z.string().url().max(2_048).refine((value) => {
 
 const ConversationGraphInputSchema = z.object({
   conversationId: ConversationIdSchema,
+  turnSequence: z.number().int().positive(),
+  confirmationSourceTurnSequence: z.number().int().positive().optional(),
   text: z.string().trim().min(1).max(500).optional(),
   context: ConversationContextSchema,
   sequence: z.number().int().nonnegative().optional(),
@@ -115,6 +117,8 @@ interface ResolvedTarget {
 
 interface GraphState {
   conversationId: string;
+  turnSequence: number;
+  confirmationSourceTurnSequence?: number;
   text?: string;
   context: ConversationContext;
   sequence: number;
@@ -143,6 +147,8 @@ type ToolInvocationResult =
 
 const GraphStateAnnotation = Annotation.Root({
   conversationId: Annotation<string>,
+  turnSequence: Annotation<number>({ reducer: replaceValue, default: () => 1 }),
+  confirmationSourceTurnSequence: Annotation<number | undefined>({ reducer: replaceValue, default: () => undefined }),
   text: Annotation<string | undefined>({ reducer: replaceValue, default: () => undefined }),
   context: Annotation<ConversationContext>,
   sequence: Annotation<number>({ reducer: replaceValue, default: () => 0 }),
@@ -200,6 +206,8 @@ export function createConversationGraph(dependencies: ConversationGraphDependenc
       const parsed = ConversationGraphInputSchema.parse(input);
       const graphInput = {
         conversationId: parsed.conversationId,
+        turnSequence: parsed.turnSequence,
+        confirmationSourceTurnSequence: parsed.confirmationSourceTurnSequence,
         context: parsed.context,
         text: parsed.text,
         sequence: parsed.sequence ?? 0,
@@ -601,6 +609,7 @@ async function prepareSideEffect(
   const confirmation: ConversationConfirmation = {
     confirmationId: randomUUID(),
     action: "start_application",
+    sourceTurnSequence: state.turnSequence,
     target: {
       kind: "recommendation",
       sessionId: state.target.sessionId,
@@ -678,7 +687,7 @@ async function prepareRecruitmentDiscovery(
       traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "failed", "NO_SAFE_CANDIDATE"), invocation.traceIds)
     };
   }
-  const confirmation = recruitmentChoicesConfirmation(company, recruitmentType, search);
+  const confirmation = recruitmentChoicesConfirmation(state.turnSequence, company, recruitmentType, search);
   confirmations.put(state.conversationId, confirmation);
   emitProcessEvent(dependencies, state, "searching_recruitment_site", "completed");
   emitProcessEvent(dependencies, state, "recruitment_site_found", "completed");
@@ -724,7 +733,7 @@ async function prepareManualRecruitmentLink(
     query: recruitmentQuery(request.companyName, request.recruitmentType),
     candidates: [candidate]
   });
-  const confirmation = recruitmentChoicesConfirmation(request.companyName, request.recruitmentType, search);
+  const confirmation = recruitmentChoicesConfirmation(state.turnSequence, request.companyName, request.recruitmentType, search);
   confirmations.put(state.conversationId, confirmation);
   emitProcessEvent(dependencies, state, "recruitment_site_found", "completed");
   emitProcessEvent(dependencies, state, "waiting_for_confirmation", "running");
@@ -750,7 +759,7 @@ function prepareRecruitmentRequestConfirmation(
       failureCode: "recruitment_site_confirmation_required"
     };
   }
-  const confirmation = recruitmentConfirmation("request_job_recommendations", site);
+  const confirmation = recruitmentConfirmation(state.turnSequence, "request_job_recommendations", site);
   confirmations.put(state.conversationId, confirmation);
   emitProcessEvent(dependencies, state, "waiting_for_confirmation", "running");
   return {
@@ -825,7 +834,7 @@ async function prepareRecruitmentConfirmation(
       query: pending.target.query,
       ...candidate
     });
-    const nextConfirmation = recruitmentConfirmation("request_job_recommendations", site);
+    const nextConfirmation = recruitmentConfirmation(state.turnSequence, "request_job_recommendations", site);
     confirmations.put(state.conversationId, nextConfirmation);
     emitProcessEvent(dependencies, state, "processing_confirmation", "completed");
     return {
@@ -861,7 +870,7 @@ async function prepareRecruitmentConfirmation(
     };
   }
   if (pending.action === "confirm_recruitment_site") {
-    const nextConfirmation = recruitmentConfirmation("request_job_recommendations", site);
+    const nextConfirmation = recruitmentConfirmation(state.turnSequence, "request_job_recommendations", site);
     confirmations.put(state.conversationId, nextConfirmation);
     emitProcessEvent(dependencies, state, "processing_confirmation", "completed");
     emitProcessEvent(dependencies, state, "waiting_for_confirmation", "running");
@@ -918,17 +927,20 @@ async function prepareRecruitmentConfirmation(
 }
 
 function recruitmentConfirmation(
+  sourceTurnSequence: number,
   action: "request_job_recommendations",
   site: VerifiedRecruitmentSite
 ): ConversationConfirmation {
   return {
     confirmationId: randomUUID(),
     action,
+    sourceTurnSequence,
     target: { kind: "recruitment_site", ...site }
   };
 }
 
 function recruitmentChoicesConfirmation(
+  sourceTurnSequence: number,
   company: string,
   recruitmentType: RecruitmentSearchRequest["recruitmentType"],
   search: RecruitmentSiteSearchResult
@@ -936,6 +948,7 @@ function recruitmentChoicesConfirmation(
   return {
     confirmationId: randomUUID(),
     action: "confirm_recruitment_site",
+    sourceTurnSequence,
     target: {
       kind: "recruitment_site_choices",
       company,
@@ -1234,7 +1247,7 @@ function emitProcessEvent(
     const summary = processStageSummary(stage, status);
     dependencies.processEvents?.emit({
       conversationId: state.conversationId,
-      turnSequence: Math.max(1, state.sequence ?? 1),
+      turnSequence: state.turnSequence,
       stepId: stage.replaceAll("_", "-"),
       stage,
       status,
