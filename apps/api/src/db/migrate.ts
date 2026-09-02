@@ -378,6 +378,15 @@ export function migrateDatabase(database: SqliteDatabase): void {
       updated_at TEXT NOT NULL
     );
 
+    CREATE TABLE IF NOT EXISTS conversation_job_match_sessions (
+      conversation_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      job_match_session_id TEXT PRIMARY KEY REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      UNIQUE (conversation_id, job_match_session_id)
+    );
+    CREATE INDEX IF NOT EXISTS conversation_job_match_sessions_conversation_id_idx
+      ON conversation_job_match_sessions(conversation_id, job_match_session_id);
+
     CREATE TABLE IF NOT EXISTS conversation_messages (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,

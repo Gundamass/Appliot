@@ -20,7 +20,60 @@ function userMessage(sessionId: string, text: string, sequence = 1) {
   };
 }
 
+function insertJobMatchSession(database: Database.Database, id: string): void {
+  database.prepare(`
+    INSERT INTO job_match_sessions
+      (id, state, initial_url, profile_revision, expectation_revision, created_at, updated_at)
+    VALUES (?, 'created', 'https://jobs.example.test/list', 0, 0, ?, ?)
+  `).run(id, "2026-08-22T00:00:00.000Z", "2026-08-22T00:00:00.000Z");
+}
+
 describe("conversation repository", () => {
+  it("links each job-match session to one conversation and cascades only the link", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createConversationRepository(database);
+    const firstConversation = repository.createConversation();
+    const secondConversation = repository.createConversation();
+    insertJobMatchSession(database, "match-1");
+    insertJobMatchSession(database, "match-2");
+
+    repository.linkJobMatchSession(firstConversation.id, "match-1");
+    expect(repository.getJobMatchSessionLink("match-1")).toEqual({
+      conversationId: firstConversation.id,
+      sessionId: "match-1"
+    });
+    expect(repository.findConversationByJobMatchSession("match-1")?.id).toBe(firstConversation.id);
+    expect(() => repository.linkJobMatchSession(secondConversation.id, "match-1"))
+      .toThrow("conversation_job_match_link_conflict");
+
+    database.prepare("DELETE FROM job_match_sessions WHERE id = ?").run("match-1");
+    expect(repository.getJobMatchSessionLink("match-1")).toBeUndefined();
+    expect(repository.getConversation(firstConversation.id)).toBeDefined();
+
+    repository.linkJobMatchSession(secondConversation.id, "match-2");
+    database.prepare("DELETE FROM conversation_sessions WHERE id = ?").run(secondConversation.id);
+    expect(repository.getJobMatchSessionLink("match-2")).toBeUndefined();
+    expect(database.prepare("SELECT id FROM job_match_sessions WHERE id = ?").get("match-2"))
+      .toEqual({ id: "match-2" });
+    database.close();
+  });
+
+  it("rejects empty link identifiers and can explicitly unlink a session", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createConversationRepository(database);
+    const conversation = repository.createConversation();
+    insertJobMatchSession(database, "match-1");
+
+    expect(() => repository.linkJobMatchSession("", "match-1")).toThrow("conversation_job_match_link_invalid");
+    expect(() => repository.linkJobMatchSession(conversation.id, "")).toThrow("conversation_job_match_link_invalid");
+    repository.linkJobMatchSession(conversation.id, "match-1");
+    repository.unlinkJobMatchSession("match-1");
+    expect(repository.findConversationByJobMatchSession("match-1")).toBeUndefined();
+    database.close();
+  });
+
   it("appends messages in sequence and rejects stale writers", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

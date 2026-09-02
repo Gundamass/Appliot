@@ -16,6 +16,7 @@ describe("migrateDatabase", () => {
     `).all()).toEqual([
       { name: "conversation_confirmations" },
       { name: "conversation_contexts" },
+      { name: "conversation_job_match_sessions" },
       { name: "conversation_messages" },
       { name: "conversation_process_event_cursors" },
       { name: "conversation_process_events" },
@@ -31,6 +32,7 @@ describe("migrateDatabase", () => {
       { name: "conversation_messages_session_id_idx" },
       { name: "conversation_contexts_session_id_idx" },
       { name: "conversation_confirmations_conversation_status_idx" },
+      { name: "conversation_job_match_sessions_conversation_id_idx" },
       { name: "conversation_process_events_conversation_id_idx" },
       { name: "conversation_process_events_turn_idx" },
       { name: "conversation_turns_conversation_request_unique" }
@@ -41,6 +43,11 @@ describe("migrateDatabase", () => {
       .toContainEqual(expect.objectContaining({ from: "session_id", table: "conversation_sessions", on_delete: "CASCADE" }));
     expect(database.prepare("PRAGMA foreign_key_list(conversation_process_events)").all())
       .toContainEqual(expect.objectContaining({ from: "conversation_id", table: "conversation_sessions", on_delete: "CASCADE" }));
+    expect(database.prepare("PRAGMA foreign_key_list(conversation_job_match_sessions)").all())
+      .toEqual(expect.arrayContaining([
+        expect.objectContaining({ from: "conversation_id", table: "conversation_sessions", on_delete: "CASCADE" }),
+        expect.objectContaining({ from: "job_match_session_id", table: "job_match_sessions", on_delete: "CASCADE" })
+      ]));
     expect(() => database.prepare(`
       INSERT INTO conversation_sessions (id, title, created_at, updated_at)
       VALUES ('session-1', 'Test', '2026-08-22T00:00:00.000Z', '2026-08-22T00:00:00.000Z')

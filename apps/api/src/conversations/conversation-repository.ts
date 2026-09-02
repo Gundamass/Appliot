@@ -16,6 +16,10 @@ import type { SqliteDatabase } from "../db/client.js";
 export interface ConversationRepository {
   createConversation(): ConversationSession;
   getConversation(id: string): ConversationSession | undefined;
+  linkJobMatchSession(conversationId: string, sessionId: string): void;
+  getJobMatchSessionLink(sessionId: string): ConversationJobMatchSessionLink | undefined;
+  findConversationByJobMatchSession(sessionId: string): ConversationSession | undefined;
+  unlinkJobMatchSession(sessionId: string): void;
   listMessages(id: string, afterSequence?: number): ConversationMessage[];
   appendMessage(input: {
     sessionId: string;
@@ -39,6 +43,11 @@ export interface ConversationRepository {
   putConfirmation(conversationId: string, confirmation: ConversationConfirmation): void;
   peekConfirmation(conversationId: string, confirmationId: string): ConversationConfirmation | undefined;
   consumeConfirmation(conversationId: string, confirmationId: string): ConversationConfirmation | undefined;
+}
+
+export interface ConversationJobMatchSessionLink {
+  conversationId: string;
+  sessionId: string;
 }
 
 export interface ConversationTurnRecord {
@@ -102,6 +111,28 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
     VALUES (?, ?, ?, ?)
   `);
   const findSession = database.prepare("SELECT * FROM conversation_sessions WHERE id = ?");
+  const findJobMatchSession = database.prepare("SELECT id FROM job_match_sessions WHERE id = ?");
+  const insertJobMatchSessionLink = database.prepare(`
+    INSERT INTO conversation_job_match_sessions
+      (conversation_id, job_match_session_id, created_at)
+    VALUES (?, ?, ?)
+  `);
+  const findJobMatchSessionLink = database.prepare(`
+    SELECT conversation_id, job_match_session_id
+    FROM conversation_job_match_sessions
+    WHERE job_match_session_id = ?
+  `);
+  const findConversationForJobMatchSession = database.prepare(`
+    SELECT conversation_sessions.*
+    FROM conversation_job_match_sessions
+    INNER JOIN conversation_sessions
+      ON conversation_sessions.id = conversation_job_match_sessions.conversation_id
+    WHERE conversation_job_match_sessions.job_match_session_id = ?
+  `);
+  const deleteJobMatchSessionLink = database.prepare(`
+    DELETE FROM conversation_job_match_sessions
+    WHERE job_match_session_id = ?
+  `);
   const findMessages = database.prepare(`
     SELECT * FROM conversation_messages
     WHERE session_id = ? AND sequence > ?
@@ -317,6 +348,48 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
       return row ? fromSessionRow(row) : undefined;
     },
 
+    linkJobMatchSession(conversationId, sessionId) {
+      validateLinkIdentifier(conversationId);
+      validateLinkIdentifier(sessionId);
+      requireSession(findSession.get(conversationId) as SessionRow | undefined);
+      if (findJobMatchSession.get(sessionId) === undefined) {
+        throw new Error("job_match_session_not_found");
+      }
+      try {
+        insertJobMatchSessionLink.run(conversationId, sessionId, new Date().toISOString());
+      } catch (error) {
+        if (error instanceof Error && /UNIQUE constraint failed/u.test(error.message)) {
+          throw new Error("conversation_job_match_link_conflict");
+        }
+        throw error;
+      }
+    },
+
+    getJobMatchSessionLink(sessionId) {
+      validateLinkIdentifier(sessionId);
+      const row = findJobMatchSessionLink.get(sessionId) as {
+        conversation_id: string;
+        job_match_session_id: string;
+      } | undefined;
+      return row === undefined
+        ? undefined
+        : {
+          conversationId: row.conversation_id,
+          sessionId: row.job_match_session_id
+        };
+    },
+
+    findConversationByJobMatchSession(sessionId) {
+      validateLinkIdentifier(sessionId);
+      const row = findConversationForJobMatchSession.get(sessionId) as SessionRow | undefined;
+      return row === undefined ? undefined : fromSessionRow(row);
+    },
+
+    unlinkJobMatchSession(sessionId) {
+      validateLinkIdentifier(sessionId);
+      deleteJobMatchSessionLink.run(sessionId);
+    },
+
     listMessages(id, afterSequence = 0) {
       requireSession(findSession.get(id) as SessionRow | undefined);
       if (!Number.isSafeInteger(afterSequence) || afterSequence < 0) {
@@ -448,5 +521,11 @@ function requireSession(row: SessionRow | undefined): SessionRow {
 function validateRequestId(value: string): void {
   if (typeof value !== "string" || value.trim().length === 0 || value.length > 256) {
     throw new Error("conversation_request_invalid");
+  }
+}
+
+function validateLinkIdentifier(value: string): void {
+  if (typeof value !== "string" || value.trim().length === 0 || value.length > 256) {
+    throw new Error("conversation_job_match_link_invalid");
   }
 }
