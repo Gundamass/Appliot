@@ -11,8 +11,17 @@ import { createAmbiguityDetector, type AmbiguityDetector } from "./ambiguity-det
 import { createClarificationManager, type ClarificationManager } from "./clarification-manager.js";
 import { createIntentUnderstanding, type IntentUnderstanding } from "./intent-understanding.js";
 
+export interface IntentResolutionRuntimeContext {
+  signal: AbortSignal;
+  executionEpoch: number;
+}
+
 export interface IntentResolver {
-  resolve(input: UserMessage, context?: IntentContext): Promise<IntentResolution>;
+  resolve(
+    input: UserMessage,
+    context?: IntentContext,
+    runtime?: IntentResolutionRuntimeContext
+  ): Promise<IntentResolution>;
 }
 
 export interface IntentResolverOptions {
@@ -31,10 +40,12 @@ export function createIntentResolver(options: IntentResolverOptions = {}): Inten
   const now = options.now ?? (() => new Date().toISOString());
 
   return {
-    async resolve(input, context = { availableJobs: [], availableResumes: [] }) {
+    async resolve(input, context = { availableJobs: [], availableResumes: [] }, runtime) {
       let draft: IntentDraft;
       try {
-        draft = await understanding.extract(input, context);
+        if (runtime?.signal.aborted) throw new Error("agent_run_cancelled");
+        draft = await understanding.extract(input, context, runtime);
+        if (runtime?.signal.aborted) throw new Error("agent_run_cancelled");
       } catch {
         return IntentResolutionSchema.parse({ type: "rejected", reason: "intent_extraction_invalid" });
       }

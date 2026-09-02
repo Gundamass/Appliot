@@ -12,6 +12,7 @@ import {
 } from "@resume/contracts";
 import { JsonValueSchema } from "@resume/contracts";
 import type { IntentContext, IntentDraft, UserMessage } from "./intent-context.js";
+import type { IntentResolutionRuntimeContext } from "./intent-resolver.js";
 
 const ExtractedFieldSchema = z.object({
   value: JsonValueSchema,
@@ -36,11 +37,11 @@ const IntentExtractionSchema = z.object({
 type ExtractedField = z.infer<typeof ExtractedFieldSchema>;
 
 export interface IntentExtractor {
-  (input: UserMessage, context: IntentContext): Promise<unknown> | unknown;
+  (input: UserMessage, context: IntentContext, runtime?: IntentResolutionRuntimeContext): Promise<unknown> | unknown;
 }
 
 export interface IntentUnderstanding {
-  extract(input: UserMessage, context?: IntentContext): Promise<IntentDraft>;
+  extract(input: UserMessage, context?: IntentContext, runtime?: IntentResolutionRuntimeContext): Promise<IntentDraft>;
 }
 
 export interface IntentUnderstandingOptions {
@@ -49,10 +50,10 @@ export interface IntentUnderstandingOptions {
 
 export function createIntentUnderstanding(options: IntentUnderstandingOptions = {}): IntentUnderstanding {
   return {
-    async extract(input, context = emptyContext()) {
+    async extract(input, context = emptyContext(), runtime) {
       const raw = options.extractor === undefined
         ? deterministicExtraction(input.text)
-        : await options.extractor(input, context);
+        : await options.extractor(input, context, runtime);
       const parsed = IntentExtractionSchema.safeParse(raw);
       if (!parsed.success) throw new Error("intent_extraction_invalid");
 

@@ -100,6 +100,7 @@ export type BudgetState = z.infer<typeof BudgetStateSchema>;
 
 export const BudgetLimitsSchema = z.object({
   maxAttemptsPerStep: z.number().int().positive(),
+  maxRetries: z.number().int().positive().default(64),
   maxReplans: z.number().int().positive(),
   maxSteps: z.number().int().positive(),
   maxToolCalls: z.number().int().positive(),
@@ -131,10 +132,12 @@ export const RuntimeCheckpointSchema = z.object({
   currentStepId: z.string().min(1).max(128).optional(),
   intentRef: z.string().min(1).max(256).optional(),
   planRef: z.string().min(1).max(256).optional(),
+  phase: z.enum(["intent", "plan", "dispatch", "wait", "inspect", "human_gate", "complete", "blocked", "fail", "cancelled"]).optional(),
   memoryRefs: z.array(MemoryRefSchema).max(200),
   evidenceRefs: z.array(EvidenceRefSchema).max(500),
   pendingInterrupt: RuntimeHumanInterruptSchema.optional(),
   budget: BudgetStateSchema,
+  budgetLimits: BudgetLimitsSchema.optional(),
   completedActionIds: z.array(z.string().min(1).max(128)).max(500),
   stateHash: HashSchema,
   createdAt: z.string().datetime()
