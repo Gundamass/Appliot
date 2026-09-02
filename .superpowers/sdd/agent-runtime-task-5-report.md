@@ -4,7 +4,7 @@
 
 - status: complete（Task5 本批代码与回归验证完成）。
 - branch: `fix/mokahr-campus-apply`。
-- implementation commit SHA: 待实现提交完成后回填；最终交接消息会同时给出实现提交与报告提交 SHA。
+- implementation commit SHA: `517b3d8`（Supervisor/Planner/Replanner/Validator 与契约实现）。
 - 本批不提交 `apps/api/src/production-dependencies.ts` 或其他工作区已有用户改动。
 
 ## 本批实现
