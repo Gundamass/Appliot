@@ -1,6 +1,6 @@
 import type { ConversationProcessEvent } from "@resume/contracts";
 
-export interface ConversationTurnProcess {
+export interface ConversationProcessGroup {
   turnSequence: number;
   steps: ConversationProcessEvent[];
   active: boolean;
@@ -8,9 +8,13 @@ export interface ConversationTurnProcess {
   totalDurationMs: number;
 }
 
+// Keep the existing name for the chat trace while exposing the domain-neutral
+// group name to inline projections such as job matching.
+export type ConversationTurnProcess = ConversationProcessGroup;
+
 export function groupConversationProcessEvents(
   events: readonly ConversationProcessEvent[]
-): Map<number, ConversationTurnProcess> {
+): Map<number, ConversationProcessGroup> {
   const seenIds = new Set<string>();
   const byTurn = new Map<number, Map<string, ConversationProcessEvent>>();
   const stepOrder = new Map<number, string[]>();
