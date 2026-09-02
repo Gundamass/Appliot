@@ -1,4 +1,9 @@
 import type { SqliteDatabase } from "./client.js";
+import {
+  DEFAULT_CONVERSATION_TITLE,
+  LEGACY_CONVERSATION_TITLE,
+  conversationTitleFromFirstMessage
+} from "../conversations/conversation-title.js";
 
 export function migrateDatabase(database: SqliteDatabase): void {
   upgradeConversationProcessEvents(database);
@@ -462,6 +467,8 @@ export function migrateDatabase(database: SqliteDatabase): void {
     );
   `);
 
+  backfillConversationTitles(database);
+
   const agentCheckpointColumns = database.prepare("PRAGMA table_info(agent_checkpoints)").all() as Array<{ name: string }>;
   if (!agentCheckpointColumns.some((column) => column.name === "metadata_type")) {
     database.exec("ALTER TABLE agent_checkpoints ADD COLUMN metadata_type TEXT NOT NULL DEFAULT 'json'");
@@ -669,6 +676,26 @@ function upgradeFactForeignKeys(database: SqliteDatabase): void {
       COMMIT;
     `);
   }
+}
+
+function backfillConversationTitles(database: SqliteDatabase): void {
+  const legacy = database.prepare(`
+    SELECT id FROM conversation_sessions WHERE title = ? ORDER BY id
+  `).all(LEGACY_CONVERSATION_TITLE) as Array<{ id: string }>;
+  const firstUserMessage = database.prepare(`
+    SELECT text FROM conversation_messages
+    WHERE session_id = ? AND role = 'user'
+    ORDER BY sequence ASC LIMIT 1
+  `);
+  const update = database.prepare("UPDATE conversation_sessions SET title = ? WHERE id = ? AND title = ?");
+  const run = database.transaction(() => {
+    for (const { id } of legacy) {
+      const row = firstUserMessage.get(id) as { text: string } | undefined;
+      const title = row === undefined ? DEFAULT_CONVERSATION_TITLE : conversationTitleFromFirstMessage(row.text);
+      update.run(title, id, LEGACY_CONVERSATION_TITLE);
+    }
+  });
+  run();
 }
 
 function upgradeConversationProcessEvents(database: SqliteDatabase): void {

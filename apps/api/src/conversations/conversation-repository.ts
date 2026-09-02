@@ -12,10 +12,18 @@ import {
   type ConversationTurnResponse
 } from "@resume/contracts";
 import type { SqliteDatabase } from "../db/client.js";
+import {
+  DEFAULT_CONVERSATION_TITLE,
+  LEGACY_CONVERSATION_TITLE,
+  conversationTitleFromFirstMessage
+} from "./conversation-title.js";
 
 export interface ConversationRepository {
   createConversation(): ConversationSession;
   getConversation(id: string): ConversationSession | undefined;
+  listConversations(): ConversationSession[];
+  deleteConversation(id: string): boolean;
+  deleteAllConversations(): number;
   linkJobMatchSession(conversationId: string, sessionId: string): void;
   getJobMatchSessionLink(sessionId: string): ConversationJobMatchSessionLink | undefined;
   findConversationByJobMatchSession(sessionId: string): ConversationSession | undefined;
@@ -41,6 +49,7 @@ export interface ConversationRepository {
     response: ConversationTurnResponse;
   }): ConversationTurnRecord;
   putConfirmation(conversationId: string, confirmation: ConversationConfirmation): void;
+  findPendingConfirmation(conversationId: string): ConversationConfirmation | undefined;
   peekConfirmation(conversationId: string, confirmationId: string): ConversationConfirmation | undefined;
   consumeConfirmation(conversationId: string, confirmationId: string): ConversationConfirmation | undefined;
 }
@@ -99,8 +108,6 @@ interface ConfirmationRow {
   consumed_at: string | null;
 }
 
-const DEFAULT_CONVERSATION_TITLE = "New conversation";
-
 export function createConversationRepository(database: SqliteDatabase): ConversationRepository {
   const insertSession = database.prepare(`
     INSERT INTO conversation_sessions (id, title, created_at, updated_at)
@@ -111,6 +118,17 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
     VALUES (?, ?, ?, ?)
   `);
   const findSession = database.prepare("SELECT * FROM conversation_sessions WHERE id = ?");
+  const listSessions = database.prepare(`
+    SELECT * FROM conversation_sessions
+    ORDER BY updated_at DESC, created_at DESC, id DESC
+  `);
+  const deleteSession = database.prepare("DELETE FROM conversation_sessions WHERE id = ?");
+  const countSessions = database.prepare("SELECT COUNT(*) AS count FROM conversation_sessions");
+  const deleteAllSessions = database.prepare("DELETE FROM conversation_sessions");
+  const updateDefaultTitle = database.prepare(`
+    UPDATE conversation_sessions SET title = ?
+    WHERE id = ? AND title IN (?, ?)
+  `);
   const findJobMatchSession = database.prepare("SELECT id FROM job_match_sessions WHERE id = ?");
   const insertJobMatchSessionLink = database.prepare(`
     INSERT INTO conversation_job_match_sessions
@@ -166,6 +184,12 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
   const findConfirmation = database.prepare(`
     SELECT * FROM conversation_confirmations
     WHERE confirmation_id = ?
+  `);
+  const findPendingConfirmation = database.prepare(`
+    SELECT * FROM conversation_confirmations
+    WHERE conversation_id = ? AND status = 'pending'
+    ORDER BY created_at DESC, rowid DESC
+    LIMIT 1
   `);
   const insertConfirmation = database.prepare(`
     INSERT INTO conversation_confirmations
@@ -259,7 +283,7 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
     context: ConversationContext;
     response: ConversationTurnResponse;
   }): ConversationTurnRecord => {
-    requireSession(findSession.get(input.conversationId) as SessionRow | undefined);
+    const sessionRow = requireSession(findSession.get(input.conversationId) as SessionRow | undefined);
     validateRequestId(input.requestId);
     const existing = findTurn.get(input.conversationId, input.requestId) as TurnRow | undefined;
     if (existing !== undefined) {
@@ -292,24 +316,34 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
     const response = ConversationTurnResponseSchema.parse(input.response);
     if (response.context.version !== context.version) throw new Error("conversation_context_conflict");
     if (response.message.id !== input.assistantMessage.id) throw new Error("conversation_message_mismatch");
+    const completedAt = new Date().toISOString();
+    if (input.expectedSequence === 0
+      && (sessionRow.title === DEFAULT_CONVERSATION_TITLE || sessionRow.title === LEGACY_CONVERSATION_TITLE)) {
+      updateDefaultTitle.run(
+        conversationTitleFromFirstMessage(input.userMessage.text),
+        input.conversationId,
+        DEFAULT_CONVERSATION_TITLE,
+        LEGACY_CONVERSATION_TITLE
+      );
+    }
     insertStoredMessage(input.userMessage);
     insertStoredMessage(input.assistantMessage);
     if (updateContextRow.run(
       context.version,
       JSON.stringify(context),
-      new Date().toISOString(),
+      completedAt,
       input.conversationId,
       input.expectedContextVersion
     ).changes !== 1) {
       throw new Error("conversation_context_conflict");
     }
-    touchSession.run(new Date().toISOString(), input.conversationId);
-    insertTurn.run(input.conversationId, input.requestId, input.inputText, JSON.stringify(response), new Date().toISOString());
+    touchSession.run(completedAt, input.conversationId);
+    insertTurn.run(input.conversationId, input.requestId, input.inputText, JSON.stringify(response), completedAt);
     return {
       requestId: input.requestId,
       inputText: input.inputText,
       response,
-      createdAt: new Date().toISOString()
+      createdAt: completedAt
     };
   });
 
@@ -346,6 +380,23 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
     getConversation(id) {
       const row = findSession.get(id) as SessionRow | undefined;
       return row ? fromSessionRow(row) : undefined;
+    },
+
+    listConversations() {
+      return (listSessions.all() as SessionRow[]).map(fromSessionRow);
+    },
+
+    deleteConversation(id) {
+      validateConversationId(id);
+      return deleteSession.run(id).changes === 1;
+    },
+
+    deleteAllConversations() {
+      return database.transaction(() => {
+        const count = (countSessions.get() as { count: number }).count;
+        deleteAllSessions.run();
+        return count;
+      })();
     },
 
     linkJobMatchSession(conversationId, sessionId) {
@@ -443,6 +494,14 @@ export function createConversationRepository(database: SqliteDatabase): Conversa
       }
     },
 
+    findPendingConfirmation(conversationId) {
+      requireSession(findSession.get(conversationId) as SessionRow | undefined);
+      const row = findPendingConfirmation.get(conversationId) as ConfirmationRow | undefined;
+      return row === undefined
+        ? undefined
+        : ConversationConfirmationSchema.parse(parseJson(row.payload_json, "conversation_confirmation_corrupt"));
+    },
+
     peekConfirmation(conversationId, confirmationId) {
       requireSession(findSession.get(conversationId) as SessionRow | undefined);
       const row = findConfirmation.get(confirmationId) as ConfirmationRow | undefined;
@@ -516,6 +575,10 @@ function parseJson(value: string, errorCode: string): unknown {
 function requireSession(row: SessionRow | undefined): SessionRow {
   if (!row) throw new Error("conversation_not_found");
   return row;
+}
+
+function validateConversationId(value: string): void {
+  ConversationSessionSchema.shape.id.parse(value);
 }
 
 function validateRequestId(value: string): void {

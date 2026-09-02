@@ -1,8 +1,39 @@
 import Database from "better-sqlite3";
 import { describe, expect, it } from "vitest";
+import { conversationTitleFromFirstMessage } from "../conversations/conversation-title.js";
 import { migrateDatabase } from "./migrate.js";
 
 describe("migrateDatabase", () => {
+  it("backfills legacy conversation titles from the first user message only", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    database.prepare(`
+      INSERT INTO conversation_sessions (id, title, created_at, updated_at)
+      VALUES (?, ?, ?, ?), (?, ?, ?, ?), (?, ?, ?, ?)
+    `).run(
+      "legacy-with-message", "New conversation", "2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z",
+      "legacy-empty", "New conversation", "2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z",
+      "custom-title", "用户命名", "2026-09-01T00:00:00.000Z", "2026-09-01T00:00:00.000Z"
+    );
+    database.prepare(`
+      INSERT INTO conversation_messages
+        (id, session_id, sequence, role, text, cards_json, intent_json, created_at)
+      VALUES (?, ?, 1, 'user', ?, '[]', NULL, ?)
+    `).run(
+      "legacy-message", "legacy-with-message", "  帮我   投递百度校园招聘  ", "2026-09-01T00:00:00.000Z"
+    );
+
+    migrateDatabase(database);
+
+    expect(database.prepare("SELECT title FROM conversation_sessions WHERE id = ?").get("legacy-with-message"))
+      .toEqual({ title: conversationTitleFromFirstMessage("  帮我   投递百度校园招聘  ") });
+    expect(database.prepare("SELECT title FROM conversation_sessions WHERE id = ?").get("legacy-empty"))
+      .toEqual({ title: "新会话" });
+    expect(database.prepare("SELECT title FROM conversation_sessions WHERE id = ?").get("custom-title"))
+      .toEqual({ title: "用户命名" });
+    database.close();
+  });
+
   it("creates conversation persistence tables and indexes idempotently", () => {
     const database = new Database(":memory:");
 
