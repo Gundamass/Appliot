@@ -14,9 +14,11 @@ import type {
   InvocationPermitExpected,
   InvocationPermitVerifier
 } from "../policy/invocation-permit.js";
+import type { CallerAttestationVerifier } from "../policy/caller-attestation.js";
 
 export interface CapabilityInvokeContext {
   caller?: CapabilityCaller;
+  callerAttestation?: unknown;
   runId: string;
   executionEpoch: number;
   signal?: AbortSignal;
@@ -37,23 +39,36 @@ export interface CapabilityCatalog {
 }
 
 const MAX_IDEMPOTENCY_RESULTS = 1_000;
-const permitVerifiers = new WeakMap<object, InvocationPermitVerifier>();
+const policyBindings = new WeakMap<object, {
+  permitVerifier: InvocationPermitVerifier;
+  callerAttestationVerifier?: CallerAttestationVerifier;
+}>();
 
 export function bindCapabilityCatalogPolicy(
   catalog: CapabilityCatalog,
-  verifier: InvocationPermitVerifier
+  verifier: InvocationPermitVerifier,
+  callerAttestationVerifier?: CallerAttestationVerifier
 ): void {
-  const current = permitVerifiers.get(catalog);
+  const current = policyBindings.get(catalog);
   if (current !== undefined) {
-    if (current !== verifier) throw new Error("capability_policy_already_bound");
+    if (current.permitVerifier !== verifier
+      || current.callerAttestationVerifier !== callerAttestationVerifier) {
+      throw new Error("capability_policy_already_bound");
+    }
     return;
   }
-  permitVerifiers.set(catalog, verifier);
+  policyBindings.set(catalog, {
+    permitVerifier: verifier,
+    ...(callerAttestationVerifier === undefined ? {} : { callerAttestationVerifier })
+  });
 }
 
 export function createCapabilityCatalog(
   definitions: readonly AnyCapabilityDefinition[],
-  options: { permitVerifier?: InvocationPermitVerifier } = {}
+  options: {
+    permitVerifier?: InvocationPermitVerifier;
+    callerAttestationVerifier?: CallerAttestationVerifier;
+  } = {}
 ): CapabilityCatalog {
   const byName = new Map<string, AnyCapabilityDefinition>();
   for (const definition of definitions) {
@@ -70,10 +85,6 @@ export function createCapabilityCatalog(
   const invoke = async (name: string, input: unknown, context: CapabilityInvokeContext): Promise<unknown> => {
     const definition = byName.get(name);
     if (definition === undefined) throw new Error("capability_not_found");
-    const caller = CapabilityCallerSchema.safeParse(context.caller ?? "graph");
-    if (!caller.success || !definition.descriptor.allowedCallers.includes(caller.data)) {
-      throw new Error("capability_caller_not_allowed");
-    }
     if (!Number.isInteger(context.executionEpoch) || context.executionEpoch < 0) {
       throw new Error("capability_execution_epoch_invalid");
     }
@@ -83,15 +94,32 @@ export function createCapabilityCatalog(
     if (!jsonInput.success) throw new Error("capability_input_invalid");
     const rawContext = context as CapabilityInvokeContext & { approval?: unknown };
     if (rawContext.approval !== undefined) throw new Error("capability_approval_credential_forbidden");
-    const verifier = permitVerifiers.get(catalog);
-    if (verifier === undefined) throw new Error("capability_policy_required");
+    const binding = policyBindings.get(catalog);
+    if (binding === undefined) throw new Error("capability_policy_required");
+    if (binding.callerAttestationVerifier === undefined) {
+      throw new Error("capability_caller_attestation_required");
+    }
+    const callerVerification = binding.callerAttestationVerifier.verify(context.callerAttestation);
+    if (!callerVerification.valid) throw new Error(callerVerification.reason);
+    if (typeof context.callerAttestation !== "string") {
+      throw new Error("capability_caller_attestation_invalid");
+    }
+    const caller = CapabilityCallerSchema.safeParse(context.caller);
+    if (context.caller !== undefined && (!caller.success || caller.data !== callerVerification.caller)) {
+      throw new Error("capability_caller_attestation_mismatch");
+    }
+    if (!definition.descriptor.allowedCallers.includes(callerVerification.caller)) {
+      throw new Error("capability_caller_not_allowed");
+    }
+    const verifier = binding.permitVerifier;
     const expected: InvocationPermitExpected = {
       capability: definition.descriptor.name,
       version: definition.descriptor.version,
-      caller: caller.data,
+      caller: callerVerification.caller,
       runId: context.runId,
       executionEpoch: context.executionEpoch,
       input: jsonInput.data,
+      callerAttestation: context.callerAttestation as string,
       ...(context.idempotencyKey === undefined ? {} : { idempotencyKey: context.idempotencyKey })
     };
     const verified = verifier.verifyAndConsume(context.permit, expected);
@@ -102,7 +130,7 @@ export function createCapabilityCatalog(
       throw new Error(reason);
     }
     const invocation = createInvocation(definition, jsonInput.data, {
-      caller: caller.data,
+      caller: callerVerification.caller,
       runId: context.runId,
       ...(context.idempotencyKey === undefined ? {} : { idempotencyKey: context.idempotencyKey }),
       invocationId: verified.invocationId
@@ -125,6 +153,9 @@ export function createCapabilityCatalog(
         }
         return existing.operation;
       }
+      if (idempotencyResults.size >= MAX_IDEMPOTENCY_RESULTS) {
+        throw new Error("capability_idempotency_capacity_exceeded");
+      }
     }
 
     const operation = invokeWithTimeout(definition, parsedInput.data, {
@@ -136,10 +167,6 @@ export function createCapabilityCatalog(
       ...(invocation.idempotencyKey === undefined ? {} : { idempotencyKey: invocation.idempotencyKey }),
     });
     if (cacheKey !== undefined) {
-      if (idempotencyResults.size >= MAX_IDEMPOTENCY_RESULTS) {
-        const oldest = idempotencyResults.keys().next().value as string | undefined;
-        if (oldest !== undefined) idempotencyResults.delete(oldest);
-      }
       idempotencyResults.set(cacheKey, { inputFingerprint: inputFingerprint!, operation });
     }
     return operation;
@@ -156,7 +183,9 @@ export function createCapabilityCatalog(
     describe: (name: string) => byName.get(name)?.descriptor,
     invoke
   });
-  if (options.permitVerifier !== undefined) bindCapabilityCatalogPolicy(catalog, options.permitVerifier);
+  if (options.permitVerifier !== undefined) {
+    bindCapabilityCatalogPolicy(catalog, options.permitVerifier, options.callerAttestationVerifier);
+  }
   return catalog;
 }
 
@@ -190,7 +219,16 @@ async function invokeWithTimeout(
     rejectTimeout(new Error("capability_timeout"));
   }, definition.descriptor.timeoutMs);
   try {
-    const operation = Promise.resolve().then(() => definition.handler(input, { ...context, signal: controller.signal }));
+    const operation = context.signal.aborted
+      ? Promise.reject(new Error("capability_cancelled"))
+      : (() => {
+        if (context.signal.aborted) return Promise.reject(new Error("capability_cancelled"));
+        try {
+          return Promise.resolve(definition.handler(input, { ...context, signal: controller.signal }));
+        } catch (error) {
+          return Promise.reject(error);
+        }
+      })();
     const result = await Promise.race([operation, timeout, cancellation]);
     if (timedOut) throw new Error("capability_timeout");
     if (context.signal.aborted) throw new Error("capability_cancelled");

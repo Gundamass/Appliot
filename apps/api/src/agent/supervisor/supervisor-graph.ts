@@ -15,6 +15,7 @@ import {
   type SupervisorDecision
 } from "@resume/contracts";
 import type { CapabilityCatalog } from "../capabilities/catalog.js";
+import type { CallerAttestationToken } from "../policy/caller-attestation.js";
 import type { PolicyEngine } from "../policy/policy-engine.js";
 import type { Planner } from "./planner.js";
 import type { PlanValidator } from "./plan-validator.js";
@@ -30,6 +31,8 @@ export interface SpecialistExecutionInput {
   readonly executionEpoch: number;
   readonly signal: AbortSignal;
   readonly humanResume?: RuntimeHumanResume;
+  /** Issued for the specialist-agent boundary by the trusted root. */
+  readonly callerAttestation?: CallerAttestationToken;
 }
 
 export interface SpecialistExecutionResult {
@@ -82,6 +85,10 @@ export interface SupervisorGraphDependencies {
   readonly agents?: SpecialistAgentRegistry;
   readonly catalog?: CapabilityCatalog;
   readonly policy?: PolicyEngine;
+  /** Issued by the trusted composition root; never derived from model output. */
+  readonly callerAttestation?: CallerAttestationToken;
+  /** Separate from the graph token; never reuse a graph identity for agents. */
+  readonly specialistCallerAttestation?: CallerAttestationToken;
   readonly checkpointer?: BaseCheckpointSaver;
   readonly executionEpoch?: number;
   readonly maxIterations?: number;
@@ -237,7 +244,10 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
             decision,
             executionEpoch: dependencies.executionEpoch ?? 0,
             signal: controller.signal,
-            ...(resume === undefined ? {} : { humanResume: resume })
+            ...(resume === undefined ? {} : { humanResume: resume }),
+            ...(dependencies.specialistCallerAttestation === undefined
+              ? {}
+              : { callerAttestation: dependencies.specialistCallerAttestation })
           });
         } else if (decision.type === "invoke_tool") {
           if (dependencies.catalog === undefined) return failure("capability_catalog_unavailable", undefined, "blocked");
@@ -261,6 +271,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
           if (!authorization.allowed) return failure(`policy_${authorization.reason}`, undefined, "blocked");
           await dependencies.catalog.invoke(decision.capability, authorization.input, {
             caller: "graph",
+            callerAttestation: dependencies.callerAttestation,
             runId: state.runId,
             executionEpoch: dependencies.executionEpoch ?? 0,
             signal: controller.signal,

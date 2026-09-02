@@ -16,6 +16,7 @@ const PermitClaimsSchema = z.object({
   runId: z.string().min(1).max(128),
   executionEpoch: z.number().int().nonnegative(),
   inputHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  callerAttestationHash: z.string().regex(/^[a-f0-9]{64}$/u),
   idempotencyKey: z.string().min(1).max(256).optional(),
   expiresAt: z.number().int().positive()
 }).strict();
@@ -29,6 +30,7 @@ export interface InvocationPermitRequest {
   runId: string;
   executionEpoch: number;
   input: JsonValue;
+  callerAttestation: string;
   idempotencyKey?: string;
   onConsume?: () => boolean;
 }
@@ -40,6 +42,7 @@ export interface InvocationPermitExpected {
   runId: string;
   executionEpoch: number;
   input: JsonValue;
+  callerAttestation: string;
   idempotencyKey?: string;
 }
 
@@ -95,6 +98,7 @@ export function createInvocationPermitAuthority(options: {
         runId: input.runId,
         executionEpoch: input.executionEpoch,
         inputHash: hashJson(parsedInput),
+        callerAttestationHash: hashString(input.callerAttestation),
         ...(input.idempotencyKey === undefined ? {} : { idempotencyKey: input.idempotencyKey }),
         expiresAt: now() + ttlMs
       });
@@ -172,11 +176,16 @@ function sameExpected(claims: PermitClaims, expected: InvocationPermitExpected):
     && claims.runId === expected.runId
     && claims.executionEpoch === expected.executionEpoch
     && claims.inputHash === hashJson(expected.input)
+    && claims.callerAttestationHash === hashString(expected.callerAttestation)
     && claims.idempotencyKey === expected.idempotencyKey;
 }
 
 function hashJson(value: JsonValue): string {
   return createHash("sha256").update(canonicalJson(value), "utf8").digest("hex");
+}
+
+function hashString(value: string): string {
+  return createHash("sha256").update(value, "utf8").digest("hex");
 }
 
 function signature(body: string, key: Uint8Array): string {

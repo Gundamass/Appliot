@@ -32,10 +32,13 @@ const PATTERNS: readonly [string, RegExp][] = [
 export function createInjectionDetector(): InjectionDetector {
   return {
     detect(input) {
+      // Source labels are supplied by untrusted payloads and therefore cannot
+      // establish provenance. Every detector input is treated as external
+      // data, including objects that claim to be system or user content.
       const normalized = typeof input === "string"
         ? { source: "external" as const, content: input }
-        : input;
-      const content = normalized.content.normalize("NFKC").slice(0, MAX_CONTENT_LENGTH);
+        : { source: "external" as const, content: input.content };
+      const content = normalized.content.normalize("NFKC");
       const signals = PATTERNS.filter(([, pattern]) => pattern.test(content)).map(([signal]) => signal);
       const detected = normalized.source === "external" && signals.length > 0;
       const score = Math.min(1, signals.length / 3);
@@ -44,8 +47,8 @@ export function createInjectionDetector(): InjectionDetector {
       // into an automatic permission decision.
       const action = detected ? "pause" : "allow";
       return {
-        source: normalized.source,
-        trusted: normalized.source !== "external",
+        source: "external",
+        trusted: false,
         detected,
         score,
         signals,

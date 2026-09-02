@@ -39,6 +39,7 @@ import {
 } from "./runtime-state.js";
 import { DEFAULT_BUDGET_LIMITS } from "./budget-manager.js";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
+import type { CallerAttestationToken } from "../policy/caller-attestation.js";
 
 export interface AgentRuntime {
   start(input: AgentRunInput | z.input<typeof AgentRunInputSchema>): Promise<AgentRunResult>;
@@ -57,6 +58,8 @@ export interface AgentRuntimeDependencies {
   checkpointStore?: RuntimeCheckpointStore;
   artifactStore?: RuntimeArtifactStore;
   cancellationManager?: CancellationManager;
+  /** Issued by the trusted composition root; never accepted from AgentRunInput. */
+  callerAttestation?: CallerAttestationToken;
   langGraphCheckpointer?: BaseCheckpointSaver;
   budgetLimits?: Partial<BudgetLimits>;
   idFactory?: () => string;
@@ -81,6 +84,9 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies): Agen
     checkpointStore,
     artifactStore,
     cancellationManager,
+    ...(dependencies.callerAttestation === undefined
+      ? {}
+      : { callerAttestation: dependencies.callerAttestation }),
     ...(dependencies.langGraphCheckpointer === undefined ? {} : { langGraphCheckpointer: dependencies.langGraphCheckpointer }),
     idFactory,
     now,

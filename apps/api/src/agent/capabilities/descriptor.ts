@@ -38,13 +38,21 @@ export interface DefineCapabilityInput<Input, Output> {
 export function defineCapability<Input, Output>(
   definition: DefineCapabilityInput<Input, Output>
 ): CapabilityDefinition<Input, Output> {
-  const descriptor = CapabilityDescriptorSchema.parse(definition.descriptor);
+  const descriptor = deepFreeze(CapabilityDescriptorSchema.parse(definition.descriptor));
   return Object.freeze({
     descriptor,
     inputSchema: definition.inputSchema,
     outputSchema: definition.outputSchema,
     handler: definition.handler
   });
+}
+
+function deepFreeze<T>(value: T): T {
+  if (value === null || typeof value !== "object") return value;
+  for (const key of Reflect.ownKeys(value)) {
+    deepFreeze((value as Record<PropertyKey, unknown>)[key]);
+  }
+  return Object.freeze(value);
 }
 
 export function createInvocation(

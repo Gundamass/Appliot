@@ -16,6 +16,12 @@ import {
 } from "@resume/rag";
 import { createApplicationTools } from "./agent/application-tools.js";
 import { createGraphService } from "./agent/graph-service.js";
+import {
+  createCallerAttestationAuthority,
+  issueCallerAttestationTokens,
+  type CallerAttestationTokens,
+  type CallerAttestationVerifier
+} from "./agent/policy/caller-attestation.js";
 import { SqliteAgentCheckpointer } from "./agent/sqlite-checkpointer.js";
 import { createApplicationExecutionSubgraph } from "./agent/subgraphs/application-execution.js";
 import { createApplicationService } from "./applications/application-service.js";
@@ -93,6 +99,10 @@ export interface ProductionDependencies extends AppDependencies {
   browserOwnershipLease: BrowserOwnershipLease;
   evidenceRetrieval: EvidenceRetrievalPort;
   agentToolRegistry: RestrictedToolRegistry;
+  /** Scoped, opaque caller tokens issued once by this trusted composition root. */
+  agentCallerAttestations: CallerAttestationTokens;
+  /** Verifier paired with the scoped tokens; never exposed to model code. */
+  agentCallerAttestationVerifier: CallerAttestationVerifier;
   conversationService: ConversationService;
   conversationJobMatchService: ConversationJobMatchService;
 }
@@ -120,6 +130,11 @@ export function createProductionDependencies(
     const conversationProcessEvents = createConversationProcessEventBus(database);
     const originalsDirectory = resolve(dirname(resolve(config.databaseFile)), "originals");
     const approvalKey = randomBytes(32);
+    const callerAttestationAuthority = createCallerAttestationAuthority({
+      signingKey: randomBytes(32),
+      ttlMs: 15 * 60_000
+    });
+    const agentCallerAttestations = issueCallerAttestationTokens(callerAttestationAuthority.issuer);
     const actionPolicy = new ActionPolicy(approvalKey);
     type BrowserClient = ProductionBrowserClient;
     const bundledWorkerEntry = new URL(import.meta.url).pathname.endsWith("/dist/server.js")
@@ -554,6 +569,8 @@ export function createProductionDependencies(
       jobMatchTrace,
       evidenceRetrieval,
       agentToolRegistry,
+      agentCallerAttestations,
+      agentCallerAttestationVerifier: callerAttestationAuthority.verifier,
       conversationService,
       conversationJobMatchService,
       conversationProcessEvents,

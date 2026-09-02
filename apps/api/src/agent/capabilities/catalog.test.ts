@@ -1,12 +1,28 @@
-import { describe, expect, it } from "vitest";
+import { describe, expect, it, vi } from "vitest";
 import { z } from "zod";
 import { createCapabilityCatalog } from "./catalog.js";
 import { defineCapability } from "./descriptor.js";
 import { createApprovalSystem } from "../policy/approval-gate.js";
+import { createCallerAttestationAuthority } from "../policy/caller-attestation.js";
 import { createPolicyEngine } from "../policy/policy-engine.js";
 
+const callerAttestations = createCallerAttestationAuthority({
+  signingKey: Buffer.alloc(32, 23)
+});
+const callerTokens = new Map<string, string>();
+
 function context(caller: "graph" | "specialist_agent" | "supervisor" | "runtime") {
-  return { caller, runId: "run-1", executionEpoch: 0 } as const;
+  let callerAttestation = callerTokens.get(caller);
+  if (callerAttestation === undefined) {
+    callerAttestation = callerAttestations.issuer.issue(caller);
+    callerTokens.set(caller, callerAttestation);
+  }
+  return {
+    caller,
+    callerAttestation,
+    runId: "run-1",
+    executionEpoch: 0
+  } as const;
 }
 
 function authorize(catalog: ReturnType<typeof createCapabilityCatalog>) {
@@ -15,7 +31,8 @@ function authorize(catalog: ReturnType<typeof createCapabilityCatalog>) {
     approvalGate: createApprovalSystem({
       signingKey: Buffer.alloc(32, 11),
       verifyHumanPrincipal: () => ({ subject: "user-1" })
-    }).gate
+    }).gate,
+    callerAttestationVerifier: callerAttestations.verifier
   });
 }
 
@@ -253,5 +270,119 @@ describe("CapabilityCatalog", () => {
       executionEpoch: 1,
       permit: decision.permit
     })).rejects.toThrow("capability_authorization_mismatch");
+  });
+
+  it("does not start a handler when the caller is already aborted", async () => {
+    const controller = new AbortController();
+    controller.abort("cancelled-before-invoke");
+    const handler = vi.fn(async () => ({ done: true }));
+    const catalog = createCapabilityCatalog([
+      defineCapability({
+        descriptor: {
+          name: "already.cancelled",
+          version: "1.0.0",
+          kind: "read",
+          risk: "low",
+          sideEffect: "none",
+          allowedCallers: ["graph"],
+          requiresApproval: false,
+          idempotency: "none",
+          timeoutMs: 5_000
+        },
+        inputSchema: z.object({}).strict(),
+        outputSchema: z.object({ done: z.boolean() }).strict(),
+        handler
+      })
+    ]);
+    const policy = authorize(catalog);
+    const decision = await policy.authorize({
+      caller: "graph",
+      capability: "already.cancelled",
+      input: {},
+      context: context("graph")
+    });
+    if (!decision.allowed) throw new Error("expected_already_cancelled_authorization");
+
+    await expect(catalog.invoke("already.cancelled", decision.input, {
+      ...context("graph"),
+      signal: controller.signal,
+      permit: decision.permit
+    })).rejects.toThrow("capability_cancelled");
+    expect(handler).not.toHaveBeenCalled();
+  });
+
+  it("preserves old keyed idempotency records instead of evicting them at capacity", async () => {
+    let calls = 0;
+    const catalog = createCapabilityCatalog([
+      defineCapability({
+        descriptor: {
+          name: "bounded.keyed",
+          version: "1.0.0",
+          kind: "act",
+          risk: "medium",
+          sideEffect: "reversible",
+          allowedCallers: ["graph"],
+          requiresApproval: false,
+          idempotency: "keyed",
+          timeoutMs: 5_000
+        },
+        inputSchema: z.object({ value: z.number().int().nonnegative() }).strict(),
+        outputSchema: z.object({ value: z.number().int().nonnegative() }).strict(),
+        handler: async (input) => { calls += 1; return input; }
+      })
+    ]);
+    const policy = authorize(catalog);
+    const authorizeAndInvoke = async (value: number, idempotencyKey: string) => {
+      const decision = await policy.authorize({
+        caller: "graph",
+        capability: "bounded.keyed",
+        input: { value },
+        context: { ...context("graph"), idempotencyKey }
+      });
+      if (!decision.allowed) throw new Error(`expected_authorization:${idempotencyKey}`);
+      return catalog.invoke("bounded.keyed", decision.input, {
+        ...context("graph"),
+        idempotencyKey,
+        permit: decision.permit
+      });
+    };
+
+    await authorizeAndInvoke(0, "key-0");
+    for (let index = 1; index < 1_000; index += 1) {
+      await authorizeAndInvoke(index, `key-${index}`);
+    }
+    await expect(authorizeAndInvoke(0, "key-0")).resolves.toEqual({ value: 0 });
+    await expect(authorizeAndInvoke(1_000, "key-1000")).rejects.toThrow("capability_idempotency_capacity_exceeded");
+    expect(calls).toBe(1_000);
+  });
+
+  it("deeply freezes descriptor policy metadata", () => {
+    const catalog = createCapabilityCatalog([
+      defineCapability({
+        descriptor: {
+          name: "frozen.descriptor",
+          version: "1.0.0",
+          kind: "read",
+          risk: "low",
+          sideEffect: "none",
+          allowedCallers: ["graph"],
+          requiresApproval: false,
+          idempotency: "idempotent",
+          timeoutMs: 5_000,
+          inputSchema: { nested: { mutable: true } }
+        },
+        inputSchema: z.object({}).strict(),
+        outputSchema: z.object({ done: z.boolean() }).strict(),
+        handler: async () => ({ done: true })
+      })
+    ]);
+    const descriptor = catalog.describe("frozen.descriptor");
+    expect(descriptor).toBeDefined();
+    expect(Object.isFrozen(descriptor)).toBe(true);
+    expect(Object.isFrozen(descriptor!.allowedCallers)).toBe(true);
+    expect(Object.isFrozen(descriptor!.inputSchema)).toBe(true);
+    expect(Object.isFrozen((descriptor!.inputSchema as { nested: object }).nested)).toBe(true);
+    expect(() => descriptor!.allowedCallers.push("runtime")).toThrow();
+    expect(() => ((descriptor!.inputSchema as { nested: { mutable: boolean } }).nested.mutable = false)).toThrow();
   });
 });

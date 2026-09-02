@@ -6,6 +6,7 @@ import { z } from "zod";
 import { createCapabilityCatalog } from "../capabilities/catalog.js";
 import { defineCapability } from "../capabilities/descriptor.js";
 import { createApprovalSystem } from "../policy/approval-gate.js";
+import { createCallerAttestationAuthority } from "../policy/caller-attestation.js";
 import { createPolicyEngine } from "../policy/policy-engine.js";
 import { createSupervisorGraph } from "./supervisor-graph.js";
 import { createPlanValidator } from "./plan-validator.js";
@@ -161,12 +162,14 @@ describe("SupervisorGraph", () => {
       outputSchema: z.object({ ok: z.boolean() }).strict(),
       handler: async () => { calls += 1; return { ok: true }; }
     })]);
+    const callerAttestations = createCallerAttestationAuthority({ signingKey: Buffer.alloc(32, 37) });
     const policy = createPolicyEngine({
       catalog,
       approvalGate: createApprovalSystem({
         signingKey: Buffer.alloc(32, 5),
         verifyHumanPrincipal: () => ({ subject: "user-1" })
-      }).gate
+      }).gate,
+      callerAttestationVerifier: callerAttestations.verifier
     });
     const plan = PlanStateSchema.parse({
       planId: "plan-tool",
@@ -198,6 +201,7 @@ describe("SupervisorGraph", () => {
       planValidator: createPlanValidator({ capabilityNames: ["data.read"] }),
       catalog,
       policy,
+      callerAttestation: callerAttestations.issuer.issue("graph"),
       checkpointer: new MemorySaver()
     });
     const result = await graph.invoke({

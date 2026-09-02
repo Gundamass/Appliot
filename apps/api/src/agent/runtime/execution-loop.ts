@@ -31,6 +31,7 @@ import { createClarificationManager } from "../intent/clarification-manager.js";
 import { BudgetExceededError, createBudgetManager, type BudgetManager } from "./budget-manager.js";
 import type { CancellationManager } from "./cancellation-manager.js";
 import { CHECKPOINT_VERSION, type RuntimeCheckpointStore } from "./checkpoint-store.js";
+import type { CallerAttestationToken } from "../policy/caller-attestation.js";
 import {
   RuntimeGraphStateAnnotation,
   RuntimeGraphStateSchema,
@@ -60,6 +61,8 @@ export interface RuntimeExecutorInput {
   humanResume?: RuntimeHumanResume | undefined;
   signal: AbortSignal;
   executionEpoch: number;
+  /** Issued by the trusted composition root for the Runtime caller. */
+  callerAttestation?: CallerAttestationToken;
 }
 
 export interface RuntimeExecutorResult {
@@ -104,6 +107,8 @@ export interface ExecutionLoopDependencies {
   checkpointStore: RuntimeCheckpointStore;
   artifactStore: RuntimeArtifactStore;
   cancellationManager: CancellationManager;
+  /** Opaque Runtime caller token; never derived from model output. */
+  callerAttestation?: CallerAttestationToken;
   supervisor?: RuntimeSupervisor;
   langGraphCheckpointer?: BaseCheckpointSaver;
   clarificationManager?: ReturnType<typeof createClarificationManager>;
@@ -284,7 +289,10 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
           decision,
           ...(state.transientHumanResume === undefined ? {} : { humanResume: state.transientHumanResume }),
           signal: deadline.signal,
-          executionEpoch: runtimeContext.executionEpoch
+          executionEpoch: runtimeContext.executionEpoch,
+          ...(dependencies.callerAttestation === undefined
+            ? {}
+            : { callerAttestation: dependencies.callerAttestation })
         });
       } catch (error) {
         if (deadline.expired()) {

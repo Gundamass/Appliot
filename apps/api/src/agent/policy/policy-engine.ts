@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   CapabilityCallerSchema,
   JsonValueSchema,
@@ -11,6 +12,7 @@ import {
   createInvocationPermitAuthority,
   type InvocationPermitAuthority
 } from "./invocation-permit.js";
+import type { CallerAttestationVerifier } from "./caller-attestation.js";
 import { createRiskClassifier, type RiskClassification, type RiskClassifier } from "./risk-classifier.js";
 
 export interface PolicyAuthorizeInput {
@@ -24,6 +26,7 @@ export interface PolicyAuthorizeInput {
     snapshotId?: string;
     targetFingerprint?: string;
     payloadHash?: string;
+    callerAttestation?: unknown;
     approval?: unknown;
     signal?: AbortSignal;
     idempotencyKey?: string;
@@ -45,6 +48,10 @@ export type PolicyDenyReason =
   | "payload_hash_invalid"
   | "payload_hash_mismatch"
   | "approval_binding_mismatch"
+  | "caller_attestation_required"
+  | "caller_attestation_invalid"
+  | "caller_attestation_expired"
+  | "caller_attestation_mismatch"
   | "prompt_injection_detected"
   | "policy_blocked";
 
@@ -73,6 +80,7 @@ export interface PolicyEngineDependencies {
   catalog: CapabilityCatalog;
   approvalGate: ApprovalGate;
   permitAuthority?: InvocationPermitAuthority;
+  callerAttestationVerifier?: CallerAttestationVerifier;
   riskClassifier?: RiskClassifier;
   injectionDetector?: InjectionDetector;
 }
@@ -81,14 +89,31 @@ export function createPolicyEngine(dependencies: PolicyEngineDependencies): Poli
   const riskClassifier = dependencies.riskClassifier ?? createRiskClassifier();
   const injectionDetector = dependencies.injectionDetector ?? createInjectionDetector();
   const permitAuthority = dependencies.permitAuthority ?? createInvocationPermitAuthority();
-  bindCapabilityCatalogPolicy(dependencies.catalog, permitAuthority.verifier);
+  bindCapabilityCatalogPolicy(
+    dependencies.catalog,
+    permitAuthority.verifier,
+    dependencies.callerAttestationVerifier
+  );
 
   return {
     async authorize(request) {
       const descriptor = dependencies.catalog.describe(request.capability);
       if (descriptor === undefined) return { allowed: false, reason: "capability_not_found" };
+      if (dependencies.callerAttestationVerifier === undefined) {
+        return { allowed: false, reason: "caller_attestation_required", descriptor };
+      }
+      const callerVerification = dependencies.callerAttestationVerifier.verify(request.context?.callerAttestation);
+      if (!callerVerification.valid) {
+        return { allowed: false, reason: callerVerification.reason, descriptor };
+      }
+      if (typeof request.context?.callerAttestation !== "string") {
+        return { allowed: false, reason: "caller_attestation_invalid", descriptor };
+      }
       const caller = CapabilityCallerSchema.safeParse(request.caller);
-      if (!caller.success || !descriptor.allowedCallers.includes(request.caller)) {
+      if (!caller.success || caller.data !== callerVerification.caller) {
+        return { allowed: false, reason: "caller_attestation_mismatch", descriptor };
+      }
+      if (!descriptor.allowedCallers.includes(callerVerification.caller)) {
         return { allowed: false, reason: "caller_not_allowed", descriptor };
       }
       const definition = dependencies.catalog.get(request.capability);
@@ -105,6 +130,28 @@ export function createPolicyEngine(dependencies: PolicyEngineDependencies): Poli
       if (injection?.detected === true) {
         return { allowed: false, reason: "prompt_injection_detected", descriptor, injection };
       }
+      const actualPayloadHash = hashCapabilityPayload(jsonValue(parsedInput.data));
+      const declaredPayloadHash = readRecord(parsedInput.data)?.payloadHash;
+      if (declaredPayloadHash !== undefined && !isHash(declaredPayloadHash)) {
+        return { allowed: false, reason: "payload_hash_invalid", descriptor };
+      }
+      if (declaredPayloadHash !== undefined && declaredPayloadHash.toLowerCase() !== actualPayloadHash) {
+        return { allowed: false, reason: "payload_hash_mismatch", descriptor };
+      }
+      if (request.context?.payloadHash !== undefined && !isHash(request.context.payloadHash)) {
+        return { allowed: false, reason: "payload_hash_invalid", descriptor };
+      }
+      if (request.context?.payloadHash !== undefined
+        && request.context.payloadHash.toLowerCase() !== actualPayloadHash) {
+        return { allowed: false, reason: "payload_hash_mismatch", descriptor };
+      }
+      const embeddedPayloadHash = readExpected(readRecord(parsedInput.data)?.expected).payloadHash;
+      if (embeddedPayloadHash !== undefined && !isHash(embeddedPayloadHash)) {
+        return { allowed: false, reason: "payload_hash_invalid", descriptor };
+      }
+      if (embeddedPayloadHash !== undefined && embeddedPayloadHash.toLowerCase() !== actualPayloadHash) {
+        return { allowed: false, reason: "payload_hash_mismatch", descriptor };
+      }
       if (descriptor.idempotency === "keyed" && !isValidIdempotencyKey(request.context?.idempotencyKey)) {
         return { allowed: false, reason: "capability_idempotency_key_required", descriptor };
       }
@@ -117,7 +164,7 @@ export function createPolicyEngine(dependencies: PolicyEngineDependencies): Poli
       let approvalId: string | undefined;
       let onConsume: (() => boolean) | undefined;
       if (risk.requiresApproval) {
-        const binding = bindingFrom(request, parsedInput.data);
+        const binding = bindingFrom(request, parsedInput.data, actualPayloadHash);
         const approval = request.context?.approval ?? readRecord(parsedInput.data)?.approval;
         if (approval === undefined) return { allowed: false, reason: "approval_required", descriptor, risk };
         if (!hasCompleteBinding(binding)) {
@@ -138,6 +185,7 @@ export function createPolicyEngine(dependencies: PolicyEngineDependencies): Poli
         runId: request.context?.runId ?? "run-unknown",
         executionEpoch: request.context?.executionEpoch ?? 0,
         input: parsedInput.data,
+        callerAttestation: request.context?.callerAttestation as string,
         ...(request.context?.idempotencyKey === undefined ? {} : { idempotencyKey: request.context.idempotencyKey }),
         ...(onConsume === undefined ? {} : { onConsume })
       });
@@ -176,7 +224,7 @@ function readExpected(value: unknown): Partial<ApprovalBinding> {
   return expected;
 }
 
-function bindingFrom(request: PolicyAuthorizeInput, input: unknown): Partial<ApprovalBinding> {
+function bindingFrom(request: PolicyAuthorizeInput, input: unknown, actualPayloadHash: string): Partial<ApprovalBinding> {
   const record = readRecord(input);
   const context = request.context;
   const embedded = readExpected(record?.expected);
@@ -186,7 +234,7 @@ function bindingFrom(request: PolicyAuthorizeInput, input: unknown): Partial<App
   const executionEpoch = context?.executionEpoch ?? embedded.executionEpoch;
   const snapshotId = context?.snapshotId ?? embedded.snapshotId;
   const targetFingerprint = context?.targetFingerprint ?? embedded.targetFingerprint;
-  const payloadHash = context?.payloadHash ?? embedded.payloadHash;
+  const payloadHash = actualPayloadHash;
   if (runId !== undefined) binding.runId = runId;
   if (planRevision !== undefined) binding.planRevision = planRevision;
   if (executionEpoch !== undefined) binding.executionEpoch = executionEpoch;
@@ -194,6 +242,36 @@ function bindingFrom(request: PolicyAuthorizeInput, input: unknown): Partial<App
   if (targetFingerprint !== undefined) binding.targetFingerprint = targetFingerprint;
   if (payloadHash !== undefined) binding.payloadHash = payloadHash;
   return binding;
+}
+
+function isHash(value: unknown): value is string {
+  return typeof value === "string" && /^[a-f0-9]{64}$/iu.test(value);
+}
+
+function jsonValue(value: unknown): import("@resume/contracts").JsonValue {
+  return JsonValueSchema.parse(value);
+}
+
+export function hashCapabilityPayload(value: import("@resume/contracts").JsonValue): string {
+  return createHash("sha256").update(canonicalJson(payloadWithoutAuthorizationMetadata(value)), "utf8").digest("hex");
+}
+
+function payloadWithoutAuthorizationMetadata(value: import("@resume/contracts").JsonValue): import("@resume/contracts").JsonValue {
+  if (Array.isArray(value)) return value.map(payloadWithoutAuthorizationMetadata);
+  if (value === null || typeof value !== "object") return value;
+  const record = value as Record<string, import("@resume/contracts").JsonValue>;
+  return Object.fromEntries(
+    Object.entries(record)
+      .filter(([key]) => key !== "payloadHash" && key !== "approval" && key !== "expected")
+      .map(([key, nested]) => [key, payloadWithoutAuthorizationMetadata(nested)])
+  );
+}
+
+function canonicalJson(value: unknown): string {
+  if (value === null || typeof value !== "object") return JSON.stringify(value);
+  if (Array.isArray(value)) return `[${value.map(canonicalJson).join(",")}]`;
+  const record = value as Record<string, unknown>;
+  return `{${Object.keys(record).sort().map((key) => `${JSON.stringify(key)}:${canonicalJson(record[key])}`).join(",")}}`;
 }
 
 function hasCompleteBinding(binding: Partial<ApprovalBinding>): boolean {
@@ -206,25 +284,29 @@ function hasCompleteBinding(binding: Partial<ApprovalBinding>): boolean {
 }
 
 function detectExternalInjection(value: unknown, detector: InjectionDetector): InjectionDetection | undefined {
-  if (typeof value === "string") return undefined;
-  if (Array.isArray(value)) {
-    for (const item of value) {
-      const detected = detectExternalInjection(item, detector);
-      if (detected?.detected === true) return detected;
+  const findings: InjectionDetection[] = [];
+  const visit = (candidate: unknown): void => {
+    if (typeof candidate === "string") {
+      findings.push(detector.detect(candidate));
+      return;
     }
-    return undefined;
+    if (Array.isArray(candidate)) {
+      candidate.forEach(visit);
+      return;
+    }
+    const record = readRecord(candidate);
+    if (record === undefined) return;
+    Object.values(record).forEach(visit);
+  };
+  visit(value);
+  const detected = findings.filter((finding) => finding.detected);
+  if (detected.length > 0) {
+    const first = detected[0]!;
+    return {
+      ...first,
+      signals: [...new Set(detected.flatMap((finding) => finding.signals))],
+      score: Math.min(1, detected.reduce((total, finding) => total + finding.score, 0))
+    };
   }
-  const record = readRecord(value);
-  if (record === undefined) return undefined;
-  if (typeof record.externalContent === "string") {
-    return detector.detect({ source: "external", content: record.externalContent });
-  }
-  if (record.source === "external" && typeof record.content === "string") {
-    return detector.detect({ source: "external", content: record.content });
-  }
-  for (const nested of Object.values(record)) {
-    const detected = detectExternalInjection(nested, detector);
-    if (detected?.detected === true) return detected;
-  }
-  return undefined;
+  return findings[0];
 }
