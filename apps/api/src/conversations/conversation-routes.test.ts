@@ -116,6 +116,51 @@ describe("conversation routes", () => {
     });
   });
 
+  it("lists, deletes one, and clears all conversation sessions", async () => {
+    const service = fakeService();
+    const app = await buildApp(service);
+
+    const list = await app.inject({ method: "GET", url: "/api/conversations" });
+    const deleted = await app.inject({ method: "DELETE", url: "/api/conversations/session-1" });
+    const cleared = await app.inject({ method: "DELETE", url: "/api/conversations" });
+
+    expect(list.statusCode).toBe(200);
+    expect(list.json()).toEqual([service.session]);
+    expect(deleted.statusCode).toBe(204);
+    expect(deleted.body).toBe("");
+    expect(cleared.statusCode).toBe(200);
+    expect(cleared.json()).toEqual({ deletedCount: 2 });
+    expect(service.delete).toHaveBeenCalledWith("session-1");
+    expect(service.deleteAll).toHaveBeenCalledOnce();
+  });
+
+  it("maps a missing single-session deletion to 404", async () => {
+    const service = fakeService();
+    service.delete.mockImplementation(() => {
+      throw new Error("conversation_not_found");
+    });
+    const app = await buildApp(service);
+
+    const response = await app.inject({ method: "DELETE", url: "/api/conversations/missing" });
+
+    expect(response.statusCode).toBe(404);
+    expect(response.json()).toEqual({ error: "Conversation not found", code: "conversation_not_found" });
+  });
+
+  it("keeps clear-all idempotent when the history is already empty", async () => {
+    const service = fakeService();
+    service.deleteAll.mockReturnValueOnce({ deletedCount: 2 }).mockReturnValueOnce({ deletedCount: 0 });
+    const app = await buildApp(service);
+
+    const first = await app.inject({ method: "DELETE", url: "/api/conversations" });
+    const second = await app.inject({ method: "DELETE", url: "/api/conversations" });
+
+    expect(first.statusCode).toBe(200);
+    expect(first.json()).toEqual({ deletedCount: 2 });
+    expect(second.statusCode).toBe(200);
+    expect(second.json()).toEqual({ deletedCount: 0 });
+  });
+
   it("persists a turn and replays the same idempotency key without a second graph run", async () => {
     const database = new Database(":memory:");
     migrateDatabase(database);
@@ -284,6 +329,9 @@ function fakeService() {
   const service = {
     session,
     create: vi.fn(() => session),
+    list: vi.fn(() => [session]),
+    delete: vi.fn(),
+    deleteAll: vi.fn(() => ({ deletedCount: 2 })),
     get: vi.fn(() => ({ session, messages: [], context })),
     send: vi.fn(async () => graphOutput("session-1", context)),
     confirm: vi.fn(async () => graphOutput("session-1", context))

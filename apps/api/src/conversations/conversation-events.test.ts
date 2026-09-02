@@ -5,6 +5,41 @@ import { createConversationProcessEventBus, type ConversationProcessEventInput }
 import { createConversationRepository } from "./conversation-repository.js";
 
 describe("conversation process event bus", () => {
+  it("clears one in-memory conversation without affecting another", () => {
+    const bus = createConversationProcessEventBus();
+    bus.emit(eventInput("conversation-a"));
+    bus.emit(eventInput("conversation-b"));
+
+    bus.clearConversation("conversation-a");
+
+    expect(bus.replay("conversation-a").events).toEqual([]);
+    expect(bus.replay("conversation-b").events).toHaveLength(1);
+
+    bus.clearAll();
+
+    expect(bus.replay("conversation-b").events).toEqual([]);
+  });
+
+  it("clears SQLite events and replay cursors for one conversation", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const conversation = createConversationRepository(database).createConversation();
+    const bus = createConversationProcessEventBus(database, { historyLimit: 1 });
+    bus.emit(eventInput(conversation.id, { stepId: "step-1" }));
+    bus.emit(eventInput(conversation.id, { stepId: "step-2" }));
+
+    expect(database.prepare("SELECT * FROM conversation_process_event_cursors WHERE conversation_id = ?")
+      .get(conversation.id)).toBeDefined();
+
+    bus.clearConversation(conversation.id);
+
+    expect(database.prepare("SELECT * FROM conversation_process_events WHERE conversation_id = ?")
+      .all(conversation.id)).toEqual([]);
+    expect(database.prepare("SELECT * FROM conversation_process_event_cursors WHERE conversation_id = ?")
+      .all(conversation.id)).toEqual([]);
+    database.close();
+  });
+
   it("persists process events and replays them after the bus is recreated", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

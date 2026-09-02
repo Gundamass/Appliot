@@ -12,6 +12,49 @@ import { migrateDatabase } from "../db/migrate.js";
 import { createConversationRepository } from "./conversation-repository.js";
 
 describe("conversation service confirmation input", () => {
+  it("lists conversations and coordinates single and full history deletion", () => {
+    const sessions = [
+      ConversationSessionSchema.parse({
+        id: "conversation-1",
+        title: "会话一",
+        createdAt: "2026-08-24T00:00:00.000Z",
+        updatedAt: "2026-08-24T00:00:00.000Z"
+      }),
+      ConversationSessionSchema.parse({
+        id: "conversation-2",
+        title: "会话二",
+        createdAt: "2026-08-23T00:00:00.000Z",
+        updatedAt: "2026-08-23T00:00:00.000Z"
+      })
+    ];
+    const repository = {
+      listConversations: vi.fn(() => sessions),
+      deleteConversation: vi.fn((id: string) => id === "conversation-1"),
+      deleteAllConversations: vi.fn(() => 2)
+    };
+    const processEvents = {
+      clearConversation: vi.fn(),
+      clearAll: vi.fn()
+    };
+    const service = createConversationService({
+      repository: repository as never,
+      graph: {} as never,
+      processEvents
+    });
+
+    expect(service.list()).toEqual(repository.listConversations());
+    service.delete("conversation-1");
+    expect(repository.deleteConversation).toHaveBeenCalledWith("conversation-1");
+    expect(processEvents.clearConversation).toHaveBeenCalledWith("conversation-1");
+
+    expect(() => service.delete("missing")).toThrow("conversation_not_found");
+    expect(processEvents.clearConversation).toHaveBeenCalledTimes(1);
+
+    expect(service.deleteAll()).toEqual({ deletedCount: 2 });
+    expect(repository.deleteAllConversations).toHaveBeenCalledOnce();
+    expect(processEvents.clearAll).toHaveBeenCalledOnce();
+  });
+
   it("passes the selected recruitment URL to the graph and keeps it in the idempotency boundary", async () => {
     const session = ConversationSessionSchema.parse({
       id: "conversation-1",

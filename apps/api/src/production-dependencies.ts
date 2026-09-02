@@ -537,7 +537,8 @@ export function createProductionDependencies(
     });
     const conversationService = createConversationService({
       repository: conversationRepository,
-      graph: conversationGraph
+      graph: conversationGraph,
+      processEvents: conversationProcessEvents
     });
     const conversationJobMatchService = createConversationJobMatchService({
       conversations: conversationRepository,

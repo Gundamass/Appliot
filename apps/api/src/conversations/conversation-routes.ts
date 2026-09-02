@@ -1,5 +1,9 @@
 import type { FastifyInstance, FastifyReply } from "fastify";
 import {
+  ConversationProcessEventSchema,
+  ConversationProcessHistoryResetSchema,
+  ConversationHistoryClearResultSchema,
+  ConversationSessionListSchema,
   ConversationSessionSchema,
   ConversationConfirmInputSchema,
   ConversationTurnInputSchema,
@@ -9,12 +13,16 @@ import {
 import { z } from "zod";
 import { sendError } from "../http-response.js";
 import type { ConversationService } from "./conversation-service.js";
+import type { ConversationProcessEvent, ConversationProcessHistoryReset } from "@resume/contracts";
+import type { ConversationProcessEventBus } from "./conversation-events.js";
 
 const ConversationParamsSchema = z.object({ id: z.string().min(1).max(256) }).strict();
 const IdempotencyKeySchema = z.string().trim().min(1).max(256);
 
 export interface ConversationRouteDependencies {
   service: ConversationService;
+  processEvents?: ConversationProcessEventBus;
+  sseHeartbeatMs?: number;
 }
 
 export function registerConversationRoutes(
@@ -23,6 +31,14 @@ export function registerConversationRoutes(
 ): void {
   app.post("/api/conversations", async (_request, reply) => {
     return execute(reply, 201, () => ConversationSessionSchema.parse(dependencies.service.create()));
+  });
+
+  app.get("/api/conversations", async (_request, reply) => {
+    return execute(reply, 200, () => ConversationSessionListSchema.parse(dependencies.service.list()));
+  });
+
+  app.delete("/api/conversations", async (_request, reply) => {
+    return execute(reply, 200, () => ConversationHistoryClearResultSchema.parse(dependencies.service.deleteAll()));
   });
 
   app.get("/api/conversations/:id", async (request, reply) => {
@@ -41,12 +57,86 @@ export function registerConversationRoutes(
     return execute(reply, 200, () => dependencies.service.send(params.data.id, input.data.text, requestId ?? undefined));
   });
 
+  app.delete("/api/conversations/:id", async (request, reply) => {
+    const params = ConversationParamsSchema.safeParse(request.params);
+    if (!params.success) return invalid(reply, "invalid_conversation_id");
+    try {
+      dependencies.service.delete(params.data.id);
+      return reply.code(204).send();
+    } catch (error) {
+      const mapped = mapConversationError(error);
+      return sendError(reply, mapped.statusCode, mapped.error, mapped.code);
+    }
+  });
+
   app.post("/api/conversations/:id/confirm", async (request, reply) => {
     const params = ConversationParamsSchema.safeParse(request.params);
     const input = ConversationConfirmInputSchema.safeParse(request.body);
     if (!params.success) return invalid(reply, "invalid_conversation_id");
     if (!input.success) return invalid(reply, "invalid_conversation_confirmation_input");
     return execute(reply, 200, () => dependencies.service.confirm(params.data.id, input.data));
+  });
+
+  app.get("/api/conversations/:id/events", async (request, reply) => {
+    const params = ConversationParamsSchema.safeParse(request.params);
+    if (!params.success) return invalid(reply, "invalid_conversation_id");
+    if (dependencies.processEvents === undefined) {
+      return sendError(reply, 503, "Conversation process events unavailable", "conversation_process_events_unavailable");
+    }
+    try {
+      dependencies.service.get(params.data.id);
+    } catch (error) {
+      const mapped = mapConversationError(error);
+      return sendError(reply, mapped.statusCode, mapped.error, mapped.code);
+    }
+
+    const lastEventId = request.headers["last-event-id"];
+    const afterId = typeof lastEventId === "string" && /^\d+$/u.test(lastEventId) ? lastEventId : undefined;
+    reply.hijack();
+    reply.raw.writeHead(200, {
+      "Cache-Control": "no-cache, no-transform",
+      "Connection": "keep-alive",
+      "Content-Type": "text/event-stream; charset=utf-8",
+      "X-Accel-Buffering": "no"
+    });
+    reply.raw.flushHeaders();
+
+    let closed = false;
+    const writeEvent = (event: ConversationProcessEvent): void => {
+      if (!closed && !reply.raw.destroyed) reply.raw.write(formatProcessSseEvent(event));
+    };
+    let replaying = true;
+    const bufferedEvents: ConversationProcessEvent[] = [];
+    const unsubscribe = dependencies.processEvents.subscribe(params.data.id, (event) => {
+      if (replaying) bufferedEvents.push(event);
+      else writeEvent(event);
+    });
+    const replay = dependencies.processEvents.replay(params.data.id, afterId);
+    if (replay.reset !== undefined && !closed && !reply.raw.destroyed) {
+      reply.raw.write(formatHistoryReset(replay.reset));
+    }
+    const replayEvents = replay.events;
+    const replayIds = new Set<string>();
+    for (const event of [...replayEvents, ...bufferedEvents].sort(compareProcessEventIds)) {
+      if (replayIds.has(event.id)) continue;
+      replayIds.add(event.id);
+      writeEvent(event);
+    }
+    replaying = false;
+    const heartbeat = setInterval(() => {
+      if (!closed && !reply.raw.destroyed) reply.raw.write(": heartbeat\n\n");
+    }, dependencies.sseHeartbeatMs ?? 15_000);
+    heartbeat.unref();
+    const cleanup = (): void => {
+      if (closed) return;
+      closed = true;
+      clearInterval(heartbeat);
+      unsubscribe();
+    };
+    request.raw.once("close", cleanup);
+    reply.raw.once("close", cleanup);
+    reply.raw.once("error", cleanup);
+    return reply;
   });
 }
 
@@ -113,3 +203,17 @@ const CONFLICT_CODES = new Set([
   "job_match_result_stale",
   "recommendation_stale"
 ]);
+
+function formatProcessSseEvent(event: ConversationProcessEvent): string {
+  return `id: ${event.id}\nevent: ${event.type}\ndata: ${JSON.stringify(ConversationProcessEventSchema.parse(event))}\n\n`;
+}
+
+function formatHistoryReset(event: ConversationProcessHistoryReset): string {
+  return `event: history_reset\ndata: ${JSON.stringify(ConversationProcessHistoryResetSchema.parse(event))}\n\n`;
+}
+
+function compareProcessEventIds(left: ConversationProcessEvent, right: ConversationProcessEvent): number {
+  const leftId = BigInt(left.id);
+  const rightId = BigInt(right.id);
+  return leftId < rightId ? -1 : leftId > rightId ? 1 : 0;
+}

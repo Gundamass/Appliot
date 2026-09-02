@@ -2,8 +2,10 @@ import { createHash, randomUUID } from "node:crypto";
 import {
   ConversationContextSchema,
   ConversationConfirmInputSchema,
+  ConversationHistoryClearResultSchema,
   ConversationMessageSchema,
   ConversationSessionSchema,
+  ConversationSessionListSchema,
   ConversationTurnInputSchema,
   ConversationTurnResponseSchema,
   ConversationViewSchema,
@@ -16,6 +18,7 @@ import {
   type ConversationView
 } from "@resume/contracts";
 import type { ConversationGraph, ConversationGraphOutput } from "./conversation-graph.js";
+import type { ConversationProcessEventBus } from "./conversation-events.js";
 import type { ConversationRepository } from "./conversation-repository.js";
 
 export type ConversationConfirmInput = ContractConversationConfirmInput;
@@ -23,11 +26,15 @@ export type ConversationConfirmInput = ContractConversationConfirmInput;
 export interface ConversationServiceDependencies {
   repository: ConversationRepository;
   graph: ConversationGraph;
+  processEvents?: Pick<ConversationProcessEventBus, "clearConversation" | "clearAll">;
   now?: () => Date;
 }
 
 export interface ConversationService {
   create(): ConversationSession;
+  list(): ConversationSession[];
+  delete(conversationId: string): void;
+  deleteAll(): { deletedCount: number };
   get(conversationId: string): ConversationView;
   send(conversationId: string, text: string, requestId?: string): Promise<ConversationTurnResponse>;
   confirm(conversationId: string, input: ConversationConfirmInput): Promise<ConversationTurnResponse>;
@@ -45,6 +52,22 @@ export function createConversationService(
   return {
     create() {
       return ConversationSessionSchema.parse(dependencies.repository.createConversation());
+    },
+
+    list() {
+      return ConversationSessionListSchema.parse(dependencies.repository.listConversations());
+    },
+
+    delete(conversationId) {
+      const id = requireConversationId(conversationId);
+      if (!dependencies.repository.deleteConversation(id)) throw new Error("conversation_not_found");
+      dependencies.processEvents?.clearConversation(id);
+    },
+
+    deleteAll() {
+      const deletedCount = dependencies.repository.deleteAllConversations();
+      dependencies.processEvents?.clearAll();
+      return ConversationHistoryClearResultSchema.parse({ deletedCount });
     },
 
     get(conversationId) {

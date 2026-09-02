@@ -16,6 +16,8 @@ export interface ConversationProcessEventBus {
   replay(conversationId: string, afterId?: string): ConversationProcessEventReplay;
   subscribe(conversationId: string, listener: (event: ConversationProcessEvent) => void): () => void;
   subscriberCount(conversationId: string): number;
+  clearConversation(conversationId: string): void;
+  clearAll(): void;
 }
 
 export type ConversationProcessEventInput = Omit<
@@ -75,6 +77,14 @@ export function createConversationProcessEventBus(
       (conversation_id, turn_sequence, step_id, type, stage, status, summary, details_json, created_at)
     VALUES (?, ?, ?, 'process_changed', ?, ?, ?, ?, ?)
   `);
+  const deleteConversationEvents = database?.prepare(
+    "DELETE FROM conversation_process_events WHERE conversation_id = ?"
+  );
+  const deleteConversationCursor = database?.prepare(
+    "DELETE FROM conversation_process_event_cursors WHERE conversation_id = ?"
+  );
+  const deleteAllEvents = database?.prepare("DELETE FROM conversation_process_events");
+  const deleteAllCursors = database?.prepare("DELETE FROM conversation_process_event_cursors");
   const select = database?.prepare(`
     SELECT id, conversation_id, turn_sequence, step_id, type, stage, status, summary, details_json, created_at
     FROM conversation_process_events
@@ -175,6 +185,14 @@ export function createConversationProcessEventBus(
     return event;
   };
 
+  const clearConversation = (conversationId: string): void => {
+    memoryEvents.delete(conversationId);
+    memoryDiscardedThrough.delete(conversationId);
+    subscribers.delete(conversationId);
+    deleteConversationEvents?.run(conversationId);
+    deleteConversationCursor?.run(conversationId);
+  };
+
   return {
     emit: publish,
     replay,
@@ -189,6 +207,14 @@ export function createConversationProcessEventBus(
     },
     subscriberCount(conversationId) {
       return subscribers.get(conversationId)?.size ?? 0;
+    },
+    clearConversation,
+    clearAll() {
+      memoryEvents.clear();
+      memoryDiscardedThrough.clear();
+      subscribers.clear();
+      deleteAllEvents?.run();
+      deleteAllCursors?.run();
     }
   };
 }
