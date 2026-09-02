@@ -1,7 +1,7 @@
 import { MessageCircle } from "lucide-react";
 import type { ApplicationTask } from "@resume/contracts";
-import { useEffect, useState } from "react";
-import { useNavigate, useSearchParams } from "react-router-dom";
+import { useCallback, useEffect, useState } from "react";
+import { useLocation, useNavigate, useSearchParams } from "react-router-dom";
 import type { HealthApi } from "../api/health-client.js";
 import type { ProfileApi, RagApi, SelfEvaluationReviewApi } from "../api/client.js";
 import type { ApplicationApi } from "../applications/api.js";
@@ -10,12 +10,17 @@ import { ProfilePage } from "../profile/ProfilePage.js";
 import { ApplicationReviewInbox } from "../applications/ApplicationReviewInbox.js";
 import type { ConversationApi } from "../conversation/api.js";
 import { ChatHome } from "../conversation/ChatHome.js";
+import type { ConversationJobMatchApi } from "../conversation/conversation-job-match-api.js";
 import { WorkspaceFrame, type WorkspaceView } from "./WorkspaceFrame.js";
+
+const conversationSearchParameter = "conversation";
+const recentConversationStorageKey = "resume-application-assistant.recent-conversation-id";
 
 interface ProfileApplicationWorkspaceProps {
   profileApi: ProfileApi;
   applicationApi: ApplicationApi;
-  jobMatchApi: Pick<JobMatchApi, "create">;
+  jobMatchApi: JobMatchApi;
+  conversationJobMatchApi?: ConversationJobMatchApi;
   healthApi?: HealthApi;
   reviewApi?: SelfEvaluationReviewApi;
   ragApi?: RagApi;
@@ -25,15 +30,20 @@ interface ProfileApplicationWorkspaceProps {
 export function ProfileApplicationWorkspace({
   profileApi,
   applicationApi,
+  jobMatchApi,
+  conversationJobMatchApi,
   healthApi,
   reviewApi,
   ragApi,
   conversationApi
 }: ProfileApplicationWorkspaceProps) {
   const navigate = useNavigate();
+  const location = useLocation();
   const [searchParams, setSearchParams] = useSearchParams();
   const requested = searchParams.get("view");
   const view = normalizeWorkspaceView(requested);
+  const conversationId = normalizeConversationId(searchParams.get(conversationSearchParameter)) ?? readRecentConversationId();
+  const legacyRecoveryNotice = readLegacyRecoveryNotice(location.state);
   const [tasks, setTasks] = useState<ApplicationTask[]>([]);
   const [tasksLoading, setTasksLoading] = useState(false);
   const [tasksError, setTasksError] = useState<string>();
@@ -80,7 +90,26 @@ export function ProfileApplicationWorkspace({
     setSearchParams(next, { replace: false });
   };
 
-  if (view === "chat") return <ChatHome api={conversationApi} onOpenJobMatch={(sessionId) => navigate(`/job-match-sessions/${sessionId}`)} onOpenApplication={(taskId) => navigate(`/applications/${taskId}`)} onNavigate={selectView} />;
+  const rememberConversation = useCallback((sessionId: string) => {
+    writeRecentConversationId(sessionId);
+    setSearchParams((current) => {
+      if (current.get(conversationSearchParameter) === sessionId) return current;
+      const next = new URLSearchParams(current);
+      next.set(conversationSearchParameter, sessionId);
+      return next;
+    }, { replace: true });
+  }, [setSearchParams]);
+
+  if (view === "chat") return <ChatHome
+    api={conversationApi}
+    jobMatchApi={jobMatchApi}
+    {...(conversationJobMatchApi === undefined ? {} : { conversationJobMatchApi })}
+    {...(conversationId === undefined ? {} : { initialSessionId: conversationId })}
+    {...(legacyRecoveryNotice === undefined ? {} : { initialNotice: legacyRecoveryNotice })}
+    onSessionResolved={rememberConversation}
+    onOpenApplication={(taskId) => navigate(`/applications/${taskId}`)}
+    onNavigate={selectView}
+  />;
 
   return (
     <WorkspaceFrame activeView={view} onSelectView={selectView}>
@@ -124,4 +153,31 @@ function normalizeWorkspaceView(requested: string | null): WorkspaceView {
   if (requested === "applications" || requested === "reviews") return "applications";
   if (requested === "profile") return "profile";
   return "chat";
+}
+
+function readLegacyRecoveryNotice(state: unknown): string | undefined {
+  if (typeof state !== "object" || state === null) return undefined;
+  const notice = (state as { jobMatchRecoveryNotice?: unknown }).jobMatchRecoveryNotice;
+  return typeof notice === "string" && notice.trim() !== "" ? notice : undefined;
+}
+
+function normalizeConversationId(value: string | null): string | undefined {
+  const id = value?.trim();
+  return id === undefined || id.length === 0 ? undefined : id;
+}
+
+function readRecentConversationId(): string | undefined {
+  try {
+    return normalizeConversationId(window.localStorage.getItem(recentConversationStorageKey));
+  } catch {
+    return undefined;
+  }
+}
+
+function writeRecentConversationId(sessionId: string): void {
+  try {
+    window.localStorage.setItem(recentConversationStorageKey, sessionId);
+  } catch {
+    // Browser privacy settings can disable local storage; URL persistence still works.
+  }
 }

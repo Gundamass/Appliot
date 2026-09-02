@@ -1,6 +1,7 @@
 import type { ConversationCard, ConversationConfirmation } from "@resume/contracts";
 import { fireEvent, render, screen } from "@testing-library/react";
 import { describe, expect, it, vi } from "vitest";
+import type { JobMatchApi, JobMatchSession } from "../job-matching/api.js";
 import { ConversationCards } from "./ConversationCards.js";
 
 const site = {
@@ -37,12 +38,33 @@ const choices = {
   ]
 };
 
+const jobMatchSession: JobMatchSession = {
+  id: "match-1",
+  version: 1,
+  state: "awaiting_filter_confirmation",
+  initialUrl: site.url,
+  scoringVersion: "job-match-v1",
+  profileRevision: 1,
+  expectationRevision: 1,
+  executionEpoch: 1,
+  createdAt: "2026-09-01T00:00:00.000Z",
+  updatedAt: "2026-09-01T00:00:00.000Z",
+  source: "baidu",
+  adapterVersion: "baidu-v1",
+  expectation: {
+    revision: 1,
+    confirmedAt: "2026-09-01T00:00:00.000Z",
+    criteria: [{ kind: "target_role", values: ["前端工程师"], strength: "required" }]
+  },
+  postings: [],
+  results: []
+};
+
 function renderCards(cards: ConversationCard[], pendingConfirmation?: ConversationConfirmation) {
   return render(
     <ConversationCards
       cards={cards}
       {...(pendingConfirmation === undefined ? {} : { pendingConfirmation })}
-      onOpenJobMatch={vi.fn()}
       onOpenApplication={vi.fn()}
       onConfirm={vi.fn()}
     />
@@ -59,9 +81,8 @@ describe("ConversationCards recruitment flow", () => {
     };
     render(
       <ConversationCards
-        cards={[{ type: "confirmation", action: confirmation.action, target: choices }]}
+        cards={[{ type: "confirmation", confirmationId: confirmation.confirmationId, action: confirmation.action, target: choices }] as ConversationCard[]}
         pendingConfirmation={confirmation}
-        onOpenJobMatch={vi.fn()}
         onOpenApplication={vi.fn()}
         onConfirm={onConfirm}
       />
@@ -79,8 +100,7 @@ describe("ConversationCards recruitment flow", () => {
     );
   });
 
-  it("renders the verified recruitment entry and job-match session as their own cards", async () => {
-    const onOpenJobMatch = vi.fn();
+  it("renders the verified recruitment entry and job-match session inline without an open-workbench button", async () => {
     render(
       <ConversationCards
         cards={[
@@ -93,16 +113,17 @@ describe("ConversationCards recruitment flow", () => {
             postingCount: 12
           }
         ]}
-        onOpenJobMatch={onOpenJobMatch}
+        conversationId="conversation-1"
+        jobMatchApi={{ get: vi.fn().mockResolvedValue(jobMatchSession) } as unknown as JobMatchApi}
+        onJobMatchAction={vi.fn()}
         onOpenApplication={vi.fn()}
       />
     );
 
     expect(screen.getByText("Baidu Campus Recruitment")).toBeTruthy();
     expect(screen.getByText("官方入口")).toBeTruthy();
-    expect(screen.getByText("12 个岗位待确认")).toBeTruthy();
-    fireEvent.click(screen.getByRole("button", { name: "打开岗位匹配" }));
-    expect(onOpenJobMatch).toHaveBeenCalledWith("match-1");
+    expect(await screen.findByText("岗位匹配")).toBeTruthy();
+    expect(screen.queryByRole("button", { name: "打开岗位匹配" })).toBeNull();
   });
 
   it("uses action-specific confirmation copy for job recommendations", async () => {
@@ -117,9 +138,8 @@ describe("ConversationCards recruitment flow", () => {
     };
     render(
       <ConversationCards
-        cards={[{ type: "confirmation", action, target: confirmation.target }]}
+        cards={[{ type: "confirmation", confirmationId: confirmation.confirmationId, action, target: confirmation.target }] as ConversationCard[]}
         pendingConfirmation={confirmation}
-        onOpenJobMatch={vi.fn()}
         onOpenApplication={vi.fn()}
         onConfirm={onConfirm}
       />
@@ -128,5 +148,42 @@ describe("ConversationCards recruitment flow", () => {
     expect(screen.getByRole("button", { name: approveLabel })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: declineLabel }));
     expect(onConfirm).toHaveBeenCalledWith(confirmation.confirmationId, false);
+  });
+
+  it("does not attach a newer confirmation token to an older same-action card", () => {
+    const onConfirm = vi.fn();
+    const oldConfirmation: ConversationConfirmation = {
+      confirmationId: "confirmation-old",
+      action: "request_job_recommendations",
+      target: { kind: "recruitment_site", ...site }
+    };
+    const currentConfirmation: ConversationConfirmation = {
+      confirmationId: "confirmation-current",
+      action: "request_job_recommendations",
+      target: {
+        kind: "recruitment_site",
+        ...site,
+        title: "百度社会招聘",
+        url: "https://jobs.baidu.com/",
+        domain: "jobs.baidu.com"
+      }
+    };
+    render(
+      <ConversationCards
+        cards={[
+          { type: "confirmation", confirmationId: oldConfirmation.confirmationId, action: oldConfirmation.action, target: oldConfirmation.target },
+          { type: "confirmation", confirmationId: currentConfirmation.confirmationId, action: currentConfirmation.action, target: currentConfirmation.target }
+        ] as ConversationCard[]}
+        pendingConfirmation={currentConfirmation}
+        onOpenApplication={vi.fn()}
+        onConfirm={onConfirm}
+      />
+    );
+
+    const buttons = screen.getAllByRole("button", { name: "开始岗位推荐" });
+    expect(buttons[0]).toBeDisabled();
+    expect(buttons[1]).toBeEnabled();
+    fireEvent.click(buttons[1]!);
+    expect(onConfirm).toHaveBeenCalledWith(currentConfirmation.confirmationId, true, undefined);
   });
 });

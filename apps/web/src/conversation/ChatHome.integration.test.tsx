@@ -56,7 +56,7 @@ function api(initialView: ConversationView, send: ConversationApi["send"] = vi.f
 }
 
 describe("ChatHome integration", () => {
-  it("navigates recommendation evidence and application task cards to their deep links", async () => {
+  it("keeps recommendation cards inline and navigates application task cards to their deep links", async () => {
     const recommendation: ConversationCard = {
       type: "recommendation",
       sessionId: "match-1",
@@ -74,15 +74,14 @@ describe("ChatHome integration", () => {
       state: "observing",
       applicationUrl: "https://jobs.example.test/apply/frontend"
     };
-    const onOpenJobMatch = vi.fn();
     const onOpenApplication = vi.fn();
     const user = userEvent.setup();
-    render(<ChatHome api={api(view([recommendation, application]))} onOpenJobMatch={onOpenJobMatch} onOpenApplication={onOpenApplication} />);
+    render(<ChatHome api={api(view([recommendation, application]))} onOpenApplication={onOpenApplication} />);
 
-    await user.click(await screen.findByRole("button", { name: /查看匹配依据/ }));
+    expect((await screen.findAllByText("Frontend Engineer")).length).toBeGreaterThan(0);
+    expect(screen.queryByRole("button", { name: /查看匹配依据/ })).not.toBeInTheDocument();
     await user.click(screen.getByRole("button", { name: /打开投递任务/ }));
 
-    expect(onOpenJobMatch).toHaveBeenCalledWith("match-1");
     expect(onOpenApplication).toHaveBeenCalledWith("task-1");
   });
 
@@ -91,7 +90,7 @@ describe("ChatHome integration", () => {
       throw new ConversationApiError("raw_model_error: private prompt", "policy_rejected", 409);
     });
     const user = userEvent.setup();
-    render(<ChatHome api={api(view([]), send)} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api(view([]), send)} onOpenApplication={vi.fn()} />);
 
     await user.type(await screen.findByRole("textbox", { name: "输入消息" }), "投递第一份");
     await user.click(screen.getByRole("button", { name: "发送" }));

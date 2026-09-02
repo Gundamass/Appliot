@@ -11,12 +11,36 @@ import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { ConversationApiError, type ConversationApi } from "./api.js";
 import { ChatHome } from "./ChatHome.js";
+import type { ConversationJobMatchApi } from "./conversation-job-match-api.js";
+import type { JobMatchApi, JobMatchSession } from "../job-matching/api.js";
 
 const session: ConversationSession = {
   id: "conversation-1",
   title: "新的求职对话",
   createdAt: "2026-08-23T01:00:00.000Z",
   updatedAt: "2026-08-23T01:00:00.000Z"
+};
+
+const inlineJobMatchSession: JobMatchSession = {
+  id: "match-1",
+  version: 1,
+  state: "awaiting_filter_confirmation",
+  initialUrl: "https://campus.baidu.com/",
+  scoringVersion: "job-match-v1",
+  profileRevision: 1,
+  expectationRevision: 1,
+  executionEpoch: 1,
+  createdAt: "2026-09-01T00:00:00.000Z",
+  updatedAt: "2026-09-01T00:00:00.000Z",
+  source: "baidu",
+  adapterVersion: "baidu-v1",
+  expectation: {
+    revision: 1,
+    confirmedAt: "2026-09-01T00:00:00.000Z",
+    criteria: [{ kind: "target_role", values: ["前端工程师"], strength: "required" }]
+  },
+  postings: [],
+  results: []
 };
 
 function message(role: ConversationMessage["role"], text: string, sequence: number): ConversationMessage {
@@ -103,9 +127,45 @@ class FakeProcessEventSource extends EventTarget {
 describe("ChatHome", () => {
   afterEach(() => vi.unstubAllGlobals());
 
+  it("renders a job-match session inline below its assistant turn without an open-workbench button", async () => {
+    vi.stubGlobal("EventSource", FakeProcessEventSource);
+    const api = fakeConversationApi({
+      ...view([
+        message("user", "帮我投递百度", 1),
+        {
+          ...message("assistant", "已找到百度招聘入口", 2),
+          cards: [{
+            type: "job_match_session",
+            sessionId: inlineJobMatchSession.id,
+            initialUrl: inlineJobMatchSession.initialUrl,
+            state: inlineJobMatchSession.state,
+            postingCount: 0
+          }]
+        }
+      ])
+    });
+    const jobMatchApi = { get: vi.fn().mockResolvedValue(inlineJobMatchSession) } as unknown as JobMatchApi;
+    const conversationJobMatchApi = { execute: vi.fn() } as unknown as ConversationJobMatchApi;
+    render(<ChatHome api={api} jobMatchApi={jobMatchApi} conversationJobMatchApi={conversationJobMatchApi} onOpenApplication={vi.fn()} />);
+
+    expect(await screen.findByText("岗位匹配")).toBeVisible();
+    expect(screen.getByText("等待确认筛选")).toBeVisible();
+    expect(screen.queryByRole("button", { name: "打开岗位匹配" })).not.toBeInTheDocument();
+
+    const source = FakeProcessEventSource.latest;
+    source.dispatchEvent(new MessageEvent("process_changed", { data: JSON.stringify(processEvent({
+      id: "2",
+      turnSequence: 1,
+      stepId: "inline-search",
+      stage: "searching_recruitment_site",
+      summary: "正在搜索百度招聘入口"
+    })) }));
+    expect(await screen.findByRole("list", { name: "执行过程" })).toBeVisible();
+  });
+
   it("restores an existing requested conversation without creating a replacement", async () => {
     const api = fakeConversationApi(viewFor("conversation-restored", "restored history"));
-    render(<ChatHome api={api} initialSessionId="conversation-restored" onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} initialSessionId="conversation-restored" onOpenApplication={vi.fn()} />);
 
     expect(await screen.findByText("restored history")).toBeVisible();
     expect(api.get).toHaveBeenCalledWith("conversation-restored");
@@ -118,7 +178,7 @@ describe("ChatHome", () => {
     vi.mocked(api.get)
       .mockRejectedValueOnce(new ConversationApiError("missing", "conversation_not_found", 404));
 
-    render(<ChatHome api={api} initialSessionId="stale-id" onSessionResolved={onSessionResolved} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} initialSessionId="stale-id" onSessionResolved={onSessionResolved} onOpenApplication={vi.fn()} />);
 
     expect(await screen.findByText("replacement history")).toBeVisible();
     expect(api.get).toHaveBeenNthCalledWith(1, "stale-id");
@@ -131,7 +191,7 @@ describe("ChatHome", () => {
     const api = fakeConversationApi();
     vi.mocked(api.get).mockRejectedValue(new ConversationApiError("unavailable", "conversation_service_unavailable", 503));
 
-    render(<ChatHome api={api} initialSessionId="conversation-unavailable" onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} initialSessionId="conversation-unavailable" onOpenApplication={vi.fn()} />);
 
     expect(await screen.findByRole("alert")).toBeVisible();
     expect(api.get).toHaveBeenCalledWith("conversation-unavailable");
@@ -141,7 +201,7 @@ describe("ChatHome", () => {
   it("renders history and sends a bounded message", async () => {
     const api = fakeConversationApi();
     const user = userEvent.setup();
-    render(<ChatHome api={api} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
 
     expect(await screen.findByText("可以开始岗位匹配")).toBeVisible();
     const composer = screen.getByRole("textbox", { name: "输入消息" });
@@ -156,7 +216,7 @@ describe("ChatHome", () => {
     vi.stubGlobal("EventSource", FakeProcessEventSource);
     const api = fakeConversationApi();
     const user = userEvent.setup();
-    render(<ChatHome api={api} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
 
     expect(await screen.findByText("可以开始岗位匹配")).toBeVisible();
     const source = FakeProcessEventSource.latest;
@@ -184,7 +244,7 @@ describe("ChatHome", () => {
       .mockResolvedValueOnce(turn("第一轮回复", undefined, 2))
       .mockResolvedValueOnce(turn("第二轮回复", undefined, 4));
     const user = userEvent.setup();
-    render(<ChatHome api={api} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
 
     const composer = screen.getByRole("textbox", { name: "输入消息" });
     await user.type(composer, "第一轮请求");
@@ -227,7 +287,7 @@ describe("ChatHome", () => {
     const api = fakeConversationApi();
     vi.mocked(api.send).mockResolvedValue(turn("开始投递前请确认", confirmation));
     const user = userEvent.setup();
-    render(<ChatHome api={api} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
 
     await user.type(screen.getByRole("textbox", { name: "输入消息" }), "投递第一份");
     await user.click(screen.getByRole("button", { name: "发送" }));
@@ -250,7 +310,7 @@ describe("ChatHome", () => {
       resolveConfirmation = resolve;
     }));
     const user = userEvent.setup();
-    render(<ChatHome api={api} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
 
     await user.type(screen.getByRole("textbox", { name: "输入消息" }), "投递第一份");
     await user.click(screen.getByRole("button", { name: "发送" }));
@@ -299,7 +359,7 @@ describe("ChatHome", () => {
     vi.mocked(api.send).mockResolvedValue(turn("请选择招聘入口", entryConfirmation));
     vi.mocked(api.confirm).mockResolvedValueOnce(turn("招聘入口已确认", recommendationConfirmation));
     const user = userEvent.setup();
-    render(<ChatHome api={api} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
 
     await user.type(screen.getByRole("textbox", { name: "输入消息" }), "帮我投递百度校招");
     await user.click(screen.getByRole("button", { name: "发送" }));
@@ -336,7 +396,7 @@ describe("ChatHome", () => {
       pendingConfirmation: confirmation
     } as ConversationView);
     const user = userEvent.setup();
-    render(<ChatHome api={api} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
 
     const recommendationButton = await screen.findByRole("button", { name: "开始岗位推荐" });
     expect(recommendationButton).toBeEnabled();
@@ -347,7 +407,7 @@ describe("ChatHome", () => {
   it("offers quick starts for company recommendations and application progress", async () => {
     const api = fakeConversationApi();
     const user = userEvent.setup();
-    render(<ChatHome api={api} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
 
     await screen.findByText("快速开始");
     await user.click(screen.getByRole("button", { name: /岗位推荐/ }));
@@ -363,7 +423,7 @@ describe("ChatHome", () => {
   it("shows remaining characters and keeps send disabled for blank input", async () => {
     const api = fakeConversationApi();
     const user = userEvent.setup();
-    render(<ChatHome api={api} onOpenJobMatch={vi.fn()} onOpenApplication={vi.fn()} />);
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
     const composer = screen.getByRole("textbox", { name: "输入消息" });
 
     expect(screen.getByText("500 字剩余")).toBeVisible();

@@ -1,5 +1,5 @@
 import { BrowserRouter } from "react-router-dom";
-import { render, screen, within } from "@testing-library/react";
+import { render, screen, waitFor, within } from "@testing-library/react";
 import { userEvent } from "@testing-library/user-event";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { ApplicationTask } from "@resume/contracts";
@@ -27,12 +27,13 @@ const applicationApi = {
   recover: vi.fn()
 };
 const jobMatchApi = { create: vi.fn() };
+const recentConversationStorageKey = "resume-application-assistant.recent-conversation-id";
 
 function conversationApi(): ConversationApi {
   const session = { id: "conversation-1", title: "新的求职对话", createdAt: "2026-08-23T01:00:00.000Z", updatedAt: "2026-08-23T01:00:00.000Z" };
   return {
     create: vi.fn().mockResolvedValue(session),
-    get: vi.fn().mockResolvedValue({ session, messages: [], context: { version: 0, recentPostingIds: [] } }),
+    get: vi.fn(async (id: string) => ({ session: { ...session, id }, messages: [], context: { version: 0, recentPostingIds: [] } })),
     send: vi.fn(),
     confirm: vi.fn()
   };
@@ -52,11 +53,33 @@ function reviewTask(state: ApplicationTask["state"], suffix: string, commands: A
 
 afterEach(() => {
   window.history.pushState({}, "", "/");
+  window.localStorage.removeItem(recentConversationStorageKey);
   vi.restoreAllMocks();
   applicationApi.list.mockResolvedValue([]);
 });
 
 describe("ProfileApplicationWorkspace", () => {
+  it("restores the locally remembered conversation and canonicalizes its URL", async () => {
+    window.localStorage.setItem(recentConversationStorageKey, "conversation-1");
+    const api = conversationApi();
+    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={applicationApi} jobMatchApi={jobMatchApi as never} conversationApi={api} /></BrowserRouter>);
+
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith("conversation-1"));
+    expect(api.create).not.toHaveBeenCalled();
+    expect(new URLSearchParams(window.location.search).get("conversation")).toBe("conversation-1");
+  });
+
+  it("prefers a conversation supplied in the URL over the locally remembered one", async () => {
+    window.localStorage.setItem(recentConversationStorageKey, "conversation-from-storage");
+    window.history.pushState({}, "", "/?conversation=conversation-from-url");
+    const api = conversationApi();
+    render(<BrowserRouter><ProfileApplicationWorkspace profileApi={profileApi()} applicationApi={applicationApi} jobMatchApi={jobMatchApi as never} conversationApi={api} /></BrowserRouter>);
+
+    await waitFor(() => expect(api.get).toHaveBeenCalledWith("conversation-from-url"));
+    expect(api.create).not.toHaveBeenCalled();
+    expect(window.localStorage.getItem(recentConversationStorageKey)).toBe("conversation-from-url");
+  });
+
   it("opens chat by default and keeps domain workbenches accessible", async () => {
     render(
       <BrowserRouter>

@@ -1,11 +1,18 @@
-import type { ConversationCard, ConversationConfirmation } from "@resume/contracts";
-import { ArrowUpRight, BriefcaseBusiness, Check, ExternalLink, FileCheck2, ListChecks, Search, ShieldCheck, Target, X } from "lucide-react";
+import type { ConversationCard, ConversationConfirmation, ConversationJobMatchAction } from "@resume/contracts";
+import { ArrowUpRight, BriefcaseBusiness, Check, ExternalLink, FileCheck2, ListChecks, Search, ShieldCheck, X } from "lucide-react";
 import { useState } from "react";
+import { ConversationJobMatchFlow } from "./ConversationJobMatchFlow.js";
+import type { ConversationProcessGroup } from "./conversation-process-model.js";
+import type { JobMatchApi } from "../job-matching/api.js";
+import { useJobMatchSession } from "../job-matching/useJobMatchSession.js";
 
 interface ConversationCardsProps {
   cards: ConversationCard[];
+  conversationId?: string;
+  process?: ConversationProcessGroup;
+  jobMatchApi?: JobMatchApi;
+  onJobMatchAction?(action: ConversationJobMatchAction): void | Promise<void>;
   pendingConfirmation?: ConversationConfirmation;
-  onOpenJobMatch(sessionId: string): void;
   onOpenApplication(taskId: string): void;
   onStartApplication?(card: Extract<ConversationCard, { type: "recommendation" }>): void;
   onConfirm?(confirmationId: string, approved: boolean, selectedUrl?: string): void;
@@ -37,21 +44,28 @@ export function QuickStartCards({ onQuickRecommendation, onQuickProgress }: Pick
   );
 }
 
-export function ConversationCards({ cards, pendingConfirmation, onOpenJobMatch, onOpenApplication, onStartApplication, onConfirm }: ConversationCardsProps) {
+export function ConversationCards({ cards, conversationId, process, jobMatchApi, onJobMatchAction, pendingConfirmation, onOpenApplication, onStartApplication, onConfirm }: ConversationCardsProps) {
   return <div className="conversation-cards">{cards.map((card, index) => {
-    if (card.type === "recommendation") return <RecommendationCard key={`${card.resultId}-${index}`} card={card} onOpenJobMatch={onOpenJobMatch} onStartApplication={onStartApplication} />;
+    if (card.type === "recommendation") return <RecommendationCard key={`${card.resultId}-${index}`} card={card} onStartApplication={onStartApplication} />;
     if (card.type === "application_task") return <TaskCard key={`${card.taskId}-${index}`} card={card} onOpenApplication={onOpenApplication} />;
     if (card.type === "recruitment_site") return <RecruitmentSiteCard key={`${card.url}-${index}`} card={card} />;
-    if (card.type === "job_match_session") return <JobMatchSessionCard key={`${card.sessionId}-${index}`} card={card} onOpenJobMatch={onOpenJobMatch} />;
-    const confirmationId = pendingConfirmation?.action === card.action
-      ? pendingConfirmation.confirmationId
+    if (card.type === "job_match_session") return <JobMatchSessionCard
+      key={`${card.sessionId}-${index}`}
+      card={card}
+      {...(conversationId === undefined ? {} : { conversationId })}
+      {...(process === undefined ? {} : { process })}
+      {...(jobMatchApi === undefined ? {} : { jobMatchApi })}
+      {...(onJobMatchAction === undefined ? {} : { onJobMatchAction })}
+    />;
+    const confirmationId = card.confirmationId === pendingConfirmation?.confirmationId
+      ? card.confirmationId
       : undefined;
     return <ConfirmationCard key={`confirmation-${index}`} card={card} {...(confirmationId === undefined ? {} : { confirmationId })} {...(onConfirm === undefined ? {} : { onConfirm })} />;
   })}</div>;
 }
 
-function RecommendationCard({ card, onOpenJobMatch, onStartApplication }: { card: Extract<ConversationCard, { type: "recommendation" }>; onOpenJobMatch(sessionId: string): void; onStartApplication?: ConversationCardsProps["onStartApplication"] }) {
-  return <article className="conversation-card recommendation-card"><div className="conversation-card-heading"><div><strong>{card.title}</strong><span>{card.company}</span></div><b>{card.score} 分</b></div><div className="conversation-evidence"><span>匹配依据 {card.evidenceCount} 项</span><span>已校验岗位</span></div><div className="conversation-card-actions"><button type="button" className="conversation-button" onClick={() => onOpenJobMatch(card.sessionId)}><Target aria-hidden="true" size={14} />查看匹配依据</button><button type="button" className="conversation-button primary" onClick={() => onStartApplication?.(card)}><BriefcaseBusiness aria-hidden="true" size={14} />开始投递</button></div></article>;
+function RecommendationCard({ card, onStartApplication }: { card: Extract<ConversationCard, { type: "recommendation" }>; onStartApplication?: ConversationCardsProps["onStartApplication"] }) {
+  return <article className="conversation-card recommendation-card"><div className="conversation-card-heading"><div><strong>{card.title}</strong><span>{card.company}</span></div><b>{card.score} 分</b></div><div className="conversation-evidence"><span>匹配依据 {card.evidenceCount} 项</span><span>已校验岗位</span></div><div className="conversation-card-actions"><button type="button" className="conversation-button primary" onClick={() => onStartApplication?.(card)}><BriefcaseBusiness aria-hidden="true" size={14} />开始投递</button></div></article>;
 }
 
 function TaskCard({ card, onOpenApplication }: { card: Extract<ConversationCard, { type: "application_task" }>; onOpenApplication(taskId: string): void }) {
@@ -62,8 +76,56 @@ function RecruitmentSiteCard({ card }: { card: Extract<ConversationCard, { type:
   return <article className="conversation-card recruitment-site-card"><div className="conversation-card-heading"><div><strong>{card.title}</strong><span>{card.company} · {card.domain}</span></div><b>官方入口</b></div><p className="conversation-card-url">{card.url}</p><div className="conversation-card-actions"><a className="conversation-button" href={card.url} target="_blank" rel="noreferrer"><ExternalLink aria-hidden="true" size={14} />打开官方入口</a></div></article>;
 }
 
-function JobMatchSessionCard({ card, onOpenJobMatch }: { card: Extract<ConversationCard, { type: "job_match_session" }>; onOpenJobMatch(sessionId: string): void }) {
-  return <article className="conversation-card job-match-session-card"><div className="conversation-card-heading"><div><strong>岗位匹配会话</strong><span>{stateLabel(card.state)}</span></div><b>{card.postingCount} 个岗位待确认</b></div><div className="conversation-evidence"><span>招聘入口已确认</span><span>岗位推荐将在匹配工作台继续</span></div><div className="conversation-card-actions"><button type="button" className="conversation-button primary" onClick={() => onOpenJobMatch(card.sessionId)}><Target aria-hidden="true" size={14} />打开岗位匹配</button></div></article>;
+function JobMatchSessionCard({ card, conversationId, process, jobMatchApi, onJobMatchAction }: {
+  card: Extract<ConversationCard, { type: "job_match_session" }>;
+  conversationId?: string;
+  process?: ConversationProcessGroup;
+  jobMatchApi?: JobMatchApi;
+  onJobMatchAction?: ConversationCardsProps["onJobMatchAction"];
+}) {
+  if (conversationId === undefined || jobMatchApi === undefined || onJobMatchAction === undefined) {
+    return <p className="conversation-job-match-error" role="alert">岗位匹配会话需要从所属对话恢复。</p>;
+  }
+  return <InlineJobMatchSession
+    sessionId={card.sessionId}
+    conversationId={conversationId}
+    {...(process === undefined ? {} : { process })}
+    jobMatchApi={jobMatchApi}
+    onJobMatchAction={onJobMatchAction}
+  />;
+}
+
+function InlineJobMatchSession({ sessionId, conversationId, process, jobMatchApi, onJobMatchAction }: {
+  sessionId: string;
+  conversationId: string;
+  process?: ConversationProcessGroup;
+  jobMatchApi: JobMatchApi;
+  onJobMatchAction: NonNullable<ConversationCardsProps["onJobMatchAction"]>;
+}) {
+  const loaded = useJobMatchSession(sessionId, jobMatchApi);
+  const [actionError, setActionError] = useState<string>();
+
+  const executeAction = async (action: ConversationJobMatchAction) => {
+    setActionError(undefined);
+    try {
+      await onJobMatchAction(action);
+      await loaded.refresh();
+    } catch {
+      setActionError("岗位匹配操作暂时失败，请刷新后重试。");
+    }
+  };
+
+  if (loaded.status === "loading") return <p className="conversation-job-match-status" role="status">正在读取岗位匹配会话…</p>;
+  if (loaded.error !== undefined || loaded.session === undefined) return <p className="conversation-job-match-error" role="alert">岗位匹配会话暂时无法读取，请刷新后重试。</p>;
+  return <>
+    <ConversationJobMatchFlow
+      conversationId={conversationId}
+      session={loaded.session}
+      {...(process === undefined ? {} : { process })}
+      onAction={executeAction}
+    />
+    {actionError === undefined ? null : <p className="conversation-job-match-error" role="alert">{actionError}</p>}
+  </>;
 }
 
 function ConfirmationCard({ card, confirmationId, onConfirm }: { card: Extract<ConversationCard, { type: "confirmation" }>; confirmationId?: string; onConfirm?: ConversationCardsProps["onConfirm"] }) {
@@ -104,15 +166,3 @@ function confirmationCopy(card: Extract<ConversationCard, { type: "confirmation"
   };
 }
 
-function stateLabel(state: string): string {
-  return ({
-    awaiting_filter_confirmation: "等待确认筛选条件",
-    awaiting_login: "等待登录",
-    awaiting_challenge: "等待人工验证",
-    extracting_jobs: "正在读取岗位",
-    matching_jobs: "正在匹配岗位",
-    awaiting_job_selection: "等待选择岗位",
-    selected: "已选择岗位",
-    paused: "已暂停"
-  } as Record<string, string>)[state] ?? state;
-}
