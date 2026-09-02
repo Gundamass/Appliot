@@ -11,6 +11,7 @@ import { createPolicyEngine } from "../policy/policy-engine.js";
 import { createSupervisorGraph } from "./supervisor-graph.js";
 import { createPlanValidator } from "./plan-validator.js";
 import { createPlanner } from "./planner.js";
+import { createReplanner } from "./replanner.js";
 import { createSupervisor } from "./supervisor.js";
 import { createMainGraph } from "../main-graph.js";
 import { intentForApplication } from "./planner.test.js";
@@ -365,5 +366,231 @@ describe("SupervisorGraph", () => {
 
     expect(result.status).toBe("blocked");
     expect(result.error?.code).toBe("replan_failed");
+  });
+
+  it("checkpoints a running attempt before invoking an external agent", async () => {
+    let release!: () => void;
+    const execution = new Promise<void>((resolve) => { release = resolve; });
+    const plan = PlanStateSchema.parse({
+      planId: "plan-running",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "running-step",
+        objective: "prepare application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 1,
+        acceptanceCriteria: ["prepared"],
+        risk: "low"
+      }],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const checkpointer = new MemorySaver();
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: {
+        decide: async ({ readyStep }) => ({
+          type: "dispatch_agent" as const,
+          agent: "application_agent",
+          input: { stepId: readyStep!.id },
+          reason: "run step"
+        })
+      },
+      planValidator: createPlanValidator(),
+      agents: { application_agent: { execute: async () => { await execution; return { status: "completed" as const }; } } },
+      checkpointer
+    });
+    const config = { configurable: { thread_id: "running-run" } };
+    const running = graph.invoke({
+      runId: "running-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, config);
+
+    try {
+      await vi.waitFor(async () => {
+        const snapshot = await graph.getState(config);
+        const step = (snapshot.values.plan as typeof plan | undefined)?.steps[0];
+        expect(step?.status).toBe("running");
+        expect(step?.attemptToken).toBe("attempt:running-run:1:running-step:1");
+      });
+    } finally {
+      release();
+    }
+    await running;
+  });
+
+  it("does not dispatch a running attempt recovered from a checkpoint", async () => {
+    const execute = vi.fn(async () => ({ status: "completed" as const }));
+    const plan = PlanStateSchema.parse({
+      planId: "plan-recovered-running",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "recovered-step",
+        objective: "prepare application",
+        owner: "application",
+        status: "running",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        attemptToken: "attempt:recovered-run:1:recovered-step:1",
+        maxAttempts: 1,
+        acceptanceCriteria: ["prepared"],
+        risk: "low"
+      }],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: { decide: async () => ({ type: "dispatch_agent" as const, agent: "application_agent", input: { stepId: "recovered-step" }, reason: "must not run" }) },
+      planValidator: createPlanValidator(),
+      agents: { application_agent: { execute } },
+      checkpointer: new MemorySaver()
+    });
+
+    const result = await graph.invoke({
+      runId: "recovered-run",
+      intent: intentForApplication,
+      plan,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, { configurable: { thread_id: "recovered-run" } });
+
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("plan_deadlock");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("clears an old approval when replanning the same step", async () => {
+    const plan = PlanStateSchema.parse({
+      planId: "plan-replan-approval",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "approval-step",
+        objective: "verify application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 1,
+        acceptanceCriteria: ["verified"],
+        risk: "high"
+      }],
+      assumptions: [],
+      approvalPoints: [{ id: "approval:approval-step", kind: "high_risk_action", stepId: "approval-step", required: true }],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const execute = vi.fn(async () => ({ status: "blocked" as const, errorCode: "stale_snapshot" }));
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: createSupervisor({ idFactory: () => "replan-approval", now: () => "2026-09-03T00:00:00.000Z" }),
+      planValidator: createPlanValidator(),
+      agents: { application_agent: { execute } },
+      replanner: createReplanner({ now: () => "2026-09-03T00:01:00.000Z" }),
+      checkpointer: new MemorySaver()
+    });
+    const config = { configurable: { thread_id: "replan-approval-run" } };
+    const first = await graph.invoke({
+      runId: "replan-approval-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, config);
+    expect(first.status).toBe("interrupted");
+
+    const second = await graph.invoke(new Command({
+      resume: { interruptId: first.pendingInterrupt!.interruptId, action: "approve", values: {} }
+    }), config);
+
+    expect(execute).toHaveBeenCalledTimes(1);
+    expect(second.status).toBe("interrupted");
+    expect(second.pendingInterrupt?.reason).toBe("high_risk_action");
+    expect(second.pendingInterrupt?.proposedAction).toEqual(expect.objectContaining({ planRevision: 2 }));
+  });
+
+  it("rejects expired and non-confirming human approvals", async () => {
+    const plan = PlanStateSchema.parse({
+      planId: "plan-expired-approval",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "expired-step",
+        objective: "verify application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 1,
+        acceptanceCriteria: ["verified"],
+        risk: "high"
+      }],
+      assumptions: [],
+      approvalPoints: [{ id: "approval:expired-step", kind: "high_risk_action", stepId: "expired-step", required: true }],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: {
+        decide: async () => ({
+          type: "ask_human" as const,
+          interrupt: {
+            interruptId: "expired-approval",
+            reason: "high_risk_action" as const,
+            summary: "confirm",
+            evidenceRefs: [],
+            proposedAction: {
+              kind: "high_risk_action",
+              runId: "expired-run",
+              stepId: "expired-step",
+              planRevision: 1,
+              executionEpoch: 0
+            },
+            expiresAt: "2026-09-02T23:59:00.000Z"
+          }
+        })
+      },
+      planValidator: createPlanValidator(),
+      checkpointer: new MemorySaver(),
+      now: () => "2026-09-03T00:00:00.000Z"
+    });
+    const config = { configurable: { thread_id: "expired-run" } };
+    const first = await graph.invoke({
+      runId: "expired-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, config);
+    expect(first.status).toBe("interrupted");
+
+    const expired = await graph.invoke(new Command({
+      resume: { interruptId: "expired-approval", action: "approve", values: {} }
+    }), config);
+    expect(expired.status).toBe("blocked");
+    expect(expired.error?.code).toBe("approval_expired");
   });
 });

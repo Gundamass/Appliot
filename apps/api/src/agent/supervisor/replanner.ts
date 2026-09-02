@@ -61,6 +61,8 @@ export function createReplanner(options: ReplannerOptions = {}): Replanner {
           ...step,
           status: "pending" as const,
           attempt: 0,
+          attemptToken: undefined,
+          approvalBinding: undefined,
           dependsOn: [...step.dependsOn],
           inputRefs,
           outputRefs

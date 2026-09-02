@@ -43,4 +43,24 @@ describe("PlanValidator", () => {
       expect.objectContaining({ code: "approval_point_missing", stepId: highRiskStep?.id })
     ]));
   });
+
+  it("requires an explicit final_submit capability for irreversible steps", async () => {
+    const plan = await createPlanner({ idFactory: () => "plan-id", now: () => "2026-09-03T00:00:00.000Z" })
+      .create({ ...intentForApplication, primaryGoal: "submit_application" });
+    const irreversible = plan.steps.find((step) => step.risk === "irreversible");
+    expect(irreversible).toBeDefined();
+    const invalid = PlanStateSchema.parse({
+      ...plan,
+      steps: plan.steps.map((step) => step.id === irreversible?.id
+        ? { ...step, capabilityNames: undefined }
+        : step)
+    });
+
+    const result = createPlanValidator().validate(invalid);
+
+    expect(result.valid).toBe(false);
+    expect(result.errors).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: "irreversible_capability_missing", stepId: irreversible?.id })
+    ]));
+  });
 });

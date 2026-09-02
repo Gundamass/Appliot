@@ -125,7 +125,12 @@ function createInterrupt(
       stepId: step.id,
       planRevision: plan?.revision ?? 1,
       executionEpoch,
-      ...(step.outputRefs.length === 0 ? {} : { outputRefs: step.outputRefs })
+      ...(step.outputRefs.length === 0 ? {} : { outputRefs: step.outputRefs }),
+      ...(step.approvalBinding === undefined ? {} : {
+        snapshotId: step.approvalBinding.snapshotId,
+        targetFingerprint: step.approvalBinding.targetFingerprint,
+        payloadHash: step.approvalBinding.payloadHash
+      })
     },
     expiresAt: new Date(Date.parse(now()) + approvalTtlMs).toISOString()
   });
