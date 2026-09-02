@@ -94,3 +94,25 @@ Browser Worker 的 13 个测试文件中有 `61/125` 通过，另外 `64` 条均
 - 隐私检查：流程摘要未出现 `tavilyApiKey`、Authorization、Cookie、原始 MCP 报文、原始模型提示词或隐私提示文案；旧的全局“处理过程”标题数量为 `0`，已移除的“可审计执行摘要 · 隐私内容和密钥已隐藏”数量为 `0`。
 - 安全边界：岗位匹配、筛选确认、受控浏览器、人工接管和最终提交锁定逻辑保持不变；额外的投递服务测试为 `7/7`；本期未新增企业招聘状态跟踪、外部状态轮询、Webhook、同步或通知。
 - 已知问题：计划指定的 `src/applications/application-service.test.ts` 在当前仓库不存在，因此该命令实际收集了 3 个测试文件；已用现有 `application-service-router.test.ts` 和 `graph-application-service.test.ts` 补跑，结果为 `7/7`。全仓测试第一次运行时曾在高负载下出现 Browser Worker `node-registry.test.ts` 的 `1/125` 时序失败，单文件连续 3 次和随后第二次全仓运行均通过（Browser Worker `125/125`）；本次未修改该无关逻辑。这不是当前功能的运行时失败，但后续可考虑将该定时器测试改为条件等待。
+
+## Task 8 发布门禁复核（2026-09-02）
+
+本轮按计划重新执行完整门禁，并保留实际命令与结果：
+
+| 命令 | 结果 |
+| --- | --- |
+| `rtk proxy corepack pnpm test` | 退出码 `0`；11 个 workspace 全部通过，共 168 个测试文件、1608 个测试，无失败、无跳过。各 workspace：Synthetic ATS `1/1` 文件、`5/5` 测试；Contracts `11/11`、`94/94`；Model Provider `4/4`、`53/53`；Action Policy `1/1`、`5/5`；Form Semantics `5/5`、`36/36`；Job Matching `7/7`、`65/65`；RAG `3/3`、`195/195`；Browser Worker `13/13`、`125/125`；Web `42/42`、`240/240`；Profile Domain `3/3`、`49/49`；API `78/78`、`741/741`。 |
+| `rtk proxy corepack pnpm typecheck` | 退出码 `0`，无类型错误。 |
+| `rtk proxy corepack pnpm build` | 退出码 `0`；共享包、Web、API 和 Browser Worker 构建完成。 |
+| `rtk proxy corepack pnpm test:e2e -- --grep "conversation|job match|application task"` | `2/2` 通过，覆盖对话内流程点、岗位卡片、详情展开、旧地址回跳和窄屏无横向溢出。 |
+| `rtk proxy corepack pnpm test:e2e` | 首次为 `43/44`：唯一失败是旧 `profile-workspace.spec.ts` 仍访问根路径并期待旧的“候选人档案”首页；更新为 `?view=profile` 并断言当前侧栏后，专项 `1/1` 通过，重新执行完整回归为 `44/44`，耗时约 2.4 分钟。 |
+| `rtk git diff --check` | 退出码 `0`。 |
+
+失败根因是测试契约落后于 Task 6 的既定路由变化，不是 API、服务或页面运行时异常；修复仅更新浏览器回归入口和导航文案断言，没有改变业务逻辑。`services:start` 返回退出码 `0`，随后 `services:status` 显示守护器、远程 OCR、远程 Embedding、SSH 隧道、API/浏览器 Worker 和前端均为“就绪”。
+
+本轮新增的岗位匹配对话截图已生成：
+
+- `playwright-artifacts/conversation-job-match-flow-desktop.png`
+- `playwright-artifacts/conversation-job-match-flow-mobile.png`
+
+本期仍明确不实现企业招聘状态跟踪、外部状态轮询、Webhook、同步或通知；岗位匹配、受控投递、人工接管和最终提交锁定逻辑保持不变。
