@@ -24,6 +24,9 @@ import { registerJobMatchRoutes } from "./job-matching/routes.js";
 import type { createJobMatchService } from "./job-matching/job-match-service.js";
 import { registerConversationRoutes } from "./conversations/conversation-routes.js";
 import type { ConversationService } from "./conversations/conversation-service.js";
+import type { ConversationProcessEventBus } from "./conversations/conversation-events.js";
+import { registerConversationJobMatchRoutes } from "./conversations/conversation-job-match-routes.js";
+import type { ConversationJobMatchService } from "./conversations/conversation-job-match-service.js";
 
 export type { AdapterHealthRegistry } from "./health/adapter-health.js";
 
@@ -43,6 +46,9 @@ export interface AppDependencies {
   applicationService?: ApplicationService;
   jobMatchService?: ReturnType<typeof createJobMatchService>;
   conversationService?: ConversationService;
+  conversationJobMatchService?: ConversationJobMatchService;
+  conversationProcessEvents?: ConversationProcessEventBus;
+  conversationSseHeartbeatMs?: number;
   taskEvents?: TaskEventBus;
   applicationSseHeartbeatMs?: number;
   close?(): void | Promise<void>;
@@ -98,7 +104,14 @@ export async function createApp(dependencies: CreateAppDependencies) {
     registerJobMatchRoutes(app, { service: dependencies.jobMatchService });
   }
   if (dependencies.conversationService) {
-    registerConversationRoutes(app, { service: dependencies.conversationService });
+    registerConversationRoutes(app, {
+      service: dependencies.conversationService,
+      ...(dependencies.conversationProcessEvents === undefined ? {} : { processEvents: dependencies.conversationProcessEvents }),
+      ...(dependencies.conversationSseHeartbeatMs === undefined ? {} : { sseHeartbeatMs: dependencies.conversationSseHeartbeatMs })
+    });
+  }
+  if (dependencies.conversationJobMatchService) {
+    registerConversationJobMatchRoutes(app, { service: dependencies.conversationJobMatchService });
   }
   return app;
 }

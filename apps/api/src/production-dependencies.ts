@@ -63,7 +63,12 @@ import {
 import { BoundedJobMatchTraceBuffer } from "./observability/job-match-trace.js";
 import { createConversationGraph } from "./conversations/conversation-graph.js";
 import { createConversationRepository } from "./conversations/conversation-repository.js";
+import { createConversationProcessEventBus } from "./conversations/conversation-events.js";
 import { createConversationService, type ConversationService } from "./conversations/conversation-service.js";
+import {
+  createConversationJobMatchService,
+  type ConversationJobMatchService
+} from "./conversations/conversation-job-match-service.js";
 import { createTavilyRecruitmentSiteSearch } from "./recruitment-search/tavily-remote-mcp.js";
 import type { RecruitmentSearchRequest, RecruitmentSiteSearchPort } from "@resume/contracts";
 
@@ -89,6 +94,7 @@ export interface ProductionDependencies extends AppDependencies {
   evidenceRetrieval: EvidenceRetrievalPort;
   agentToolRegistry: RestrictedToolRegistry;
   conversationService: ConversationService;
+  conversationJobMatchService: ConversationJobMatchService;
 }
 
 export function createProductionDependencies(
@@ -111,6 +117,7 @@ export function createProductionDependencies(
     const profileRepository = createProfileRepository(database);
     const documentRepository = createDocumentRepository(database);
     const conversationRepository = createConversationRepository(database);
+    const conversationProcessEvents = createConversationProcessEventBus(database);
     const originalsDirectory = resolve(dirname(resolve(config.databaseFile)), "originals");
     const approvalKey = randomBytes(32);
     const actionPolicy = new ActionPolicy(approvalKey);
@@ -509,6 +516,7 @@ export function createProductionDependencies(
       applicationTasks: taskRepository,
       applicationService,
       jobMatchService,
+      processEvents: conversationProcessEvents,
       checkpointer: agentCheckpointer,
       traceSink: agentTraceSink,
       ...(recruitmentSiteSearch === undefined ? {} : {
@@ -531,6 +539,10 @@ export function createProductionDependencies(
       repository: conversationRepository,
       graph: conversationGraph
     });
+    const conversationJobMatchService = createConversationJobMatchService({
+      conversations: conversationRepository,
+      jobMatches: jobMatchService
+    });
 
     return {
       database,
@@ -541,6 +553,8 @@ export function createProductionDependencies(
       evidenceRetrieval,
       agentToolRegistry,
       conversationService,
+      conversationJobMatchService,
+      conversationProcessEvents,
       profileRepository,
       originalDocumentStore: createLocalOriginalDocumentStore(originalsDirectory),
       avatarStore: createLocalAvatarStore(originalsDirectory),

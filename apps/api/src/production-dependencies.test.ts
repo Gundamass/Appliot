@@ -78,6 +78,35 @@ function fullConfig() {
 }
 
 describe("production dependency composition", () => {
+  it("composes and exposes the inline conversation job-match action service", async () => {
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: productionBrowserClient()
+    });
+
+    expect(dependencies.conversationJobMatchService).toBeDefined();
+    const app = await createApp(dependencies);
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/conversations" });
+      const conversationId = created.json().id as string;
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${conversationId}/job-match-actions`,
+        payload: {
+          conversationId,
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          action: "pause",
+          sessionVersion: 0,
+          idempotencyKey: "composition-1"
+        }
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toMatchObject({ code: "job_match_session_not_found" });
+    } finally {
+      await app.close();
+    }
+  });
+
   it("composes job matching from confirmed knowledge-base expectations with the shared browser lease", async () => {
     const browserClient = productionBrowserClient();
     const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
