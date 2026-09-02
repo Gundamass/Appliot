@@ -24,6 +24,7 @@ import {
 import type { CapabilityCatalog } from "../capabilities/catalog.js";
 import type { CallerAttestationToken } from "../policy/caller-attestation.js";
 import type { PolicyEngine } from "../policy/policy-engine.js";
+import type { PolicyDecision } from "../policy/policy-engine.js";
 import type { TraceSink } from "../trace-sink.js";
 import type { Planner } from "./planner.js";
 import type { PlanValidator } from "./plan-validator.js";
@@ -65,20 +66,20 @@ export type SpecialistAgentRegistry = Readonly<Record<string, SpecialistAgent>>;
 export interface SupervisorGraphState {
   runId: string;
   intent: CanonicalIntent;
-  plan?: PlanState;
-  decision?: SupervisorDecision;
-  currentStepId?: string;
-  approvedStepId?: string;
-  approvedPlanRevision?: number;
-  approvedExecutionEpoch?: number;
+  plan?: PlanState | undefined;
+  decision?: SupervisorDecision | undefined;
+  currentStepId?: string | undefined;
+  approvedStepId?: string | undefined;
+  approvedPlanRevision?: number | undefined;
+  approvedExecutionEpoch?: number | undefined;
   executionEpoch: number;
   status: "running" | "interrupted" | "completed" | "blocked" | "failed" | "cancelled";
-  pendingInterrupt?: RuntimeHumanInterrupt;
+  pendingInterrupt?: RuntimeHumanInterrupt | undefined;
   evidenceRefs: string[];
   iteration: number;
   budget: BudgetState;
-  startedAt?: string;
-  error?: { code: string; message: string };
+  startedAt?: string | undefined;
+  error?: { code: string; message: string } | undefined;
 }
 
 export const SupervisorGraphStateSchema = z.object({
@@ -207,6 +208,11 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
       if (result.plan.intentId !== state.intent.intentId) {
         emitTrace(dependencies, state, "planning", "safety_block", "blocked", "plan_intent_mismatch");
         return failure("plan_intent_mismatch", undefined, "blocked");
+      }
+      const estimatedCostError = estimatedCostExceeded(result.plan.estimatedCost, budgetLimits);
+      if (estimatedCostError !== undefined) {
+        emitTrace(dependencies, state, "planning", "safety_block", "blocked", estimatedCostError);
+        return failure("budget_exceeded", new Error(estimatedCostError), "blocked");
       }
       emitTrace(dependencies, state, "planning", "node", "planned", "plan_validated");
       return {
@@ -536,39 +542,60 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
           const idempotencyKey = descriptor?.idempotency === "keyed"
             ? step.attemptToken ?? `${state.runId}:${plan.revision}:${step.id}:${step.attempt}`
             : undefined;
-          const authorization = await dependencies.policy.authorize({
-            caller: "graph",
-            capability: decision.capability,
-            input: decision.input,
-            context: {
-              runId: state.runId,
-              planRevision: plan.revision,
-              executionEpoch: state.executionEpoch,
-              ...(step.approvalBinding === undefined ? {} : {
-                snapshotId: step.approvalBinding.snapshotId,
-                targetFingerprint: step.approvalBinding.targetFingerprint,
-                payloadHash: step.approvalBinding.payloadHash
-              }),
+          emitTrace(dependencies, state, "executing", "tool_call", "dispatch", decision.capability);
+          let authorization: PolicyDecision;
+          try {
+            authorization = await dependencies.policy.authorize({
+              caller: "graph",
+              capability: decision.capability,
+              input: decision.input,
+              context: {
+                runId: state.runId,
+                planRevision: plan.revision,
+                executionEpoch: state.executionEpoch,
+                ...(step.approvalBinding === undefined ? {} : {
+                  snapshotId: step.approvalBinding.snapshotId,
+                  targetFingerprint: step.approvalBinding.targetFingerprint,
+                  payloadHash: step.approvalBinding.payloadHash
+                }),
+                callerAttestation: dependencies.callerAttestation,
+                ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
+                ...(resume?.values.approval === undefined ? {} : { approval: resume.values.approval })
+              }
+            });
+          } catch (error) {
+            emitTrace(dependencies, state, "executing", "tool_call", "failed", "tool_authorization_exception");
+            throw error;
+          }
+          if (!authorization.allowed) {
+            emitTrace(dependencies, state, "executing", "tool_call", "denied", `policy_${authorization.reason}`);
+            return failure(`policy_${authorization.reason}`, undefined, "blocked");
+          }
+          emitTrace(dependencies, state, "executing", "tool_call", "permit", decision.capability);
+          let rawResult: unknown;
+          try {
+            rawResult = await dependencies.catalog.invoke(decision.capability, authorization.input, {
+              caller: "graph",
               callerAttestation: dependencies.callerAttestation,
-              ...(idempotencyKey === undefined ? {} : { idempotencyKey }),
-              ...(resume?.values.approval === undefined ? {} : { approval: resume.values.approval })
-            }
-          });
-          if (!authorization.allowed) return failure(`policy_${authorization.reason}`, undefined, "blocked");
-          await dependencies.catalog.invoke(decision.capability, authorization.input, {
-            caller: "graph",
-            callerAttestation: dependencies.callerAttestation,
-            runId: state.runId,
-            executionEpoch: state.executionEpoch,
-            signal: controller.signal,
-            permit: authorization.permit,
-            ...(idempotencyKey === undefined ? {} : { idempotencyKey })
-          });
-          result = {
-            status: "completed",
-            evidenceRefs: state.evidenceRefs,
-            satisfiedCriteria: step.acceptanceCriteria
-          };
+              runId: state.runId,
+              executionEpoch: state.executionEpoch,
+              signal: controller.signal,
+              permit: authorization.permit,
+              ...(idempotencyKey === undefined ? {} : { idempotencyKey })
+            });
+          } catch (error) {
+            emitTrace(dependencies, state, "executing", "tool_call", "failed", "tool_invoke_exception");
+            throw error;
+          }
+          result = capabilityExecutionResult(rawResult);
+          emitTrace(
+            dependencies,
+            state,
+            "executing",
+            "tool_call",
+            result.status === "completed" ? "complete" : "failed",
+            result.errorCode ?? decision.capability
+          );
         } else {
           return failure("decision_not_executable");
         }
@@ -588,6 +615,10 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
         return failure("budget_exceeded", new Error(executionBudgetError), "blocked");
       }
       if (result.status === "completed") {
+        if (dependencies.evidenceRefValidator === undefined) {
+          emitTrace(dependencies, state, "executing", "safety_block", "blocked", "evidence_ref_validator_missing");
+          return failure("evidence_ref_validator_missing", undefined, "blocked");
+        }
         const evidenceRefs = [...new Set(result.evidenceRefs ?? [])];
         const evidenceError = validateEvidenceRefs(evidenceRefs, dependencies.evidenceRefValidator);
         if (evidenceError !== undefined) return failure(evidenceError, undefined, "blocked");
@@ -724,8 +755,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
             budget: defaultBudget(),
             ...initial
           });
-          if (!parsed.success
-            || ("status" in initial && initial.status !== "running" && initial.status !== undefined)
+          if (!parsed.success || untrustedInitialState(initial)
             || parsed.data.plan?.steps.some((step) => step.status === "completed" && step.attempt === 0)) {
             return { ...(parsed.success ? parsed.data : initial), ...failure("invalid_initial_state", undefined, "blocked") };
           }
@@ -746,6 +776,58 @@ function acceptsUnboundApprovalPlan(
 ): result is PlanValidationResult & { plan: PlanState } {
   return result.plan !== undefined
     && (result.valid || result.errors.every((error) => error.code === "approval_binding_missing"));
+}
+
+function untrustedInitialState(initial: Record<string, unknown>): boolean {
+  if ("status" in initial && initial.status !== undefined && initial.status !== "running") return true;
+  if ("evidenceRefs" in initial) {
+    const refs = initial.evidenceRefs;
+    if (!Array.isArray(refs) || refs.length > 0) return true;
+  }
+  if ("iteration" in initial && initial.iteration !== undefined && initial.iteration !== 0) return true;
+  if ("executionEpoch" in initial && initial.executionEpoch !== undefined && initial.executionEpoch !== 0) return true;
+  if ("startedAt" in initial && initial.startedAt !== undefined) return true;
+  if ("plan" in initial || "decision" in initial || "currentStepId" in initial
+    || "approvedStepId" in initial || "approvedPlanRevision" in initial
+    || "approvedExecutionEpoch" in initial || "pendingInterrupt" in initial || "error" in initial) return true;
+  if ("budget" in initial) {
+    const budget = readRecord(initial.budget);
+    const defaults = defaultBudget();
+    if (budget === undefined || Object.entries(defaults).some(([metric, value]) => budget[metric] !== value)) return true;
+  }
+  return false;
+}
+
+function estimatedCostExceeded(
+  estimatedCost: PlanState["estimatedCost"],
+  limits: BudgetLimits
+): string | undefined {
+  const checks: Array<[string, number, number | undefined]> = [
+    ["steps_exceeded", estimatedCost.steps, limits.maxSteps],
+    ["tool_calls_exceeded", estimatedCost.toolCalls, limits.maxToolCalls],
+    ["tokens_exceeded", estimatedCost.tokens, limits.maxTokens],
+    ["duration_exceeded", estimatedCost.durationMs, limits.maxDurationMs]
+  ];
+  return checks.find(([, value, limit]) => limit !== undefined && value > limit)?.[0];
+}
+
+function capabilityExecutionResult(raw: unknown): SpecialistExecutionResult {
+  const value = readRecord(raw);
+  if (value === undefined) return { status: "failed", errorCode: "capability_result_invalid" };
+  const status = value.status;
+  if (status !== undefined && status !== "completed" && status !== "blocked" && status !== "failed") {
+    return { status: "failed", errorCode: "capability_result_invalid" };
+  }
+  const evidenceRefs = value.evidenceRefs;
+  const satisfiedCriteria = value.satisfiedCriteria;
+  return {
+    status: status === "blocked" || status === "failed" ? status : "completed",
+    ...(typeof value.outputRef === "string" ? { outputRef: value.outputRef } : {}),
+    ...(Array.isArray(evidenceRefs) && evidenceRefs.every((ref): ref is string => typeof ref === "string") ? { evidenceRefs } : {}),
+    ...(Array.isArray(satisfiedCriteria) && satisfiedCriteria.every((criterion): criterion is string => typeof criterion === "string") ? { satisfiedCriteria } : {}),
+    ...(typeof value.errorCode === "string" ? { errorCode: value.errorCode } : {}),
+    ...(value.retryable === true ? { retryable: true } : {})
+  };
 }
 
 function makeAttemptToken(runId: string, planId: string, revision: number, stepId: string, attempt: number): string {
@@ -845,6 +927,7 @@ function completionValidation(
   validator: ((ref: string) => boolean) | undefined
 ): string | undefined {
   if (state.evidenceRefs.length === 0) return "evidence_required_for_completion";
+  if (validator === undefined) return "evidence_ref_validator_missing";
   const evidenceError = validateEvidenceRefs(state.evidenceRefs, validator);
   if (evidenceError !== undefined) return evidenceError;
   for (const step of state.plan?.steps ?? []) {

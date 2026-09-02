@@ -71,4 +71,27 @@ operable program or batch file.
 - 默认启用有限 `BudgetLimits`，步骤/工具/replan/retry/token/时长均在运行前后做预算比较；attempt token 超长时使用 SHA-256 压缩保持小于 256 字符。
 - graph 初始入口执行 `SupervisorGraphStateSchema.safeParse`，拒绝预标记 completed/running 计划、非零预算或 evidence 注入。
 
+## Task5 安全闭环增量（2026-09-03，第二阶段）
+
+- 初始入口进一步区分 fresh invocation 与受信 checkpoint recovery：调用者不得注入非零 `evidenceRefs`、预算、iteration、executionEpoch、plan/decision/interrupt 等运行态；恢复必须由 checkpointer 提供。
+- planning 阶段直接比较 `PlanState.estimatedCost` 与 graph 统一 `BudgetLimits`，超限在任何 dispatch 前阻断。
+- `invoke_tool` 消费并校验 capability 返回的本次执行结果（status/evidenceRefs/satisfiedCriteria/outputRef），不再使用历史 `state.evidenceRefs` 伪造完成证明；授权拒绝、授权异常、permit、调用完成/失败均写入 `tool_call` trace。
+- 完成路径没有 `evidenceRefValidator` 时 fail-closed（`evidence_ref_validator_missing`）；补充工具证据 provenance、伪造运行态、预算预检和 trace 回归测试。
+
+验证命令与结果：
+
+```text
+rtk node ../../node_modules/.pnpm/vitest@3.2.4_@types+node@24_82de0c4cd52e89de8a6d58ba52a5bc01/node_modules/vitest/vitest.mjs run src/agent/supervisor --reporter=dot
+Test Files  5 passed (5)
+Tests       41 passed (41)
+
+rtk node ../../node_modules/.pnpm/typescript@5.8.3/node_modules/typescript/bin/tsc --noEmit 2>&1 | Select-String 'supervisor-graph.ts|supervisor-graph.test.ts|specialist-attestation.test.ts'
+无本批文件诊断；仓库其余依赖缺失诊断仍存在。
+
+rtk git diff --check
+通过（无输出）。
+```
+
+未解决 Critical：`GraphService` 仍调用 `createLegacyMainGraph`，而现有 GraphService/GraphApplicationService 合约使用 `AgentGraphState`、旧 HumanInterrupt 和 application state；新 Supervisor graph 使用 `CanonicalIntent`、受限引用状态及 SpecialistExecutionResult，缺少安全的 typed artifact/intent/interrupt 适配。已按选择 B 标记为架构迁移缺口，未用隐式 fallback 掩盖；需后续 Runtime/Task9 cutover 决策后移除旧生产入口。
+
 验证：聚焦新增测试使用 `node ../../node_modules/vitest/vitest.mjs run src/agent/supervisor/supervisor-graph.test.ts -t 'blocks irreversible approval|rebinds an invalidated|rejects precompleted|bounds generated'`，4 项新增行为通过；完整 supervisor 回归受现有测试仍注入初始 evidence、且未提供 approval provider 的旧断言影响。类型检查环境可执行 TypeScript，但仓库当前存在大量既有依赖缺失诊断；`git diff --check` 应在提交前运行。

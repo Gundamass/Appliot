@@ -8,7 +8,7 @@ import { defineCapability } from "../capabilities/descriptor.js";
 import { createApprovalSystem } from "../policy/approval-gate.js";
 import { createCallerAttestationAuthority } from "../policy/caller-attestation.js";
 import { createPolicyEngine } from "../policy/policy-engine.js";
-import { createSupervisorGraph } from "./supervisor-graph.js";
+import { createSupervisorGraph as createRawSupervisorGraph } from "./supervisor-graph.js";
 import { createPlanValidator } from "./plan-validator.js";
 import { createPlanner } from "./planner.js";
 import { createReplanner } from "./replanner.js";
@@ -27,6 +27,10 @@ const approvalBindingProvider = async ({ plan, step }: { plan: { revision: numbe
   targetFingerprint: `target:${step.id}`,
   payloadHash: "c".repeat(64)
 });
+const evidenceRefValidator = (ref: string) => ref.startsWith("evidence-");
+const createSupervisorGraph = (
+  dependencies: Parameters<typeof createRawSupervisorGraph>[0]
+) => createRawSupervisorGraph({ evidenceRefValidator, ...dependencies });
 
 describe("SupervisorGraph", () => {
   it("blocks irreversible approval when the trusted binding provider is missing", async () => {
@@ -36,7 +40,7 @@ describe("SupervisorGraph", () => {
       primaryGoal: "submit_application",
       subGoals: ["submit_application"]
     });
-    const graph = createSupervisorGraph({
+    const graph = createRawSupervisorGraph({
       planner: createPlanner({ idFactory: () => "missing-provider-plan", now: () => "2026-09-03T00:00:00.000Z" }),
       supervisor: createSupervisor({ idFactory: () => "missing-provider-interrupt", now: () => "2026-09-03T00:00:00.000Z" }),
       planValidator: createPlanValidator(),
@@ -111,6 +115,57 @@ describe("SupervisorGraph", () => {
     expect(result.error?.code).toBe("invalid_initial_state");
   });
 
+  it("rejects forged running-state evidence and budget on fresh invocation", async () => {
+    const graph = createSupervisorGraph({
+      planner: { create: async () => { throw new Error("must not plan"); } },
+      supervisor: { decide: async () => { throw new Error("must not supervise"); } },
+      planValidator: createPlanValidator(),
+      checkpointer: new MemorySaver()
+    });
+    const result = await graph.invoke({
+      runId: "forged-running-run", intent: intentForApplication, status: "running",
+      evidenceRefs: ["forged-evidence"],
+      budget: { steps: 3, toolCalls: 0, retries: 0, replans: 0, tokens: 0, elapsedMs: 0 },
+      iteration: 0
+    }, { configurable: { thread_id: "forged-running-run" } });
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("invalid_initial_state");
+  });
+
+  it("fails closed when a capability reports completion without an evidence validator", async () => {
+    const catalog = createCapabilityCatalog([defineCapability({
+      descriptor: {
+        name: "data.read.unverified", version: "1.0.0", kind: "read", risk: "low",
+        sideEffect: "none", allowedCallers: ["graph"], requiresApproval: false,
+        idempotency: "idempotent", timeoutMs: 5_000
+      },
+      inputSchema: z.object({ stepId: z.string(), intentId: z.string(), planRevision: z.number(), inputRefs: z.array(z.string()) }).strict(),
+      outputSchema: z.object({ evidenceRefs: z.array(z.string()), satisfiedCriteria: z.array(z.string()) }).strict(),
+      handler: async () => ({ evidenceRefs: ["unverified"], satisfiedCriteria: ["read"] })
+    })]);
+    const authority = createCallerAttestationAuthority({ signingKey: Buffer.alloc(32, 91) });
+    const policy = createPolicyEngine({
+      catalog,
+      approvalGate: createApprovalSystem({ signingKey: Buffer.alloc(32, 92), verifyHumanPrincipal: () => ({ subject: "user" }) }).gate,
+      callerAttestationVerifier: authority.verifier
+    });
+    const plan = PlanStateSchema.parse({
+      planId: "plan-unverified", intentId: intentForApplication.intentId, revision: 1,
+      steps: [{ id: "read-step", objective: "read", owner: "resume", status: "pending", dependsOn: [], inputRefs: [intentForApplication.intentId], outputRefs: [], attempt: 0, maxAttempts: 1, acceptanceCriteria: ["read"], risk: "low", capabilityNames: ["data.read.unverified"] }],
+      assumptions: [], approvalPoints: [], estimatedCost: { steps: 1, toolCalls: 1, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createRawSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: createSupervisor({ now: () => "2026-09-03T00:00:00.000Z" }),
+      planValidator: createPlanValidator({ capabilityNames: ["data.read.unverified"] }),
+      catalog, policy, callerAttestation: authority.issuer.issue("graph"), checkpointer: new MemorySaver()
+    });
+    const result = await graph.invoke({ runId: "unverified-run", intent: intentForApplication, evidenceRefs: [], iteration: 0 }, { configurable: { thread_id: "unverified-run" } });
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("evidence_ref_validator_missing");
+  });
+
   it("bounds generated attempt tokens to the contract limit", async () => {
     const longRunId = "r".repeat(128);
     const graph = createSupervisorGraph({
@@ -135,6 +190,7 @@ describe("SupervisorGraph", () => {
         evidenceRefs: ["evidence-main"],
         satisfiedCriteria: step.acceptanceCriteria
       }) } },
+      evidenceRefValidator,
       checkpointer: new MemorySaver()
     });
 
@@ -260,6 +316,7 @@ describe("SupervisorGraph", () => {
 
   it("authorizes a low-risk tool once and passes its permit to the catalog", async () => {
     let calls = 0;
+    const traces: Array<{ kind: string; outcome: string; reasonCode: string }> = [];
     const catalog = createCapabilityCatalog([defineCapability({
       descriptor: {
         name: "data.read",
@@ -278,8 +335,8 @@ describe("SupervisorGraph", () => {
         planRevision: z.number().int().positive(),
         inputRefs: z.array(z.string())
       }).strict(),
-      outputSchema: z.object({ ok: z.boolean() }).strict(),
-      handler: async () => { calls += 1; return { ok: true }; }
+      outputSchema: z.object({ ok: z.boolean(), evidenceRefs: z.array(z.string()), satisfiedCriteria: z.array(z.string()) }).strict(),
+      handler: async () => { calls += 1; return { ok: true, evidenceRefs: ["evidence-tool"], satisfiedCriteria: ["read"] }; }
     })]);
     const callerAttestations = createCallerAttestationAuthority({ signingKey: Buffer.alloc(32, 37) });
     const policy = createPolicyEngine({
@@ -321,17 +378,53 @@ describe("SupervisorGraph", () => {
       catalog,
       policy,
       callerAttestation: callerAttestations.issuer.issue("graph"),
+      evidenceRefValidator: (ref) => ref === "evidence-tool",
+      traceSink: {
+        record: (event) => { traces.push(event); return `trace-${traces.length}`; },
+        list: () => []
+      },
       checkpointer: new MemorySaver()
     });
     const result = await graph.invoke({
       runId: "tool-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "tool-run" } });
     expect(calls).toBe(1);
     expect(result.plan?.steps[0]?.status).toBe("completed");
     expect(result.status).toBe("completed");
+    expect(traces.filter((event) => event.kind === "tool_call").map((event) => event.outcome)).toEqual([
+      "dispatch", "permit", "complete"
+    ]);
+  });
+
+  it("audits a tool authorization denial without invoking the capability", async () => {
+    const invoke = vi.fn();
+    const traces: Array<{ kind: string; outcome: string; reasonCode: string }> = [];
+    const plan = PlanStateSchema.parse({
+      planId: "plan-denied-tool", intentId: intentForApplication.intentId, revision: 1,
+      steps: [{ id: "denied-step", objective: "read", owner: "resume", status: "pending", dependsOn: [], inputRefs: [intentForApplication.intentId], outputRefs: [], attempt: 0, maxAttempts: 1, acceptanceCriteria: ["read"], risk: "low", capabilityNames: ["data.denied"] }],
+      assumptions: [], approvalPoints: [], estimatedCost: { steps: 1, toolCalls: 1, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: createSupervisor(),
+      planValidator: createPlanValidator({ capabilityNames: ["data.denied"] }),
+      catalog: {
+        names: () => ["data.denied"], get: () => undefined,
+        describe: () => ({ name: "data.denied", version: "1.0.0", kind: "read", risk: "low", sideEffect: "none", allowedCallers: ["graph"], requiresApproval: false, idempotency: "idempotent", timeoutMs: 1_000 }),
+        invoke
+      },
+      policy: { authorize: async () => ({ allowed: false as const, reason: "policy_blocked" as const }) },
+      traceSink: { record: (event) => { traces.push(event); return `trace-${traces.length}`; }, list: () => [] },
+      checkpointer: new MemorySaver()
+    });
+    const result = await graph.invoke({ runId: "denied-tool-run", intent: intentForApplication, evidenceRefs: [], iteration: 0 }, { configurable: { thread_id: "denied-tool-run" } });
+    expect(result.error?.code).toBe("policy_policy_blocked");
+    expect(invoke).not.toHaveBeenCalled();
+    expect(traces.filter((event) => event.kind === "tool_call").map((event) => event.outcome)).toEqual(["dispatch", "denied"]);
   });
 
   it("blocks a supervisor decision that targets a different step", async () => {
@@ -561,7 +654,7 @@ describe("SupervisorGraph", () => {
     await running;
   });
 
-  it("does not dispatch a running attempt recovered from a checkpoint", async () => {
+  it("does not accept a caller-supplied running attempt as checkpoint recovery", async () => {
     const execute = vi.fn(async () => ({ status: "completed" as const }));
     const plan = PlanStateSchema.parse({
       planId: "plan-recovered-running",
@@ -604,7 +697,7 @@ describe("SupervisorGraph", () => {
     }, { configurable: { thread_id: "recovered-run" } });
 
     expect(result.status).toBe("blocked");
-    expect(result.error?.code).toBe("plan_deadlock");
+    expect(result.error?.code).toBe("invalid_initial_state");
     expect(execute).not.toHaveBeenCalled();
   });
 
@@ -950,7 +1043,6 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "replan-history-limit-run",
       intent: intentForApplication,
-      plan,
       evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "replan-history-limit-run" } });
@@ -1181,7 +1273,7 @@ describe("SupervisorGraph", () => {
     expect(result.plan?.steps[0]?.attempt).toBe(2);
   });
 
-  it("compares every runtime budget metric before dispatch", async () => {
+  it("rejects caller-supplied runtime budget state", async () => {
     const metrics = [
       ["steps", "maxSteps"],
       ["toolCalls", "maxToolCalls"],
@@ -1228,8 +1320,25 @@ describe("SupervisorGraph", () => {
         iteration: 0
       }, { configurable: { thread_id: `budget-${metric}` } });
       expect(result.status, metric).toBe("blocked");
-      expect(result.error?.code, metric).toBe("budget_exceeded");
+      expect(result.error?.code, metric).toBe("invalid_initial_state");
     }
+  });
+
+  it("blocks a valid plan whose estimated cost exceeds graph limits", async () => {
+    const plan = PlanStateSchema.parse({
+      planId: "plan-estimated-budget", intentId: intentForApplication.intentId, revision: 1,
+      steps: [], assumptions: [], approvalPoints: [],
+      estimatedCost: { steps: 2, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: { decide: async () => ({ type: "finish" as const, outcome: "completed" as const, summary: "done" }) },
+      planValidator: createPlanValidator(), budgetLimits: { maxSteps: 1 }, checkpointer: new MemorySaver()
+    });
+    const result = await graph.invoke({ runId: "estimated-budget-run", intent: intentForApplication, evidenceRefs: [], iteration: 0 }, { configurable: { thread_id: "estimated-budget-run" } });
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("budget_exceeded");
   });
 
   it("does not accept an attempt token supplied by the plan input", async () => {

@@ -69,6 +69,7 @@ describe("Supervisor specialist caller attestation", () => {
       },
       planValidator: createPlanValidator(),
       specialistCallerAttestation: token,
+      evidenceRefValidator: (ref) => ref === "evidence-specialist",
       agents: {
         resume_agent: {
           execute: async (input) => {
@@ -87,7 +88,7 @@ describe("Supervisor specialist caller attestation", () => {
     const result = await graph.invoke({
       runId: "specialist-attestation-run",
       intent,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "specialist-attestation-run" } });
 
