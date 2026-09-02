@@ -18,8 +18,8 @@ import { createApplicationTools } from "./agent/application-tools.js";
 import { createGraphService } from "./agent/graph-service.js";
 import {
   createCallerAttestationAuthority,
-  issueCallerAttestationTokens,
-  type CallerAttestationTokens,
+  createCallerAttestationProvider,
+  type CallerAttestationProvider,
   type CallerAttestationVerifier
 } from "./agent/policy/caller-attestation.js";
 import { SqliteAgentCheckpointer } from "./agent/sqlite-checkpointer.js";
@@ -99,8 +99,8 @@ export interface ProductionDependencies extends AppDependencies {
   browserOwnershipLease: BrowserOwnershipLease;
   evidenceRetrieval: EvidenceRetrievalPort;
   agentToolRegistry: RestrictedToolRegistry;
-  /** Scoped, opaque caller tokens issued once by this trusted composition root. */
-  agentCallerAttestations: CallerAttestationTokens;
+  /** Trusted provider for dynamic, per-run scoped caller tokens. */
+  agentCallerAttestationProvider: CallerAttestationProvider;
   /** Verifier paired with the scoped tokens; never exposed to model code. */
   agentCallerAttestationVerifier: CallerAttestationVerifier;
   conversationService: ConversationService;
@@ -134,7 +134,7 @@ export function createProductionDependencies(
       signingKey: randomBytes(32),
       ttlMs: 15 * 60_000
     });
-    const agentCallerAttestations = issueCallerAttestationTokens(callerAttestationAuthority.issuer);
+    const agentCallerAttestationProvider = createCallerAttestationProvider(callerAttestationAuthority.issuer);
     const actionPolicy = new ActionPolicy(approvalKey);
     type BrowserClient = ProductionBrowserClient;
     const bundledWorkerEntry = new URL(import.meta.url).pathname.endsWith("/dist/server.js")
@@ -569,7 +569,7 @@ export function createProductionDependencies(
       jobMatchTrace,
       evidenceRetrieval,
       agentToolRegistry,
-      agentCallerAttestations,
+      agentCallerAttestationProvider,
       agentCallerAttestationVerifier: callerAttestationAuthority.verifier,
       conversationService,
       conversationJobMatchService,

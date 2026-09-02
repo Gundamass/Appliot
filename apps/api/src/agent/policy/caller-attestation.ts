@@ -40,6 +40,19 @@ export interface CallerAttestationIssuer {
   issue(caller: CapabilityCaller): CallerAttestationToken;
 }
 
+/**
+ * Trusted composition boundary for dynamic, per-run attestation issuance.
+ * Callers should request a fresh token when a graph/runtime/supervisor
+ * invocation starts instead of retaining a process-start token.
+ */
+export interface CallerAttestationProvider {
+  issue(caller: CapabilityCaller): CallerAttestationToken;
+  readonly graph: () => CallerAttestationToken;
+  readonly runtime: () => CallerAttestationToken;
+  readonly supervisor: () => CallerAttestationToken;
+  readonly specialistAgent: () => CallerAttestationToken;
+}
+
 export type CallerAttestationVerification =
   | { valid: true; caller: CapabilityCaller; attestationId: string }
   | { valid: false; reason: "caller_attestation_required" | "caller_attestation_invalid" | "caller_attestation_expired" };
@@ -66,6 +79,18 @@ export function issueCallerAttestationTokens(
     runtime: issuer.issue("runtime"),
     supervisor: issuer.issue("supervisor"),
     specialistAgent: issuer.issue("specialist_agent")
+  });
+}
+
+export function createCallerAttestationProvider(
+  issuer: CallerAttestationIssuer
+): CallerAttestationProvider {
+  return Object.freeze({
+    issue: (caller: CapabilityCaller) => issuer.issue(caller),
+    graph: () => issuer.issue("graph"),
+    runtime: () => issuer.issue("runtime"),
+    supervisor: () => issuer.issue("supervisor"),
+    specialistAgent: () => issuer.issue("specialist_agent")
   });
 }
 

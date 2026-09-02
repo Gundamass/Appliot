@@ -54,6 +54,21 @@ describe("ApprovalGate", () => {
     expect(expired.gate.verify(approval, binding)).toEqual({ valid: false, reason: "approval_expired" });
   });
 
+  it("caps issuer-provided expiry at the configured approval TTL", () => {
+    const approvals = createApprovalSystem({
+      signingKey: Buffer.alloc(32, 8),
+      now: () => "2026-09-03T00:00:00.000Z",
+      ttlMs: 60_000,
+      verifyHumanPrincipal: () => ({ subject: "user-1" })
+    });
+
+    expect(() => approvals.issuer.issue({
+      binding,
+      principal: "authenticated:user-1",
+      expiresAt: "2026-09-03T00:02:00.000Z"
+    })).toThrow("human_approval_expiry_exceeds_ttl");
+  });
+
   it("does not consume an approval during verification and consumes it once", () => {
     const approvals = system();
     const approval = approvals.issuer.issue({ binding, principal: "authenticated:user-1" });

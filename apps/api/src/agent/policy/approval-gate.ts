@@ -174,6 +174,10 @@ export function createApprovalIssuer(options: {
       const issuedAtMs = Date.parse(issuedAt);
       if (!Number.isFinite(issuedAtMs)) throw new Error("human_approval_time_invalid");
       const expiresAt = input.expiresAt ?? new Date(issuedAtMs + ttlMs).toISOString();
+      const expiresAtMs = Date.parse(expiresAt);
+      if (Number.isFinite(expiresAtMs) && expiresAtMs - issuedAtMs > ttlMs) {
+        throw new Error("human_approval_expiry_exceeds_ttl");
+      }
       const claims = ApprovalClaimsSchema.parse({
         ...binding,
         approvalId: idFactory(),

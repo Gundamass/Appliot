@@ -78,6 +78,25 @@ function fullConfig() {
 }
 
 describe("production dependency composition", () => {
+  it("exposes a trusted attestation provider that issues scoped tokens on demand", async () => {
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: productionBrowserClient()
+    });
+    try {
+      expect(dependencies.agentCallerAttestationProvider).toBeDefined();
+      expect(dependencies.agentCallerAttestationVerifier).toBeDefined();
+      const first = dependencies.agentCallerAttestationProvider.issue("runtime");
+      const second = dependencies.agentCallerAttestationProvider.issue("runtime");
+      expect(first).not.toBe(second);
+      expect(dependencies.agentCallerAttestationVerifier.verify(first)).toMatchObject({ valid: true, caller: "runtime" });
+      expect(dependencies.agentCallerAttestationVerifier.verify(second)).toMatchObject({ valid: true, caller: "runtime" });
+      // A fixed startup token set must not be part of the production boundary.
+      expect("agentCallerAttestations" in dependencies).toBe(false);
+    } finally {
+      await dependencies.close?.();
+    }
+  });
+
   it("composes and exposes the inline conversation job-match action service", async () => {
     const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
       browserClient: productionBrowserClient()
