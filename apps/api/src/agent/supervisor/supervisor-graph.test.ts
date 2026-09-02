@@ -22,12 +22,114 @@ const intentWithFinalGate = CanonicalIntentSchema.parse({
   riskProfile: { level: "low" as const, requiresHumanApproval: true, reasons: ["explicit final review"] }
 });
 
+const approvalBindingProvider = async ({ plan, step }: { plan: { revision: number }; step: { id: string } }) => ({
+  snapshotId: `snapshot:${plan.revision}`,
+  targetFingerprint: `target:${step.id}`,
+  payloadHash: "c".repeat(64)
+});
+
 describe("SupervisorGraph", () => {
+  it("blocks irreversible approval when the trusted binding provider is missing", async () => {
+    const submitIntent = CanonicalIntentSchema.parse({
+      ...intentWithFinalGate,
+      intentId: "missing-provider-intent",
+      primaryGoal: "submit_application",
+      subGoals: ["submit_application"]
+    });
+    const graph = createSupervisorGraph({
+      planner: createPlanner({ idFactory: () => "missing-provider-plan", now: () => "2026-09-03T00:00:00.000Z" }),
+      supervisor: createSupervisor({ idFactory: () => "missing-provider-interrupt", now: () => "2026-09-03T00:00:00.000Z" }),
+      planValidator: createPlanValidator(),
+      checkpointer: new MemorySaver()
+    });
+    const result = await graph.invoke({
+      runId: "missing-provider-run",
+      intent: submitIntent,
+      evidenceRefs: [],
+      iteration: 0
+    }, { configurable: { thread_id: "missing-provider-run" } });
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("approval_binding_provider_missing");
+  });
+
+  it("rebinds an invalidated approval after replanning", async () => {
+    const bindings = [
+      { snapshotId: "snapshot-1", targetFingerprint: "target-1", payloadHash: "a".repeat(64) },
+      { snapshotId: "snapshot-2", targetFingerprint: "target-2", payloadHash: "b".repeat(64) }
+    ];
+    let bindingIndex = 0;
+    const graph = createSupervisorGraph({
+      planner: {
+        create: async () => PlanStateSchema.parse({
+          planId: "rebind-plan", intentId: intentForApplication.intentId, revision: 1,
+          steps: [{ id: "approval-step", objective: "verify application", owner: "application", status: "pending", dependsOn: [], inputRefs: [intentForApplication.intentId], outputRefs: [], attempt: 0, maxAttempts: 1, acceptanceCriteria: ["verified"], risk: "high" }],
+          assumptions: [], approvalPoints: [{ id: "approval:approval-step", kind: "high_risk_action", stepId: "approval-step", required: true }], estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1000 }, createdAt: "2026-09-03T00:00:00.000Z", updatedAt: "2026-09-03T00:00:00.000Z"
+        })
+      },
+      supervisor: {
+        decide: async ({ readyStep, runId, intent, plan, executionEpoch, evidenceRefs }) => ({
+          type: "ask_human" as const,
+          interrupt: {
+            interruptId: `rebind-interrupt-${plan?.revision ?? 1}`,
+            reason: plan?.revision === 1 ? "ambiguous_fact" : "high_risk_action",
+            summary: "review",
+            evidenceRefs: [...(evidenceRefs ?? [])],
+            proposedAction: { runId: runId ?? "rebind-run", stepId: readyStep!.id, planRevision: plan!.revision, executionEpoch: executionEpoch ?? 0 },
+            expiresAt: "2026-09-03T00:15:00.000Z"
+          }
+        })
+      },
+      planValidator: createPlanValidator(),
+      approvalBindingProvider: async () => bindings[Math.min(bindingIndex++, bindings.length - 1)]!,
+      replanner: createReplanner({ now: () => "2026-09-03T00:01:00.000Z" }),
+      agents: { application_agent: { execute: async () => ({ status: "blocked" as const, errorCode: "stale_snapshot" }) } },
+      checkpointer: new MemorySaver()
+    });
+    const config = { configurable: { thread_id: "rebind-run" } };
+    const first = await graph.invoke({ runId: "rebind-run", intent: intentForApplication, evidenceRefs: [], iteration: 0 }, config);
+    expect(first.status).toBe("interrupted");
+    expect(first.plan?.steps[0]?.approvalBinding).toBeUndefined();
+    const corrected = await graph.invoke(new Command({ resume: { interruptId: first.pendingInterrupt!.interruptId, action: "correct", values: { evidenceRef: "evidence-1" } } }), config);
+    expect(corrected.status).toBe("interrupted");
+    expect(corrected.plan?.revision).toBe(2);
+    expect(corrected.plan?.steps[0]?.approvalBinding?.snapshotId).toBe("snapshot-1");
+    expect(corrected.pendingInterrupt?.proposedAction).toMatchObject({ snapshotId: "snapshot-1", planRevision: 2 });
+  });
+
+  it("rejects precompleted input state and injected budget/evidence", async () => {
+    const graph = createSupervisorGraph({
+      planner: { create: async () => { throw new Error("must not plan"); } },
+      supervisor: { decide: async () => { throw new Error("must not supervise"); } },
+      planValidator: createPlanValidator(),
+      checkpointer: new MemorySaver()
+    });
+    const result = await graph.invoke({
+      runId: "unsafe-input-run", intent: intentForApplication, status: "completed", evidenceRefs: ["injected"],
+      budget: { steps: 1, toolCalls: 0, retries: 0, replans: 0, tokens: 0, elapsedMs: 0 }, iteration: 0
+    }, { configurable: { thread_id: "unsafe-input-run" } });
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("invalid_initial_state");
+  });
+
+  it("bounds generated attempt tokens to the contract limit", async () => {
+    const longRunId = "r".repeat(128);
+    const graph = createSupervisorGraph({
+      planner: createPlanner({ idFactory: () => "p".repeat(128) }),
+      supervisor: createSupervisor(),
+      planValidator: createPlanValidator(),
+      agents: { application_agent: { execute: async ({ attemptToken }) => ({ status: "completed" as const, evidenceRefs: ["evidence-token"], satisfiedCriteria: [], outputRef: attemptToken }) } },
+      checkpointer: new MemorySaver()
+    });
+    const result = await graph.invoke({ runId: longRunId, intent: intentForApplication, evidenceRefs: [], iteration: 0 }, { configurable: { thread_id: longRunId } });
+    const token = result.plan?.steps.find((step) => step.attemptToken)?.attemptToken;
+    expect(token?.length ?? 0).toBeLessThan(256);
+  });
   it("exposes the supervisor loop as the main application graph", async () => {
     const graph = createMainGraph({
       planner: createPlanner({ idFactory: () => "main-plan", now: () => "2026-09-03T00:00:00.000Z" }),
       supervisor: createSupervisor({ idFactory: () => "main-interrupt", now: () => "2026-09-03T00:00:00.000Z" }),
       planValidator: createPlanValidator(),
+      approvalBindingProvider,
       agents: { application_agent: { execute: async ({ step }) => ({
         status: "completed" as const,
         evidenceRefs: ["evidence-main"],
@@ -39,7 +141,7 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "main-run",
       intent: intentWithFinalGate,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "main-run" } });
 
@@ -51,6 +153,7 @@ describe("SupervisorGraph", () => {
       planner: createPlanner({ idFactory: () => "plan-id", now: () => "2026-09-03T00:00:00.000Z" }),
       supervisor: createSupervisor({ idFactory: () => "interrupt-id", now: () => "2026-09-03T00:00:00.000Z" }),
       planValidator: createPlanValidator(),
+      approvalBindingProvider,
       agents: {
         application_agent: { execute: async ({ step }) => ({
           status: "completed" as const,
@@ -132,6 +235,7 @@ describe("SupervisorGraph", () => {
       planner: { create: async () => plan },
       supervisor: createSupervisor({ idFactory: () => "approval-id", now: () => "2026-09-03T00:00:00.000Z" }),
       planValidator: createPlanValidator(),
+      approvalBindingProvider,
       agents: { application_agent: { execute } },
       checkpointer: new MemorySaver()
     });
@@ -139,7 +243,7 @@ describe("SupervisorGraph", () => {
     const first = await graph.invoke({
       runId: "approval-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, config);
     expect(first.status).toBe("interrupted");
@@ -266,6 +370,7 @@ describe("SupervisorGraph", () => {
         })
       },
       planValidator: createPlanValidator(),
+      approvalBindingProvider,
       agents: { application_agent: { execute } },
       checkpointer: new MemorySaver()
     });
@@ -273,7 +378,7 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "binding-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "binding-run" } });
 
@@ -328,7 +433,7 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "deadlock-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "deadlock-run" } });
 
@@ -374,7 +479,7 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "replan-failure-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "replan-failure-run" } });
 
@@ -439,7 +544,7 @@ describe("SupervisorGraph", () => {
     const running = graph.invoke({
       runId: "running-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, config);
 
@@ -494,7 +599,7 @@ describe("SupervisorGraph", () => {
       runId: "recovered-run",
       intent: intentForApplication,
       plan,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "recovered-run" } });
 
@@ -532,6 +637,7 @@ describe("SupervisorGraph", () => {
       planner: { create: async () => plan },
       supervisor: createSupervisor({ idFactory: () => "replan-approval", now: () => "2026-09-03T00:00:00.000Z" }),
       planValidator: createPlanValidator(),
+      approvalBindingProvider,
       agents: { application_agent: { execute } },
       replanner: createReplanner({ now: () => "2026-09-03T00:01:00.000Z" }),
       checkpointer: new MemorySaver()
@@ -540,7 +646,7 @@ describe("SupervisorGraph", () => {
     const first = await graph.invoke({
       runId: "replan-approval-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, config);
     expect(first.status).toBe("interrupted");
@@ -600,6 +706,7 @@ describe("SupervisorGraph", () => {
         })
       },
       planValidator: createPlanValidator(),
+      approvalBindingProvider,
       checkpointer: new MemorySaver(),
       now: () => "2026-09-03T00:00:00.000Z"
     });
@@ -607,7 +714,7 @@ describe("SupervisorGraph", () => {
     const first = await graph.invoke({
       runId: "expired-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, config);
     expect(first.status).toBe("interrupted");
@@ -667,7 +774,7 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "decision-binding-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "decision-binding-run" } });
 
@@ -724,7 +831,7 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "owner-binding-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "owner-binding-run" } });
 
@@ -780,7 +887,7 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "replan-binding-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "replan-binding-run" } });
 
@@ -844,7 +951,7 @@ describe("SupervisorGraph", () => {
       runId: "replan-history-limit-run",
       intent: intentForApplication,
       plan,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "replan-history-limit-run" } });
 
@@ -905,7 +1012,7 @@ describe("SupervisorGraph", () => {
     const first = await graph.invoke({
       runId: "prompt-injection-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, config);
     expect(first.status).toBe("interrupted");
@@ -957,13 +1064,14 @@ describe("SupervisorGraph", () => {
       planner: { create: async () => plan },
       supervisor: createSupervisor({ idFactory: () => "confirm-only", now: () => "2026-09-03T00:00:00.000Z" }),
       planValidator: createPlanValidator({ capabilityNames: ["final_submit"] }),
+      approvalBindingProvider,
       checkpointer: new MemorySaver()
     });
     const config = { configurable: { thread_id: "confirm-only-run" } };
     const first = await graph.invoke({
       runId: "confirm-only-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, config);
     expect(first.status).toBe("interrupted");
@@ -976,7 +1084,7 @@ describe("SupervisorGraph", () => {
     expect(approved.error?.code).toBe("approval_action_invalid");
   });
 
-  it("blocks irreversible approval interrupts without a complete binding", async () => {
+  it("blocks irreversible approval interrupts when the provider binding is invalid", async () => {
     const plan = PlanStateSchema.parse({
       planId: "plan-missing-binding",
       intentId: intentForApplication.intentId,
@@ -1005,18 +1113,19 @@ describe("SupervisorGraph", () => {
       planner: { create: async () => plan },
       supervisor: createSupervisor({ now: () => "2026-09-03T00:00:00.000Z" }),
       planValidator: createPlanValidator({ capabilityNames: ["final_submit"] }),
+      approvalBindingProvider: async () => ({ snapshotId: "snapshot", targetFingerprint: "target", payloadHash: "invalid" }),
       checkpointer: new MemorySaver()
     });
 
     const result = await graph.invoke({
       runId: "missing-binding-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "missing-binding-run" } });
 
     expect(result.status).toBe("blocked");
-    expect(result.error?.code).toBe("plan_invalid");
+    expect(result.error?.code).toBe("approval_binding_invalid");
   });
 
   it("retries a retryable specialist failure until maxAttempts", async () => {
@@ -1062,7 +1171,7 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "retry-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "retry-run" } });
 
@@ -1113,7 +1222,7 @@ describe("SupervisorGraph", () => {
       const result = await graph.invoke({
         runId: `budget-${metric}`,
         intent: intentForApplication,
-        evidenceRefs: ["evidence-1"],
+        evidenceRefs: [],
         startedAt: "2026-09-03T00:00:00.000Z",
         budget,
         iteration: 0
@@ -1159,7 +1268,7 @@ describe("SupervisorGraph", () => {
     const result = await graph.invoke({
       runId: "forged-attempt-run",
       intent: intentForApplication,
-      evidenceRefs: ["evidence-1"],
+      evidenceRefs: [],
       iteration: 0
     }, { configurable: { thread_id: "forged-attempt-run" } });
     expect(result.status).toBe("blocked");

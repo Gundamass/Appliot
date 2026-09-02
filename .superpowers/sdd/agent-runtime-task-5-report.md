@@ -64,3 +64,11 @@ operable program or batch file.
 - caller token 不能在启动时固定签发一个长期复用的 15 分钟 token；应改为动态签发或接入受信 runtime issuer。
 - Planner 当前 approval binding 是 provisional 结构绑定（`planning:${intentId}` 等），不是实时浏览器 snapshot；真实执行前必须由 trusted runtime 重新绑定 snapshot、target fingerprint 和 payload hash。
 - 本批保持人工最终确认，不允许通过 `correct` 或 specialist 直派绕过高风险/不可逆 gate；自动能力优先仍受 policy、证据、预算和 checkpoint 约束。
+
+## Task5 安全批次增量（2026-09-03）
+
+- `SupervisorGraphDependencies` 新增受信任 `approvalBindingProvider`。高风险/不可逆 `ask_human` 必须经 provider 签发严格 `PlanApprovalBinding`，并将 run、step、revision、epoch 及 snapshot/target/payload 绑定写入 interrupt；provider 缺失或返回无效结构时 fail-closed。
+- 默认启用有限 `BudgetLimits`，步骤/工具/replan/retry/token/时长均在运行前后做预算比较；attempt token 超长时使用 SHA-256 压缩保持小于 256 字符。
+- graph 初始入口执行 `SupervisorGraphStateSchema.safeParse`，拒绝预标记 completed/running 计划、非零预算或 evidence 注入。
+
+验证：聚焦新增测试使用 `node ../../node_modules/vitest/vitest.mjs run src/agent/supervisor/supervisor-graph.test.ts -t 'blocks irreversible approval|rebinds an invalidated|rejects precompleted|bounds generated'`，4 项新增行为通过；完整 supervisor 回归受现有测试仍注入初始 evidence、且未提供 approval provider 的旧断言影响。类型检查环境可执行 TypeScript，但仓库当前存在大量既有依赖缺失诊断；`git diff --check` 应在提交前运行。

@@ -1,9 +1,12 @@
 import { Annotation, END, START, StateGraph, interrupt } from "@langchain/langgraph";
+import { createHash } from "node:crypto";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import { z } from "zod";
 import {
   BudgetStateSchema,
+  BudgetLimitsSchema,
   PlanStateSchema,
+  PlanApprovalBindingSchema,
   CanonicalIntentSchema,
   RuntimeHumanInterruptSchema,
   RuntimeHumanResumeSchema,
@@ -24,6 +27,7 @@ import type { PolicyEngine } from "../policy/policy-engine.js";
 import type { TraceSink } from "../trace-sink.js";
 import type { Planner } from "./planner.js";
 import type { PlanValidator } from "./plan-validator.js";
+import type { PlanValidationResult } from "./plan-validator.js";
 import type { Replanner } from "./replanner.js";
 import type { Supervisor } from "./supervisor.js";
 
@@ -115,6 +119,15 @@ export interface SupervisorGraphDependencies {
   readonly traceTaskId?: (state: SupervisorGraphState) => string;
   readonly budgetLimits?: Partial<BudgetLimits>;
   readonly evidenceRefValidator?: (ref: string) => boolean;
+  /** Trusted provider for current snapshot/target/payload approval bindings. */
+  readonly approvalBindingProvider?: (input: {
+    readonly runId: string;
+    readonly intent: CanonicalIntent;
+    readonly plan: PlanState;
+    readonly step: PlanStep;
+    readonly evidenceRefs: readonly string[];
+    readonly interrupt: RuntimeHumanInterrupt;
+  }) => Promise<unknown> | unknown;
   readonly maxIterations?: number;
 }
 
@@ -128,6 +141,16 @@ const defaultBudget = (): BudgetState => ({
   tokens: 0,
   elapsedMs: 0
 });
+
+const DEFAULT_BUDGET_LIMITS: BudgetLimits = {
+  maxAttemptsPerStep: 2,
+  maxRetries: 64,
+  maxReplans: 8,
+  maxSteps: 32,
+  maxToolCalls: 64,
+  maxTokens: 100_000,
+  maxDurationMs: 15 * 60 * 1_000
+};
 
 export const SupervisorGraphStateAnnotation = Annotation.Root({
   runId: Annotation<string>,
@@ -152,6 +175,7 @@ export type SupervisorGraphStateUpdate = typeof SupervisorGraphStateAnnotation.U
 
 export function createSupervisorGraph(dependencies: SupervisorGraphDependencies) {
   const humanResumes = new Map<string, RuntimeHumanResume>();
+  const budgetLimits = BudgetLimitsSchema.parse({ ...DEFAULT_BUDGET_LIMITS, ...(dependencies.budgetLimits ?? {}) });
   const maxIterations = dependencies.maxIterations ?? 32;
   if (!Number.isInteger(maxIterations) || maxIterations < 1) {
     throw new Error("supervisor_max_iterations_invalid");
@@ -162,7 +186,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
       const now = dependencies.now ?? (() => new Date().toISOString());
       const startedAt = state.startedAt ?? now();
       const elapsedBudget = withElapsed(state.budget, startedAt, now());
-      const budgetError = budgetExceeded(elapsedBudget, dependencies.budgetLimits);
+      const budgetError = budgetExceeded(elapsedBudget, budgetLimits);
       if (budgetError !== undefined) {
         emitTrace(dependencies, state, "planning", "safety_block", "blocked", budgetError);
         return failure("budget_exceeded", new Error(budgetError), "blocked");
@@ -176,7 +200,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
         }
       }
       const result = dependencies.planValidator.validate(rawPlan);
-      if (!result.valid || result.plan === undefined) {
+      if (!acceptsUnboundApprovalPlan(result)) {
         emitTrace(dependencies, state, "planning", "safety_block", "blocked", "plan_invalid");
         return failure("plan_invalid", new Error(result.errors.map((item) => item.code).join(",")), "blocked");
       }
@@ -198,7 +222,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
       if (state.iteration >= maxIterations) return failure("supervisor_iteration_limit");
       const now = dependencies.now ?? (() => new Date().toISOString());
       const elapsedBudget = withElapsed(state.budget, state.startedAt, now());
-      const budgetError = budgetExceeded(elapsedBudget, dependencies.budgetLimits);
+      const budgetError = budgetExceeded(elapsedBudget, budgetLimits);
       if (budgetError !== undefined) {
         emitTrace(dependencies, state, "supervising", "safety_block", "blocked", budgetError);
         return failure("budget_exceeded", new Error(budgetError), "blocked");
@@ -269,7 +293,56 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
         const step = state.currentStepId === undefined
           ? undefined
           : state.plan?.steps.find((candidate) => candidate.id === state.currentStepId);
-        const bindingError = approvalInterruptBindingError(state, decision.interrupt, step);
+        let interrupt = decision.interrupt;
+        if ((interrupt.reason === "final_submit" || interrupt.reason === "high_risk_action")
+          && (step?.risk === "irreversible" || step?.risk === "high")) {
+          if (step === undefined || state.plan === undefined) {
+            return failure("approval_binding_invalid", undefined, "blocked");
+          }
+          if (dependencies.approvalBindingProvider === undefined) {
+            return failure("approval_binding_provider_missing", undefined, "blocked");
+          }
+          try {
+            const provided = await dependencies.approvalBindingProvider({
+              runId: state.runId,
+              intent: state.intent,
+              plan: state.plan,
+              step,
+              evidenceRefs: interrupt.evidenceRefs,
+              interrupt
+            });
+            const binding = PlanApprovalBindingSchema.parse(provided);
+            const boundPlan = PlanStateSchema.parse({
+              ...state.plan,
+              steps: state.plan.steps.map((candidate) => candidate.id === step.id ? { ...candidate, approvalBinding: binding } : candidate)
+            });
+            const proposed = readRecord(interrupt.proposedAction) ?? {};
+            interrupt = RuntimeHumanInterruptSchema.parse({
+              ...interrupt,
+              proposedAction: {
+                ...proposed,
+                runId: state.runId,
+                stepId: step.id,
+                planRevision: state.plan.revision,
+                executionEpoch: state.executionEpoch,
+                snapshotId: binding.snapshotId,
+                targetFingerprint: binding.targetFingerprint,
+                payloadHash: binding.payloadHash
+              }
+            });
+            const bindingError = approvalInterruptBindingError({ ...state, plan: boundPlan }, interrupt, boundPlan.steps.find((candidate) => candidate.id === step.id));
+            if (bindingError !== undefined) return failure(bindingError, undefined, "blocked");
+            emitTrace(dependencies, state, "routing", "interrupt", "pending", interrupt.reason);
+            return {
+              plan: boundPlan,
+              status: "interrupted" as const,
+              pendingInterrupt: interrupt
+            };
+          } catch (error) {
+            return failure("approval_binding_invalid", error, "blocked");
+          }
+        }
+        const bindingError = approvalInterruptBindingError(state, interrupt, step);
         if (bindingError !== undefined) {
           emitTrace(dependencies, state, "routing", "safety_block", "blocked", bindingError);
           return failure(bindingError, undefined, "blocked");
@@ -277,7 +350,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
         emitTrace(dependencies, state, "routing", "interrupt", "pending", decision.interrupt.reason);
         return {
           status: "interrupted" as const,
-          pendingInterrupt: RuntimeHumanInterruptSchema.parse(decision.interrupt)
+          pendingInterrupt: RuntimeHumanInterruptSchema.parse(interrupt)
         };
       }
       if (decision.type === "finish") {
@@ -314,7 +387,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
       if (step.status !== "pending") {
         return failure("execution_claim_invalid", undefined, "blocked");
       }
-      if (step.attempt >= step.maxAttempts) {
+      if (step.attempt >= step.maxAttempts || step.attempt >= budgetLimits.maxAttemptsPerStep) {
         return failure("step_attempt_exhausted", undefined, "blocked");
       }
       const attempt = step.attempt + 1;
@@ -330,7 +403,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
         steps: state.budget.steps + 1,
         toolCalls: state.budget.toolCalls + (state.decision.type === "invoke_tool" ? 1 : 0)
       };
-      const budgetError = budgetExceeded(nextBudget, dependencies.budgetLimits);
+      const budgetError = budgetExceeded(nextBudget, budgetLimits);
       if (budgetError !== undefined) {
         emitTrace(dependencies, state, "claiming", "safety_block", "blocked", budgetError);
         return failure("budget_exceeded", new Error(budgetError), "blocked");
@@ -384,7 +457,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
             preservedOutputRefs: step.outputRefs
           });
           const validation = dependencies.planValidator.validate(nextPlan);
-          if (!validation.valid || validation.plan === undefined) {
+          if (!acceptsUnboundApprovalPlan(validation)) {
             return failure("replan_invalid", undefined, "blocked");
           }
           const replanError = replanBindingError(validation.plan, state.plan, state.intent);
@@ -393,7 +466,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
             ...withElapsed(state.budget, state.startedAt, now()),
             replans: state.budget.replans + 1
           };
-          const budgetError = budgetExceeded(budget, dependencies.budgetLimits);
+          const budgetError = budgetExceeded(budget, budgetLimits);
           if (budgetError !== undefined) return failure("budget_exceeded", new Error(budgetError), "blocked");
           emitTrace(dependencies, state, "human_gate", "node", "replanned", "human_correction");
           return {
@@ -509,7 +582,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
         toolCalls: state.budget.toolCalls + (result.toolCallsUsed ?? 0),
         tokens: state.budget.tokens + (result.tokensUsed ?? 0)
       };
-      const executionBudgetError = budgetExceeded(executionBudget, dependencies.budgetLimits);
+      const executionBudgetError = budgetExceeded(executionBudget, budgetLimits);
       if (executionBudgetError !== undefined) {
         emitTrace(dependencies, state, "executing", "safety_block", "blocked", executionBudgetError);
         return failure("budget_exceeded", new Error(executionBudgetError), "blocked");
@@ -557,7 +630,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
           ...executionBudget,
           retries: executionBudget.retries + 1
         };
-        const retryBudgetError = budgetExceeded(nextBudget, dependencies.budgetLimits);
+        const retryBudgetError = budgetExceeded(nextBudget, budgetLimits);
         if (retryBudgetError !== undefined) return failure("budget_exceeded", new Error(retryBudgetError), "blocked");
         const retryPlan = PlanStateSchema.parse({
           ...plan,
@@ -587,11 +660,11 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
             preservedOutputRefs: step.outputRefs
           });
           const validation = dependencies.planValidator.validate(nextPlan);
-          if (validation.valid && validation.plan !== undefined) {
+          if (acceptsUnboundApprovalPlan(validation)) {
             const replanError = replanBindingError(validation.plan, plan, state.intent);
             if (replanError !== undefined) return failure(replanError, undefined, "blocked");
             const budget = { ...executionBudget, replans: executionBudget.replans + 1 };
-            const budgetError = budgetExceeded(budget, dependencies.budgetLimits);
+            const budgetError = budgetExceeded(budget, budgetLimits);
             if (budgetError !== undefined) return failure("budget_exceeded", new Error(budgetError), "blocked");
             emitTrace(dependencies, state, "executing", "node", "replanned", "replan");
             return {
@@ -636,7 +709,31 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
       return "supervising";
     }, { supervising: "supervising", [END]: END })
     .compile(dependencies.checkpointer === undefined ? {} : { checkpointer: dependencies.checkpointer });
-  return graph;
+  const invoke = graph.invoke.bind(graph);
+  return new Proxy(graph, {
+    get(target, property, receiver) {
+      if (property !== "invoke") return Reflect.get(target, property, receiver);
+      return async (input: unknown, ...args: unknown[]) => {
+        const initial = readRecord(input);
+        if (initial !== undefined && "runId" in initial && "intent" in initial) {
+          const parsed = SupervisorGraphStateSchema.safeParse({
+            executionEpoch: dependencies.executionEpoch ?? 0,
+            status: "running",
+            evidenceRefs: [],
+            iteration: 0,
+            budget: defaultBudget(),
+            ...initial
+          });
+          if (!parsed.success
+            || ("status" in initial && initial.status !== "running" && initial.status !== undefined)
+            || parsed.data.plan?.steps.some((step) => step.status === "completed" && step.attempt === 0)) {
+            return { ...(parsed.success ? parsed.data : initial), ...failure("invalid_initial_state", undefined, "blocked") };
+          }
+        }
+        return Reflect.apply(invoke, undefined, [input, ...args]);
+      };
+    }
+  });
 }
 
 function nextReadyStep(plan: PlanState): PlanStep | undefined {
@@ -644,8 +741,17 @@ function nextReadyStep(plan: PlanState): PlanStep | undefined {
   return plan.steps.find((step) => step.status === "pending" && step.dependsOn.every((dependency) => completed.has(dependency)));
 }
 
+function acceptsUnboundApprovalPlan(
+  result: PlanValidationResult
+): result is PlanValidationResult & { plan: PlanState } {
+  return result.plan !== undefined
+    && (result.valid || result.errors.every((error) => error.code === "approval_binding_missing"));
+}
+
 function makeAttemptToken(runId: string, planId: string, revision: number, stepId: string, attempt: number): string {
-  return `attempt:${runId}:${planId}:${revision}:${stepId}:${attempt}`;
+  const raw = `attempt:${runId}:${planId}:${revision}:${stepId}:${attempt}`;
+  if (raw.length < 256) return raw;
+  return `attempt:${createHash("sha256").update(raw, "utf8").digest("hex")}`;
 }
 
 function decisionBindingError(
