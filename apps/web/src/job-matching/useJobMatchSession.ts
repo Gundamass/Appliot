@@ -1,9 +1,14 @@
 import { useCallback, useEffect, useMemo, useRef, useState } from "react";
+import type { ConversationJobMatchAction, ConversationJobMatchActionResult } from "@resume/contracts";
+import type { ConversationJobMatchApi } from "../conversation/conversation-job-match-api.js";
 import type { JobMatchApi, JobMatchSession } from "./api.js";
 
 export type JobMatchLoadStatus = "loading" | "ready" | "error";
 export interface JobMatchSessionHook { session: JobMatchSession | undefined; status: JobMatchLoadStatus; error: Error | undefined; refresh(): Promise<void> }
 export interface JobMatchPollingOptions { intervalMs?: number }
+export interface ConversationJobMatchSessionHook extends JobMatchSessionHook {
+  execute(action: ConversationJobMatchAction): Promise<ConversationJobMatchActionResult>;
+}
 
 const STABLE_STATES = new Set([
   "awaiting_filter_confirmation", "awaiting_login", "awaiting_job_selection", "selected",
@@ -46,4 +51,19 @@ export function useJobMatchSession(sessionId: string, api: JobMatchApi, options:
     return () => window.clearInterval(timer);
   }, [intervalMs, refresh]);
   return { session, status, error, refresh };
+}
+
+export function useConversationJobMatchSession(
+  sessionId: string,
+  api: JobMatchApi,
+  conversationApi: ConversationJobMatchApi,
+  options: JobMatchPollingOptions = {}
+): ConversationJobMatchSessionHook {
+  const sessionHook = useJobMatchSession(sessionId, api, options);
+  const execute = useCallback(async (action: ConversationJobMatchAction) => {
+    const result = await conversationApi.execute(action);
+    await sessionHook.refresh();
+    return result;
+  }, [conversationApi, sessionHook.refresh]);
+  return { ...sessionHook, execute };
 }
