@@ -197,6 +197,12 @@ export const ConversationSessionSchema = z.object({
   updatedAt: TimestampSchema
 }).strict();
 
+export const ConversationSessionListSchema = z.array(ConversationSessionSchema).max(10_000);
+
+export const ConversationHistoryClearResultSchema = z.object({
+  deletedCount: z.number().int().nonnegative()
+}).strict();
+
 export const ConversationContextSchema = z.object({
   activeJobMatchSessionId: IdentifierSchema.optional(),
   selectedPostingId: IdentifierSchema.optional(),
@@ -394,6 +400,8 @@ export type ConversationConfirmation = z.infer<typeof ConversationConfirmationSc
 export type ConversationMessageRole = z.infer<typeof ConversationMessageRoleSchema>;
 export type ConversationMessage = z.infer<typeof ConversationMessageSchema>;
 export type ConversationSession = z.infer<typeof ConversationSessionSchema>;
+export type ConversationSessionList = z.infer<typeof ConversationSessionListSchema>;
+export type ConversationHistoryClearResult = z.infer<typeof ConversationHistoryClearResultSchema>;
 export type ConversationContext = z.infer<typeof ConversationContextSchema>;
 export type ConversationJobMatchAction = z.infer<typeof ConversationJobMatchActionSchema>;
 export type ConversationJobMatchActionResult = z.infer<typeof ConversationJobMatchActionResultSchema>;
