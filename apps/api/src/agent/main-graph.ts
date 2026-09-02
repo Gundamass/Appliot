@@ -15,6 +15,10 @@ import {
 } from "@resume/contracts";
 import type { TraceSink } from "./trace-sink.js";
 import {
+  createSupervisorGraph,
+  type SupervisorGraphDependencies
+} from "./supervisor/supervisor-graph.js";
+import {
   AgentGraphStateAnnotation,
   parseAgentGraphState,
   type LangGraphAgentState,
@@ -55,7 +59,11 @@ export interface MainGraphDependencies {
   application?: SubgraphPort;
 }
 
-export function createMainGraph(dependencies: MainGraphDependencies) {
+/**
+ * Legacy adapter retained for the pre-Supervisor application service. New
+ * Runtime tasks must use the Supervisor graph exported below.
+ */
+export function createLegacyMainGraph(dependencies: MainGraphDependencies) {
   const execute = (subgraph: SubgraphName, state: LangGraphAgentState, resume?: HumanResume) =>
     executeSubgraph(dependencies, subgraph, state, resume);
 
@@ -81,6 +89,11 @@ export function createMainGraph(dependencies: MainGraphDependencies) {
     .addConditionalEdges("application_execution", afterSubgraph)
     .addConditionalEdges("human_interrupt", afterSubgraph)
     .compile({ checkpointer: dependencies.checkpointer });
+}
+
+/** The single application graph for the autonomous Runtime. */
+export function createMainGraph(dependencies: SupervisorGraphDependencies) {
+  return createSupervisorGraph(dependencies);
 }
 
 async function executeSubgraph(

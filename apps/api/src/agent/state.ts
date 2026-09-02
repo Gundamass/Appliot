@@ -1,6 +1,15 @@
 import { Annotation } from "@langchain/langgraph";
 import { AgentGraphStateSchema, type AgentGraphState } from "@resume/contracts";
 
+// The Supervisor graph is the canonical state machine for new Runtime work.
+// This module keeps the older application adapter's state annotation isolated
+// while exposing the canonical annotation from one stable import path.
+export {
+  SupervisorGraphStateAnnotation,
+  type SupervisorGraphState,
+  type SupervisorGraphStateUpdate
+} from "./supervisor/supervisor-graph.js";
+
 function appendUnique(left: string[], right: string[]): string[] {
   return [...new Set([...left, ...right])];
 }

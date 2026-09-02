@@ -10,7 +10,7 @@ import {
   type SubgraphName
 } from "@resume/contracts";
 import type { StoredTraceEvent, TraceSink } from "./trace-sink.js";
-import { createMainGraph, type MainGraphDependencies } from "./main-graph.js";
+import { createLegacyMainGraph, type MainGraphDependencies } from "./main-graph.js";
 
 const GraphStartInputSchema = z.object({
   threadId: z.string().min(1),
@@ -58,7 +58,7 @@ export interface GraphService {
 }
 
 export function createGraphService(dependencies: GraphServiceDependencies): GraphService {
-  const graph = createMainGraph(dependencies);
+  const graph = createLegacyMainGraph(dependencies);
   const runIds = new Map<string, string>();
 
   const readState = async (threadId: string): Promise<AgentGraphState | undefined> => {
