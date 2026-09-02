@@ -6,6 +6,10 @@ import {
   RecruitmentSiteCandidateSchema,
   VerifiedRecruitmentSiteSchema
 } from "./recruitment-search.js";
+import {
+  JobExpectationSnapshotSchema,
+  JobMatchSessionStateSchema
+} from "./job-matching.js";
 
 const IdentifierSchema = z.string().min(1).max(256);
 const TimestampSchema = z.string().datetime({ offset: true });
@@ -204,6 +208,59 @@ export const ConversationContextSchema = z.object({
   version: z.number().int().nonnegative()
 }).strict();
 
+const SafeNonNegativeIntegerSchema = z.number().int().nonnegative().safe();
+const SafePositiveIntegerSchema = SafeNonNegativeIntegerSchema.positive();
+const ActionIdentifierSchema = IdentifierSchema.refine(
+  (value) => /^[A-Za-z0-9][A-Za-z0-9._:-]*$/u.test(value),
+  "opaque_identifier_required"
+);
+const ActionIdempotencyKeySchema = z.string().trim().min(1).max(128);
+const ActionContentHashSchema = z.string().trim().min(1).max(256);
+const NonEmptyJobExpectationSnapshotSchema = JobExpectationSnapshotSchema.refine(
+  (expectation) => expectation.criteria.length > 0,
+  "job_expectation_required"
+);
+
+const ConversationJobMatchActionBaseSchema = z.object({
+  conversationId: ActionIdentifierSchema,
+  sessionId: ActionIdentifierSchema,
+  sessionVersion: SafeNonNegativeIntegerSchema,
+  idempotencyKey: ActionIdempotencyKeySchema
+}).strict();
+
+export const ConversationJobMatchActionSchema = z.discriminatedUnion("action", [
+  ConversationJobMatchActionBaseSchema.extend({
+    action: z.literal("confirm_filters"),
+    expectation: NonEmptyJobExpectationSnapshotSchema
+  }),
+  ConversationJobMatchActionBaseSchema.extend({
+    action: z.literal("adjust_filters"),
+    expectation: NonEmptyJobExpectationSnapshotSchema
+  }),
+  ConversationJobMatchActionBaseSchema.extend({
+    action: z.literal("pause")
+  }),
+  ConversationJobMatchActionBaseSchema.extend({
+    action: z.literal("continue")
+  }),
+  ConversationJobMatchActionBaseSchema.extend({
+    action: z.literal("rematch")
+  }),
+  ConversationJobMatchActionBaseSchema.extend({
+    action: z.literal("select_result"),
+    resultId: ActionIdentifierSchema,
+    resultVersion: SafeNonNegativeIntegerSchema,
+    postingContentHash: ActionContentHashSchema
+  }),
+  ConversationJobMatchActionBaseSchema.extend({
+    action: z.literal("select_conflict_result"),
+    resultId: ActionIdentifierSchema,
+    resultVersion: SafeNonNegativeIntegerSchema,
+    postingContentHash: ActionContentHashSchema,
+    conflictSummaryHash: ActionContentHashSchema
+  })
+]);
+
 export const ConversationProcessStageSchema = z.enum([
   "understanding_request",
   "searching_recruitment_site",
@@ -310,6 +367,17 @@ export const ConversationTurnResponseSchema = z.object({
   consumedConfirmationId: IdentifierSchema.optional()
 }).strict();
 
+export const ConversationJobMatchActionResultSchema = z.object({
+  sessionId: ActionIdentifierSchema,
+  state: JobMatchSessionStateSchema,
+  version: SafeNonNegativeIntegerSchema,
+  turnSequence: SafePositiveIntegerSchema,
+  message: ConversationMessageSchema,
+  cards: z.array(ConversationCardSchema).max(20),
+  context: ConversationContextSchema,
+  applicationTaskId: ActionIdentifierSchema.optional()
+}).strict();
+
 export const ConversationViewSchema = z.object({
   session: ConversationSessionSchema,
   messages: z.array(ConversationMessageSchema).max(10_000),
@@ -327,6 +395,8 @@ export type ConversationMessageRole = z.infer<typeof ConversationMessageRoleSche
 export type ConversationMessage = z.infer<typeof ConversationMessageSchema>;
 export type ConversationSession = z.infer<typeof ConversationSessionSchema>;
 export type ConversationContext = z.infer<typeof ConversationContextSchema>;
+export type ConversationJobMatchAction = z.infer<typeof ConversationJobMatchActionSchema>;
+export type ConversationJobMatchActionResult = z.infer<typeof ConversationJobMatchActionResultSchema>;
 export type ConversationProcessStage = z.infer<typeof ConversationProcessStageSchema>;
 export type ConversationProcessStatus = z.infer<typeof ConversationProcessStatusSchema>;
 export type ConversationProcessToolName = z.infer<typeof ConversationProcessToolNameSchema>;

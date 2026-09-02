@@ -4,6 +4,8 @@ import {
   ConversationConfirmInputSchema,
   ConversationConfirmationSchema,
   ConversationContextSchema,
+  ConversationJobMatchActionResultSchema,
+  ConversationJobMatchActionSchema,
   ConversationIntentSchema,
   ConversationMessageSchema,
   ConversationProcessEventSchema,
@@ -16,6 +18,117 @@ import {
 } from "./conversation.js";
 
 describe("conversation contracts", () => {
+  it("accepts only guarded inline job-match actions", () => {
+    expect(ConversationJobMatchActionSchema.parse({
+      conversationId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      action: "select_result",
+      sessionVersion: 3,
+      idempotencyKey: "select-1",
+      resultId: "00000000-0000-4000-8000-000000000003",
+      resultVersion: 1,
+      postingContentHash: "sha256:posting"
+    }).action).toBe("select_result");
+
+    expect(() => ConversationJobMatchActionSchema.parse({
+      conversationId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      action: "select_result",
+      sessionVersion: 3,
+      idempotencyKey: "select-2",
+      resultId: "岗位标题"
+    })).toThrow();
+
+    expect(() => ConversationJobMatchActionSchema.parse({
+      conversationId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      action: "unknown_action",
+      sessionVersion: 0,
+      idempotencyKey: "x"
+    })).toThrow();
+
+    expect(() => ConversationJobMatchActionSchema.parse({
+      conversationId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      action: "pause",
+      sessionVersion: 0,
+      idempotencyKey: "x",
+      unexpected: true
+    })).toThrow();
+  });
+
+  it("requires a conflict hash only for conflict selection", () => {
+    expect(() => ConversationJobMatchActionSchema.parse({
+      conversationId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      action: "select_conflict_result",
+      sessionVersion: 3,
+      idempotencyKey: "conflict-1",
+      resultId: "00000000-0000-4000-8000-000000000003",
+      resultVersion: 1,
+      postingContentHash: "sha256:posting"
+    })).toThrow();
+
+    const action = ConversationJobMatchActionSchema.parse({
+      conversationId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      action: "select_conflict_result",
+      sessionVersion: 3,
+      idempotencyKey: "conflict-1",
+      resultId: "00000000-0000-4000-8000-000000000003",
+      resultVersion: 1,
+      postingContentHash: "sha256:posting",
+      conflictSummaryHash: "sha256:conflicts"
+    });
+    expect(action.action).toBe("select_conflict_result");
+  });
+
+  it("requires an expectation when applying or adjusting filters", () => {
+    const expectation = {
+      revision: 2,
+      confirmedAt: "2026-08-22T00:00:00.000Z",
+      criteria: [{ kind: "location", values: ["深圳"], strength: "required" }]
+    } as const;
+    const base = {
+      conversationId: "00000000-0000-4000-8000-000000000001",
+      sessionId: "00000000-0000-4000-8000-000000000002",
+      sessionVersion: 0,
+      idempotencyKey: "filters-1"
+    };
+
+    expect(ConversationJobMatchActionSchema.parse({ ...base, action: "confirm_filters", expectation }))
+      .toMatchObject({ action: "confirm_filters", expectation });
+    expect(ConversationJobMatchActionSchema.parse({ ...base, action: "adjust_filters", expectation }).action)
+      .toBe("adjust_filters");
+    expect(() => ConversationJobMatchActionSchema.parse({ ...base, action: "adjust_filters", expectation: { ...expectation, criteria: [] } })).toThrow();
+  });
+
+  it("keeps action results bounded and excludes enterprise recruitment status", () => {
+    const result = ConversationJobMatchActionResultSchema.parse({
+      sessionId: "session-1",
+      state: "awaiting_job_selection",
+      version: 4,
+      turnSequence: 3,
+      message: {
+        id: "message-1",
+        sessionId: "session-1",
+        sequence: 3,
+        role: "assistant",
+        text: "已完成岗位匹配。",
+        cards: [],
+        createdAt: "2026-08-22T00:00:00.000Z"
+      },
+      cards: [],
+      context: { version: 1, recentPostingIds: [], activeJobMatchSessionId: "session-1" },
+      applicationTaskId: "task-1"
+    });
+    expect(result.applicationTaskId).toBe("task-1");
+    expect(() => ConversationJobMatchActionResultSchema.parse({
+      ...result,
+      enterpriseRecruitmentStatus: "hired"
+    })).toThrow();
+  });
+
   it("accepts only bounded conversation intents", () => {
     expect(ConversationIntentSchema.parse({
       kind: "start_application_and_show_status",
