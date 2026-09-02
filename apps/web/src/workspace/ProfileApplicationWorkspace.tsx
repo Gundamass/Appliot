@@ -11,6 +11,7 @@ import { ApplicationReviewInbox } from "../applications/ApplicationReviewInbox.j
 import type { ConversationApi } from "../conversation/api.js";
 import { ChatHome } from "../conversation/ChatHome.js";
 import type { ConversationJobMatchApi } from "../conversation/conversation-job-match-api.js";
+import { useConversationHistory } from "../conversation/useConversationHistory.js";
 import { WorkspaceFrame, type WorkspaceView } from "./WorkspaceFrame.js";
 
 const conversationSearchParameter = "conversation";
@@ -49,6 +50,7 @@ export function ProfileApplicationWorkspace({
   const [tasksError, setTasksError] = useState<string>();
   const [deletingTaskId, setDeletingTaskId] = useState<string>();
   const [taskActionError, setTaskActionError] = useState<string>();
+  const [chatBusy, setChatBusy] = useState(false);
 
   const loadTasks = async () => {
     setTasksLoading(true);
@@ -90,7 +92,17 @@ export function ProfileApplicationWorkspace({
     setSearchParams(next, { replace: false });
   };
 
-  const rememberConversation = useCallback((sessionId: string) => {
+  const rememberConversation = useCallback((sessionId?: string) => {
+    if (sessionId === undefined) {
+      removeRecentConversationId();
+      setSearchParams((current) => {
+        if (!current.has(conversationSearchParameter)) return current;
+        const next = new URLSearchParams(current);
+        next.delete(conversationSearchParameter);
+        return next;
+      }, { replace: true });
+      return;
+    }
     writeRecentConversationId(sessionId);
     setSearchParams((current) => {
       if (current.get(conversationSearchParameter) === sessionId) return current;
@@ -100,20 +112,53 @@ export function ProfileApplicationWorkspace({
     }, { replace: true });
   }, [setSearchParams]);
 
-  if (view === "chat") return <ChatHome
-    api={conversationApi}
-    jobMatchApi={jobMatchApi}
-    {...(conversationJobMatchApi === undefined ? {} : { conversationJobMatchApi })}
-    {...(conversationId === undefined ? {} : { initialSessionId: conversationId })}
-    {...(legacyRecoveryNotice === undefined ? {} : { initialNotice: legacyRecoveryNotice })}
-    onSessionResolved={rememberConversation}
-    onOpenApplication={(taskId) => navigate(`/applications/${taskId}`)}
-    onNavigate={selectView}
-  />;
+  const conversationHistory = useConversationHistory({
+    api: conversationApi,
+    ...(conversationId === undefined ? {} : { requestedConversationId: conversationId }),
+    onActiveConversationChange: rememberConversation
+  });
+
+  const conversationNavigation = {
+    active: view === "chat",
+    sessions: conversationHistory.sessions,
+    ...(conversationHistory.activeConversationId === undefined ? {} : { activeConversationId: conversationHistory.activeConversationId }),
+    loading: conversationHistory.loading,
+    ...(conversationHistory.error === undefined ? {} : { error: conversationHistory.error }),
+    busy: conversationHistory.busy || chatBusy,
+    creating: conversationHistory.creating,
+    ...(conversationHistory.deletingConversationId === undefined ? {} : { deletingConversationId: conversationHistory.deletingConversationId }),
+    clearing: conversationHistory.clearing,
+    onOpenChat: () => selectView("chat"),
+    onCreate: () => { void conversationHistory.create(); },
+    onSelect: (selectedConversationId: string) => {
+      conversationHistory.select(selectedConversationId);
+      selectView("chat");
+    },
+    onDelete: (conversationIdToDelete: string) => { void conversationHistory.delete(conversationIdToDelete); },
+    onDeleteAll: () => { void conversationHistory.deleteAll(); },
+    onRetry: () => { void conversationHistory.refresh(); }
+  };
 
   return (
-    <WorkspaceFrame activeView={view} onSelectView={selectView}>
-        {view === "profile" ? (
+    <WorkspaceFrame activeView={view} onSelectView={selectView} conversationNavigation={conversationNavigation}>
+        {view === "chat" ? (
+          conversationHistory.activeConversationId === undefined ? (
+            <section className="workspace-view conversation-loading" aria-labelledby="conversation-loading-title">
+              <p id="conversation-loading-title" role="status">{conversationHistory.error ?? (conversationHistory.creating ? "正在创建对话…" : "正在加载会话…")}</p>
+            </section>
+          ) : (
+            <ChatHome
+              api={conversationApi}
+              jobMatchApi={jobMatchApi}
+              {...(conversationJobMatchApi === undefined ? {} : { conversationJobMatchApi })}
+              initialSessionId={conversationHistory.activeConversationId}
+              {...(legacyRecoveryNotice === undefined ? {} : { initialNotice: legacyRecoveryNotice })}
+              onSessionResolved={rememberConversation}
+              onBusyChange={setChatBusy}
+              onOpenApplication={(taskId) => navigate(`/applications/${taskId}`)}
+            />
+          )
+        ) : view === "profile" ? (
           <section className="workspace-view" aria-labelledby="workspace-profile-title">
             <header className="workspace-view-header">
               <div><span>长期资料库</span><h1 id="workspace-profile-title">我的简历</h1></div>
@@ -179,5 +224,13 @@ function writeRecentConversationId(sessionId: string): void {
     window.localStorage.setItem(recentConversationStorageKey, sessionId);
   } catch {
     // Browser privacy settings can disable local storage; URL persistence still works.
+  }
+}
+
+function removeRecentConversationId(): void {
+  try {
+    window.localStorage.removeItem(recentConversationStorageKey);
+  } catch {
+    // Browser privacy settings can disable local storage; the URL remains authoritative.
   }
 }

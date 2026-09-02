@@ -32,8 +32,11 @@ const recentConversationStorageKey = "resume-application-assistant.recent-conver
 function conversationApi(): ConversationApi {
   const session = { id: "conversation-1", title: "新的求职对话", createdAt: "2026-08-23T01:00:00.000Z", updatedAt: "2026-08-23T01:00:00.000Z" };
   return {
+    list: vi.fn().mockResolvedValue([session]),
     create: vi.fn().mockResolvedValue(session),
     get: vi.fn(async (id: string) => ({ session: { ...session, id }, messages: [], context: { version: 0, recentPostingIds: [] } })),
+    delete: vi.fn().mockResolvedValue(undefined),
+    deleteAll: vi.fn().mockResolvedValue({ deletedCount: 1 }),
     send: vi.fn(),
     confirm: vi.fn()
   };
@@ -89,11 +92,9 @@ describe("ProfileApplicationWorkspace", () => {
 
     expect(await screen.findByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
     const navigation = screen.getByRole("navigation", { name: "候选人工作台" });
-    expect(within(navigation).getAllByRole("button").map((button) => button.textContent?.trim())).toEqual([
-      "对话首页",
-      "投递进度",
-      "我的简历"
-    ]);
+    expect(within(navigation).getByRole("button", { name: "对话首页" })).toBeVisible();
+    expect(within(navigation).getByRole("button", { name: "投递进度" })).toBeVisible();
+    expect(within(navigation).getByRole("button", { name: "我的简历" })).toBeVisible();
     expect(within(navigation).queryByRole("button", { name: "我的岗位" })).not.toBeInTheDocument();
   });
 

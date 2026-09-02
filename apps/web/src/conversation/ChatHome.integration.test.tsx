@@ -48,8 +48,11 @@ function response(text: string): ConversationTurnResponse {
 
 function api(initialView: ConversationView, send: ConversationApi["send"] = vi.fn(async () => response("收到"))): ConversationApi {
   return {
+    list: vi.fn().mockResolvedValue([session]),
     create: vi.fn(async () => session),
     get: vi.fn(async () => initialView),
+    delete: vi.fn().mockResolvedValue(undefined),
+    deleteAll: vi.fn().mockResolvedValue({ deletedCount: 1 }),
     send,
     confirm: vi.fn(async () => response("收到"))
   };

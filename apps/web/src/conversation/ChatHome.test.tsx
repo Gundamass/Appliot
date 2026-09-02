@@ -103,8 +103,11 @@ function confirmationCard(confirmation: ConversationConfirmation): ConversationT
 
 function fakeConversationApi(initialView = view()) {
   const api: ConversationApi = {
+    list: vi.fn().mockResolvedValue([session]),
     create: vi.fn().mockResolvedValue(session),
     get: vi.fn().mockResolvedValue(initialView),
+    delete: vi.fn().mockResolvedValue(undefined),
+    deleteAll: vi.fn().mockResolvedValue({ deletedCount: 1 }),
     send: vi.fn().mockResolvedValue(turn("收到")),
     confirm: vi.fn().mockResolvedValue(turn("投递任务已创建"))
   };
@@ -431,5 +434,27 @@ describe("ChatHome", () => {
     await user.type(composer, "岗位");
     expect(screen.getByText("498 字剩余")).toBeVisible();
     expect(screen.getByRole("button", { name: "发送" })).toBeEnabled();
+  });
+
+  it("does not apply a response from the previous conversation after switching sessions", async () => {
+    let resolveSend!: (value: ConversationTurnResponse) => void;
+    const api = fakeConversationApi(viewFor("conversation-old", "旧会话"));
+    vi.mocked(api.get)
+      .mockResolvedValueOnce(viewFor("conversation-old", "旧会话"))
+      .mockResolvedValueOnce(viewFor("conversation-new", "新会话"));
+    vi.mocked(api.send).mockReturnValueOnce(new Promise((resolve) => { resolveSend = resolve; }));
+    const user = userEvent.setup();
+    const rendered = render(<ChatHome api={api} initialSessionId="conversation-old" onOpenApplication={vi.fn()} />);
+
+    await screen.findByText("旧会话");
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "旧会话请求");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+
+    rendered.rerender(<ChatHome api={api} initialSessionId="conversation-new" onOpenApplication={vi.fn()} />);
+    await screen.findByText("新会话");
+    resolveSend(turn("旧会话响应"));
+
+    await new Promise((resolve) => setTimeout(resolve, 0));
+    expect(screen.queryByText("旧会话响应")).not.toBeInTheDocument();
   });
 });
