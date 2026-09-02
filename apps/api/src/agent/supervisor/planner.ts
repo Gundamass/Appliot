@@ -10,6 +10,7 @@ import {
   type SubGoal
 } from "@resume/contracts";
 import { randomUUID } from "node:crypto";
+import { createHash } from "node:crypto";
 
 export interface PlannerContext {
   readonly availableCapabilities?: readonly string[];
@@ -79,7 +80,8 @@ export function createPlanner(options: PlannerOptions = {}): Planner {
           maxAttempts: 1,
           acceptanceCriteria: ["human approval is current and payload is unchanged"],
           risk: "irreversible",
-          capabilityNames: ["final_submit"]
+          capabilityNames: ["final_submit"],
+          approvalBinding: provisionalApprovalBinding(intent, "final-submit")
         };
         steps.push(finalStep);
       }
@@ -134,12 +136,26 @@ function createStep(
     status: "pending",
     dependsOn: previous === undefined ? [] : [previous],
     inputRefs: [intent.intentId],
-    outputRefs: [`output:${id}`],
+  outputRefs: [],
     attempt: 0,
     maxAttempts: risk === "irreversible" ? 1 : maxAttempts,
     acceptanceCriteria: acceptanceCriteriaFor(subGoal),
     risk,
-    ...(capability === undefined ? {} : { capabilityNames: [capability] })
+    ...(capability === undefined ? {} : { capabilityNames: [capability] }),
+    ...(risk === "irreversible" ? { approvalBinding: provisionalApprovalBinding(intent, id) } : {})
+  };
+}
+
+/**
+ * A plan needs a structurally complete approval binding even before a browser
+ * observation exists. The execution boundary replaces this provisional
+ * reference with the current trusted snapshot before issuing a permit.
+ */
+function provisionalApprovalBinding(intent: CanonicalIntent, stepId: string) {
+  return {
+    snapshotId: `planning:${intent.intentId}`,
+    targetFingerprint: `planning:${intent.intentId}:${stepId}`,
+    payloadHash: createHash("sha256").update(`${intent.intentId}\u0000${stepId}`, "utf8").digest("hex")
   };
 }
 

@@ -55,10 +55,15 @@ describe("Supervisor specialist caller attestation", () => {
     const graph = createSupervisorGraph({
       planner: { create: async () => plan },
       supervisor: {
-        decide: async ({ readyStep }) => ({
+        decide: async ({ readyStep, intent, plan }) => ({
           type: "dispatch_agent" as const,
           agent: "resume_agent",
-          input: { stepId: readyStep!.id },
+          input: {
+            stepId: readyStep!.id,
+            intentId: intent!.intentId,
+            planRevision: plan!.revision,
+            inputRefs: readyStep!.inputRefs
+          },
           reason: "dispatch resume specialist"
         })
       },
@@ -68,7 +73,11 @@ describe("Supervisor specialist caller attestation", () => {
         resume_agent: {
           execute: async (input) => {
             received = input.callerAttestation;
-            return { status: "completed" as const };
+            return {
+              status: "completed" as const,
+              evidenceRefs: ["evidence-specialist"],
+              satisfiedCriteria: input.step.acceptanceCriteria
+            };
           }
         }
       },

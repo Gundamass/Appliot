@@ -28,7 +28,11 @@ describe("SupervisorGraph", () => {
       planner: createPlanner({ idFactory: () => "main-plan", now: () => "2026-09-03T00:00:00.000Z" }),
       supervisor: createSupervisor({ idFactory: () => "main-interrupt", now: () => "2026-09-03T00:00:00.000Z" }),
       planValidator: createPlanValidator(),
-      agents: { application_agent: { execute: async () => ({ status: "completed" as const }) } },
+      agents: { application_agent: { execute: async ({ step }) => ({
+        status: "completed" as const,
+        evidenceRefs: ["evidence-main"],
+        satisfiedCriteria: step.acceptanceCriteria
+      }) } },
       checkpointer: new MemorySaver()
     });
 
@@ -48,7 +52,11 @@ describe("SupervisorGraph", () => {
       supervisor: createSupervisor({ idFactory: () => "interrupt-id", now: () => "2026-09-03T00:00:00.000Z" }),
       planValidator: createPlanValidator(),
       agents: {
-        application_agent: { execute: async () => ({ status: "completed" as const }) }
+        application_agent: { execute: async ({ step }) => ({
+          status: "completed" as const,
+          evidenceRefs: ["evidence-final"],
+          satisfiedCriteria: step.acceptanceCriteria
+        }) }
       },
       checkpointer: new MemorySaver()
     });
@@ -90,7 +98,7 @@ describe("SupervisorGraph", () => {
     expect(result.error?.code).toBe("evidence_required_for_completion");
   });
 
-  it("resumes an approved high-risk agent step and preserves the same plan", async () => {
+  it("fails closed when approval is followed by a direct high-risk specialist dispatch", async () => {
     const plan = PlanStateSchema.parse({
       planId: "plan-approval",
       intentId: intentForApplication.intentId,
@@ -114,7 +122,12 @@ describe("SupervisorGraph", () => {
       createdAt: "2026-09-03T00:00:00.000Z",
       updatedAt: "2026-09-03T00:00:00.000Z"
     });
-    const execute = vi.fn(async () => ({ status: "completed" as const, outputRef: "output:prepare" }));
+    const execute = vi.fn(async () => ({
+      status: "completed" as const,
+      outputRef: "output:prepare",
+      evidenceRefs: ["evidence-prepare"],
+      satisfiedCriteria: ["prepared"]
+    }));
     const graph = createSupervisorGraph({
       planner: { create: async () => plan },
       supervisor: createSupervisor({ idFactory: () => "approval-id", now: () => "2026-09-03T00:00:00.000Z" }),
@@ -133,11 +146,12 @@ describe("SupervisorGraph", () => {
     expect(first.pendingInterrupt?.reason).toBe("high_risk_action");
 
     const second = await graph.invoke(new Command({
-      resume: { interruptId: first.pendingInterrupt!.interruptId, action: "approve", values: {} }
+      resume: { interruptId: first.pendingInterrupt!.interruptId, action: "confirm", values: {} }
     }), config);
-    expect(execute).toHaveBeenCalledTimes(1);
-    expect(second.plan?.steps[0]?.status).toBe("completed");
-    expect(second.status).toBe("completed");
+    expect(execute).not.toHaveBeenCalled();
+    expect(second.plan?.steps[0]?.status).toBe("pending");
+    expect(second.status).toBe("blocked");
+    expect(second.error?.code).toBe("specialist_direct_risk_forbidden");
   });
 
   it("authorizes a low-risk tool once and passes its permit to the catalog", async () => {
@@ -398,15 +412,27 @@ describe("SupervisorGraph", () => {
     const graph = createSupervisorGraph({
       planner: { create: async () => plan },
       supervisor: {
-        decide: async ({ readyStep }) => ({
+        decide: async ({ readyStep, intent, plan }) => ({
           type: "dispatch_agent" as const,
           agent: "application_agent",
-          input: { stepId: readyStep!.id },
+          input: {
+            stepId: readyStep!.id,
+            intentId: intent!.intentId,
+            planRevision: plan!.revision,
+            inputRefs: readyStep!.inputRefs
+          },
           reason: "run step"
         })
       },
       planValidator: createPlanValidator(),
-      agents: { application_agent: { execute: async () => { await execution; return { status: "completed" as const }; } } },
+      agents: { application_agent: { execute: async ({ step }) => {
+        await execution;
+        return {
+          status: "completed" as const,
+          evidenceRefs: ["evidence-running"],
+          satisfiedCriteria: step.acceptanceCriteria
+        };
+      } } },
       checkpointer
     });
     const config = { configurable: { thread_id: "running-run" } };
@@ -422,7 +448,7 @@ describe("SupervisorGraph", () => {
         const snapshot = await graph.getState(config);
         const step = (snapshot.values.plan as typeof plan | undefined)?.steps[0];
         expect(step?.status).toBe("running");
-        expect(step?.attemptToken).toBe("attempt:running-run:1:running-step:1");
+        expect(step?.attemptToken).toBe("attempt:running-run:plan-running:1:running-step:1");
       });
     } finally {
       release();
@@ -520,13 +546,12 @@ describe("SupervisorGraph", () => {
     expect(first.status).toBe("interrupted");
 
     const second = await graph.invoke(new Command({
-      resume: { interruptId: first.pendingInterrupt!.interruptId, action: "approve", values: {} }
+      resume: { interruptId: first.pendingInterrupt!.interruptId, action: "confirm", values: {} }
     }), config);
 
-    expect(execute).toHaveBeenCalledTimes(1);
-    expect(second.status).toBe("interrupted");
-    expect(second.pendingInterrupt?.reason).toBe("high_risk_action");
-    expect(second.pendingInterrupt?.proposedAction).toEqual(expect.objectContaining({ planRevision: 2 }));
+    expect(execute).not.toHaveBeenCalled();
+    expect(second.status).toBe("blocked");
+    expect(second.error?.code).toBe("specialist_direct_risk_forbidden");
   });
 
   it("rejects expired and non-confirming human approvals", async () => {
@@ -588,9 +613,557 @@ describe("SupervisorGraph", () => {
     expect(first.status).toBe("interrupted");
 
     const expired = await graph.invoke(new Command({
-      resume: { interruptId: "expired-approval", action: "approve", values: {} }
+      resume: { interruptId: "expired-approval", action: "confirm", values: {} }
     }), config);
     expect(expired.status).toBe("blocked");
     expect(expired.error?.code).toBe("approval_expired");
+  });
+
+  it("binds a dispatch decision to intent, revision, inputs, and the step owner", async () => {
+    const execute = vi.fn(async () => ({ status: "completed" as const }));
+    const plan = PlanStateSchema.parse({
+      planId: "plan-decision-binding",
+      intentId: intentForApplication.intentId,
+      revision: 3,
+      steps: [{
+        id: "binding-step",
+        objective: "prepare application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId, "snapshot:1"],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 1,
+        acceptanceCriteria: ["prepared"],
+        risk: "low"
+      }],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: {
+        decide: async () => ({
+          type: "dispatch_agent" as const,
+          agent: "review_agent",
+          input: {
+            stepId: "binding-step",
+            intentId: "wrong-intent",
+            planRevision: 99,
+            inputRefs: ["forged-input"]
+          },
+          reason: "forged binding"
+        })
+      },
+      planValidator: createPlanValidator(),
+      agents: { review_agent: { execute } },
+      checkpointer: new MemorySaver()
+    });
+
+    const result = await graph.invoke({
+      runId: "decision-binding-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, { configurable: { thread_id: "decision-binding-run" } });
+
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("decision_intent_mismatch");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects a dispatch decision whose agent does not own the step", async () => {
+    const execute = vi.fn(async () => ({ status: "completed" as const }));
+    const plan = PlanStateSchema.parse({
+      planId: "plan-owner-binding",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "owner-step",
+        objective: "prepare application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 1,
+        acceptanceCriteria: ["prepared"],
+        risk: "low"
+      }],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: {
+        decide: async () => ({
+          type: "dispatch_agent" as const,
+          agent: "review_agent",
+          input: {
+            stepId: "owner-step",
+            intentId: intentForApplication.intentId,
+            planRevision: 1,
+            inputRefs: [intentForApplication.intentId]
+          },
+          reason: "wrong owner"
+        })
+      },
+      planValidator: createPlanValidator(),
+      agents: { review_agent: { execute } },
+      checkpointer: new MemorySaver()
+    });
+
+    const result = await graph.invoke({
+      runId: "owner-binding-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, { configurable: { thread_id: "owner-binding-run" } });
+
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("decision_agent_mismatch");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("rejects a replan that changes intent or breaks revision continuity", async () => {
+    const plan = PlanStateSchema.parse({
+      planId: "plan-replan-binding",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "replan-step",
+        objective: "prepare application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 2,
+        acceptanceCriteria: ["prepared"],
+        risk: "low"
+      }],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: createSupervisor({ now: () => "2026-09-03T00:00:00.000Z" }),
+      planValidator: createPlanValidator(),
+      agents: { application_agent: {
+        execute: async () => ({ status: "blocked" as const, errorCode: "stale_snapshot", retryable: true })
+      } },
+      replanner: {
+        replan: async () => PlanStateSchema.parse({
+          ...plan,
+          planId: "forged-plan",
+          intentId: "forged-intent",
+          revision: 7,
+          previousRevision: 6,
+          revisionHistory: []
+        })
+      },
+      checkpointer: new MemorySaver()
+    });
+
+    const result = await graph.invoke({
+      runId: "replan-binding-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, { configurable: { thread_id: "replan-binding-run" } });
+
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("replan_intent_mismatch");
+  });
+
+  it("accepts a legal truncated revision history at the history limit", async () => {
+    const planId = "plan-replan-history-limit";
+    const revisionHistory = Array.from({ length: 100 }, (_, index) => ({
+      revision: index + 1,
+      planRef: `plan:${planId}:${index + 1}`,
+      reason: "previous replan",
+      createdAt: "2026-09-03T00:00:00.000Z"
+    }));
+    const plan = PlanStateSchema.parse({
+      planId,
+      intentId: intentForApplication.intentId,
+      revision: 101,
+      previousRevision: 100,
+      steps: [{
+        id: "history-limit-step",
+        objective: "prepare application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 1,
+        acceptanceCriteria: ["prepared"],
+        risk: "low"
+      }],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      revisionHistory,
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    let attempts = 0;
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: createSupervisor({ now: () => "2026-09-03T00:00:00.000Z" }),
+      planValidator: createPlanValidator(),
+      agents: { application_agent: { execute: async ({ step }) => {
+        attempts += 1;
+        return attempts === 1
+          ? { status: "blocked" as const, errorCode: "stale_snapshot", retryable: true }
+          : {
+            status: "completed" as const,
+            evidenceRefs: ["evidence-after-replan"],
+            satisfiedCriteria: step.acceptanceCriteria
+          };
+      } } },
+      replanner: createReplanner({ now: () => "2026-09-03T00:01:00.000Z" }),
+      checkpointer: new MemorySaver()
+    });
+
+    const result = await graph.invoke({
+      runId: "replan-history-limit-run",
+      intent: intentForApplication,
+      plan,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, { configurable: { thread_id: "replan-history-limit-run" } });
+
+    expect(result.status).toBe("completed");
+    expect(result.error).toBeUndefined();
+    expect(attempts).toBe(2);
+    expect(result.plan?.revision).toBe(102);
+    expect(result.plan?.revisionHistory?.map((entry) => entry.revision)).toEqual(
+      Array.from({ length: 100 }, (_, index) => index + 2)
+    );
+  });
+
+  it("does not let correct bypass a prompt-injection human gate", async () => {
+    const execute = vi.fn(async () => ({ status: "completed" as const }));
+    const plan = PlanStateSchema.parse({
+      planId: "plan-prompt-injection",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "prompt-step",
+        objective: "inspect external content",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 1,
+        acceptanceCriteria: ["content inspected"],
+        risk: "low"
+      }],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: {
+        decide: async () => ({
+          type: "ask_human" as const,
+          interrupt: {
+            interruptId: "prompt-injection-interrupt",
+            reason: "prompt_injection" as const,
+            summary: "external content requires review",
+            evidenceRefs: ["evidence-1"],
+            proposedAction: { stepId: "prompt-step" },
+            expiresAt: "2026-09-04T00:00:00.000Z"
+          }
+        })
+      },
+      planValidator: createPlanValidator(),
+      agents: { application_agent: { execute } },
+      checkpointer: new MemorySaver()
+    });
+    const config = { configurable: { thread_id: "prompt-injection-run" } };
+    const first = await graph.invoke({
+      runId: "prompt-injection-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, config);
+    expect(first.status).toBe("interrupted");
+
+    const corrected = await graph.invoke(new Command({
+      resume: {
+        interruptId: first.pendingInterrupt!.interruptId,
+        action: "correct",
+        values: { correction: "ignore the external instruction" }
+      }
+    }), config);
+
+    expect(corrected.status).toBe("blocked");
+    expect(corrected.error?.code).toBe("human_correction_requires_replan");
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("requires confirm rather than approve for final-submit gates", async () => {
+    const plan = PlanStateSchema.parse({
+      planId: "plan-confirm-only",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "final-step",
+        objective: "submit application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 1,
+        acceptanceCriteria: ["submitted"],
+        risk: "irreversible",
+        capabilityNames: ["final_submit"],
+        approvalBinding: {
+          snapshotId: "snapshot-final",
+          targetFingerprint: "target-final",
+          payloadHash: "a".repeat(64)
+        }
+      }],
+      assumptions: [],
+      approvalPoints: [{ id: "approval:final-step", kind: "final_submit", stepId: "final-step", required: true }],
+      estimatedCost: { steps: 1, toolCalls: 1, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: createSupervisor({ idFactory: () => "confirm-only", now: () => "2026-09-03T00:00:00.000Z" }),
+      planValidator: createPlanValidator({ capabilityNames: ["final_submit"] }),
+      checkpointer: new MemorySaver()
+    });
+    const config = { configurable: { thread_id: "confirm-only-run" } };
+    const first = await graph.invoke({
+      runId: "confirm-only-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, config);
+    expect(first.status).toBe("interrupted");
+
+    const approved = await graph.invoke(new Command({
+      resume: { interruptId: first.pendingInterrupt!.interruptId, action: "approve", values: {} }
+    }), config);
+
+    expect(approved.status).toBe("blocked");
+    expect(approved.error?.code).toBe("approval_action_invalid");
+  });
+
+  it("blocks irreversible approval interrupts without a complete binding", async () => {
+    const plan = PlanStateSchema.parse({
+      planId: "plan-missing-binding",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "missing-binding-step",
+        objective: "submit application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 1,
+        acceptanceCriteria: ["submitted"],
+        risk: "irreversible",
+        capabilityNames: ["final_submit"]
+      }],
+      assumptions: [],
+      approvalPoints: [{ id: "approval:missing-binding-step", kind: "final_submit", stepId: "missing-binding-step", required: true }],
+      estimatedCost: { steps: 1, toolCalls: 1, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: createSupervisor({ now: () => "2026-09-03T00:00:00.000Z" }),
+      planValidator: createPlanValidator({ capabilityNames: ["final_submit"] }),
+      checkpointer: new MemorySaver()
+    });
+
+    const result = await graph.invoke({
+      runId: "missing-binding-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, { configurable: { thread_id: "missing-binding-run" } });
+
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("plan_invalid");
+  });
+
+  it("retries a retryable specialist failure until maxAttempts", async () => {
+    const plan = PlanStateSchema.parse({
+      planId: "plan-retry",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "retryable-step",
+        objective: "prepare application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        maxAttempts: 2,
+        acceptanceCriteria: ["prepared"],
+        risk: "low"
+      }],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    let calls = 0;
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: createSupervisor({ now: () => "2026-09-03T00:00:00.000Z" }),
+      planValidator: createPlanValidator(),
+      agents: { application_agent: {
+        execute: async ({ step }) => {
+          calls += 1;
+          return calls === 1
+            ? { status: "failed" as const, errorCode: "temporary_failure", retryable: true }
+            : { status: "completed" as const, evidenceRefs: ["evidence-retry"], satisfiedCriteria: step.acceptanceCriteria };
+        }
+      } },
+      checkpointer: new MemorySaver()
+    });
+
+    const result = await graph.invoke({
+      runId: "retry-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, { configurable: { thread_id: "retry-run" } });
+
+    expect(result.status).toBe("completed");
+    expect(calls).toBe(2);
+    expect(result.budget.retries).toBe(1);
+    expect(result.plan?.steps[0]?.attempt).toBe(2);
+  });
+
+  it("compares every runtime budget metric before dispatch", async () => {
+    const metrics = [
+      ["steps", "maxSteps"],
+      ["toolCalls", "maxToolCalls"],
+      ["replans", "maxReplans"],
+      ["retries", "maxRetries"],
+      ["tokens", "maxTokens"],
+      ["elapsedMs", "maxDurationMs"]
+    ] as const;
+    for (const [metric, limitName] of metrics) {
+      const plan = PlanStateSchema.parse({
+        planId: `plan-budget-${metric}`,
+        intentId: intentForApplication.intentId,
+        revision: 1,
+        steps: [],
+        assumptions: [],
+        approvalPoints: [],
+        estimatedCost: { steps: 0, toolCalls: 0, tokens: 0, durationMs: 0 },
+        createdAt: "2026-09-03T00:00:00.000Z",
+        updatedAt: "2026-09-03T00:00:00.000Z"
+      });
+      const graph = createSupervisorGraph({
+        planner: { create: async () => plan },
+        supervisor: { decide: async () => ({ type: "finish" as const, outcome: "completed" as const, summary: "done" }) },
+        planValidator: createPlanValidator(),
+        budgetLimits: { [limitName]: 1 },
+        now: () => "2026-09-03T00:00:02.000Z",
+        checkpointer: new MemorySaver()
+      });
+      const budget = {
+        steps: 0,
+        toolCalls: 0,
+        replans: 0,
+        retries: 0,
+        tokens: 0,
+        elapsedMs: 0,
+        [metric]: 2
+      };
+      const result = await graph.invoke({
+        runId: `budget-${metric}`,
+        intent: intentForApplication,
+        evidenceRefs: ["evidence-1"],
+        startedAt: "2026-09-03T00:00:00.000Z",
+        budget,
+        iteration: 0
+      }, { configurable: { thread_id: `budget-${metric}` } });
+      expect(result.status, metric).toBe("blocked");
+      expect(result.error?.code, metric).toBe("budget_exceeded");
+    }
+  });
+
+  it("does not accept an attempt token supplied by the plan input", async () => {
+    const plan = PlanStateSchema.parse({
+      planId: "plan-forged-attempt",
+      intentId: intentForApplication.intentId,
+      revision: 1,
+      steps: [{
+        id: "forged-step",
+        objective: "prepare application",
+        owner: "application",
+        status: "pending",
+        dependsOn: [],
+        inputRefs: [intentForApplication.intentId],
+        outputRefs: [],
+        attempt: 0,
+        attemptToken: "attempt:attacker",
+        maxAttempts: 1,
+        acceptanceCriteria: ["prepared"],
+        risk: "low"
+      }],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-03T00:00:00.000Z",
+      updatedAt: "2026-09-03T00:00:00.000Z"
+    });
+    const execute = vi.fn(async () => ({ status: "completed" as const }));
+    const graph = createSupervisorGraph({
+      planner: { create: async () => plan },
+      supervisor: createSupervisor({ now: () => "2026-09-03T00:00:00.000Z" }),
+      planValidator: createPlanValidator(),
+      agents: { application_agent: { execute } },
+      checkpointer: new MemorySaver()
+    });
+    const result = await graph.invoke({
+      runId: "forged-attempt-run",
+      intent: intentForApplication,
+      evidenceRefs: ["evidence-1"],
+      iteration: 0
+    }, { configurable: { thread_id: "forged-attempt-run" } });
+    expect(result.status).toBe("blocked");
+    expect(result.error?.code).toBe("attempt_token_invalid");
+    expect(execute).not.toHaveBeenCalled();
   });
 });

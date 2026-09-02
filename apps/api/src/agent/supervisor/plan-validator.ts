@@ -16,6 +16,7 @@ export interface PlanValidationError {
     | "dependency_cycle"
     | "capability_unknown"
     | "irreversible_capability_missing"
+    | "approval_binding_missing"
     | "capability_descriptor_invalid"
     | "capability_risk_mismatch"
     | "capability_side_effect_mismatch"
@@ -148,6 +149,9 @@ export function createPlanValidator(options: PlanValidatorOptions = {}): PlanVal
           const point = approvalByStep.get(step.id);
           if (point?.kind !== "final_submit" || point.required !== true) {
             errors.push({ code: "approval_point_missing", stepId: step.id, detail: "final_submit" });
+          }
+          if (step.approvalBinding === undefined) {
+            errors.push({ code: "approval_binding_missing", stepId: step.id, detail: "snapshotId,targetFingerprint,payloadHash" });
           }
         }
         if (step.risk === "high") {

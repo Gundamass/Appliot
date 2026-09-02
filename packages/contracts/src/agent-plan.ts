@@ -38,6 +38,9 @@ export const PlanStepSchema = z.object({
   attemptToken: z.string().min(1).max(256).optional(),
   maxAttempts: z.number().int().positive(),
   acceptanceCriteria: z.array(z.string().min(1).max(1_000)).max(50),
+  /** Evidence references and criteria recorded by the trusted executor. */
+  completionEvidenceRefs: z.array(z.string().min(1).max(256)).max(100).optional(),
+  satisfiedCriteria: z.array(z.string().min(1).max(1_000)).max(50).optional(),
   risk: PlanRiskSchema,
   capabilityNames: z.array(z.string().regex(/^[a-z0-9_.:-]{1,120}$/u)).max(20).optional(),
   approvalBinding: PlanApprovalBindingSchema.optional()
