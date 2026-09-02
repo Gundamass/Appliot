@@ -38,6 +38,50 @@ const view = ConversationViewSchema.parse({
 afterEach(() => vi.unstubAllGlobals());
 
 describe("ConversationApi", () => {
+  it("lists and deletes server-managed conversations", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response([session]))
+      .mockResolvedValueOnce(new Response(null, { status: 204 }))
+      .mockResolvedValueOnce(response({ deletedCount: 1 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createConversationApi("/gateway");
+
+    await expect(api.list()).resolves.toEqual([session]);
+    await expect(api.delete("conversation/1")).resolves.toBeUndefined();
+    await expect(api.deleteAll()).resolves.toEqual({ deletedCount: 1 });
+
+    expect(fetchMock.mock.calls.map(([url, init]) => [url, init?.method])).toEqual([
+      ["/gateway/api/conversations", "GET"],
+      ["/gateway/api/conversations/conversation%2F1", "DELETE"],
+      ["/gateway/api/conversations", "DELETE"]
+    ]);
+  });
+
+  it("rejects invalid list and clear payloads through shared contracts", async () => {
+    const fetchMock = vi.fn()
+      .mockResolvedValueOnce(response([{ ...session, extra: true }]))
+      .mockResolvedValueOnce(response({ deletedCount: -1 }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createConversationApi();
+
+    await expect(api.list()).rejects.toThrow();
+    await expect(api.deleteAll()).rejects.toThrow();
+  });
+
+  it("maps a failed delete to ConversationApiError", async () => {
+    vi.stubGlobal("fetch", vi.fn().mockResolvedValue(
+      response({ error: "会话不存在", code: "conversation_not_found" }, 404)
+    ));
+    const api = createConversationApi();
+
+    await expect(api.delete("missing")).rejects.toMatchObject({
+      name: "ConversationApiError",
+      message: "会话不存在",
+      code: "conversation_not_found",
+      status: 404
+    } satisfies Partial<ConversationApiError>);
+  });
+
   it("parses session, history, and turn responses through the shared contracts", async () => {
     const fetchMock = vi.fn()
       .mockResolvedValueOnce(new Response(JSON.stringify(session), { status: 201 }))
@@ -78,3 +122,7 @@ describe("ConversationApi", () => {
     } satisfies Partial<ConversationApiError>);
   });
 });
+
+function response(payload: unknown, status = 200): Response {
+  return new Response(JSON.stringify(payload), { status });
+}

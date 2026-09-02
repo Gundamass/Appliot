@@ -1,9 +1,12 @@
 import {
+  ConversationHistoryClearResultSchema,
   ConversationSessionSchema,
+  ConversationSessionListSchema,
   ConversationTurnInputSchema,
   ConversationTurnResponseSchema,
   ConversationViewSchema,
   ErrorResponseSchema,
+  type ConversationHistoryClearResult,
   type ConversationSession,
   type ConversationTurnResponse,
   type ConversationView
@@ -17,8 +20,11 @@ export class ConversationApiError extends Error {
 }
 
 export interface ConversationApi {
+  list(): Promise<ConversationSession[]>;
   create(): Promise<ConversationSession>;
   get(id: string): Promise<ConversationView>;
+  delete(id: string): Promise<void>;
+  deleteAll(): Promise<ConversationHistoryClearResult>;
   send(id: string, text: string): Promise<ConversationTurnResponse>;
   confirm(id: string, confirmationId: string, approved: boolean, selectedUrl?: string): Promise<ConversationTurnResponse>;
 }
@@ -26,6 +32,11 @@ export interface ConversationApi {
 export function createConversationApi(baseUrl = ""): ConversationApi {
   const path = (id: string) => `${baseUrl}/api/conversations/${encodeURIComponent(id)}`;
   return {
+    async list() {
+      return ConversationSessionListSchema.parse(await request(`${baseUrl}/api/conversations`, {
+        method: "GET"
+      }));
+    },
     async create() {
       return ConversationSessionSchema.parse(await request(`${baseUrl}/api/conversations`, {
         method: "POST"
@@ -33,6 +44,14 @@ export function createConversationApi(baseUrl = ""): ConversationApi {
     },
     async get(id) {
       return ConversationViewSchema.parse(await request(path(id), { method: "GET" }));
+    },
+    async delete(id) {
+      await request(path(id), { method: "DELETE" });
+    },
+    async deleteAll() {
+      return ConversationHistoryClearResultSchema.parse(await request(`${baseUrl}/api/conversations`, {
+        method: "DELETE"
+      }));
     },
     async send(id, text) {
       const payload = ConversationTurnInputSchema.safeParse({ text });
