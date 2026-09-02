@@ -541,7 +541,8 @@ export function createProductionDependencies(
     });
     const conversationJobMatchService = createConversationJobMatchService({
       conversations: conversationRepository,
-      jobMatches: jobMatchService
+      jobMatches: jobMatchService,
+      processEvents: conversationProcessEvents
     });
 
     return {

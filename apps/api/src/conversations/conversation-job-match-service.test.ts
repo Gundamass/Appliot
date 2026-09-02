@@ -2,13 +2,16 @@ import Database from "better-sqlite3";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type {
   ConversationJobMatchAction,
+  ConversationProcessEvent,
   JobExpectationSnapshot,
   JobMatchResult
 } from "@resume/contracts";
+import { ConversationMessageSchema } from "@resume/contracts";
 import type { JobMatchAggregate, StoredJobMatchSession } from "../job-matching/job-match-repository.js";
 import type { createJobMatchService } from "../job-matching/job-match-service.js";
 import { migrateDatabase } from "../db/migrate.js";
 import { createConversationRepository } from "./conversation-repository.js";
+import { createConversationProcessEventBus } from "./conversation-events.js";
 import { createConversationJobMatchService } from "./conversation-job-match-service.js";
 
 const databases: Database.Database[] = [];
@@ -94,6 +97,7 @@ function testContext() {
   const conversations = createConversationRepository(database);
   const conversation = conversations.createConversation();
   const otherConversation = conversations.createConversation();
+  const processEvents = createConversationProcessEventBus(database);
   const sessionId = "33333333-3333-4333-8333-333333333333";
   database.prepare(`
     INSERT INTO job_match_sessions (
@@ -111,12 +115,13 @@ function testContext() {
   conversations.linkJobMatchSession(conversation.id, sessionId);
 
   let current = aggregate(sessionId);
+  const continueExtraction = vi.fn(async () => current);
   const jobMatches = {
     get: vi.fn(() => current),
     confirmFilters: vi.fn(async () => current),
     pause: vi.fn(async () => current),
     resume: vi.fn(async () => current),
-    continueExtraction: vi.fn(async () => current),
+    continueExtraction,
     rematch: vi.fn(async () => current),
     select: vi.fn((): StoredJobMatchSession => current),
     selectConflict: vi.fn((): StoredJobMatchSession => current),
@@ -126,6 +131,7 @@ function testContext() {
   const service = createConversationJobMatchService({
     conversations,
     jobMatches,
+    processEvents,
     now: () => new Date("2026-09-02T00:00:01.000Z")
   });
 
@@ -137,9 +143,34 @@ function testContext() {
     resultId: current.results[0]!.id,
     postingContentHash: current.postings[0]!.contentHash,
     expectation,
+    processEvents,
     jobMatches,
+    continueExtraction,
     service,
     setCurrent(next: JobMatchAggregate) { current = next; }
+  };
+}
+
+function selectAction(value: ReturnType<typeof testContext>): ConversationJobMatchAction {
+  return {
+    conversationId: value.conversation.id,
+    sessionId: value.sessionId,
+    action: "select_result",
+    sessionVersion: 3,
+    idempotencyKey: "select-trace-1",
+    resultId: value.resultId,
+    resultVersion: 2,
+    postingContentHash: value.postingContentHash
+  };
+}
+
+function continueAction(value: ReturnType<typeof testContext>): ConversationJobMatchAction {
+  return {
+    conversationId: value.conversation.id,
+    sessionId: value.sessionId,
+    action: "continue",
+    sessionVersion: 3,
+    idempotencyKey: "continue-trace-1"
   };
 }
 
@@ -301,5 +332,52 @@ describe("conversation job-match action service", () => {
     });
     await expect(value.service.findOwningConversation("66666666-6666-4666-8666-666666666666"))
       .resolves.toBeUndefined();
+  });
+
+  it("records a job action under one user turn with ordered real stages", async () => {
+    const value = testContext();
+    for (const [sequence, role] of [[1, "user"], [2, "assistant"]] as const) {
+      value.conversations.appendMessage({
+        sessionId: value.conversation.id,
+        expectedSequence: sequence - 1,
+        message: ConversationMessageSchema.parse({
+          id: `history-${sequence}`,
+          sessionId: value.conversation.id,
+          sequence,
+          role,
+          text: "历史消息",
+          cards: [],
+          createdAt: "2026-09-02T00:00:00.000Z"
+        })
+      });
+    }
+
+    const result = await value.service.execute(value.conversation.id, selectAction(value));
+    const events: ConversationProcessEvent[] = value.processEvents.replay(value.conversation.id).events;
+
+    expect(events.map((event) => [event.turnSequence, event.stepId, event.status])).toEqual([
+      [3, "understanding-request", "running"],
+      [3, "understanding-request", "completed"],
+      [3, "validate-selection", "running"],
+      [3, "validate-selection", "completed"],
+      [3, "persist-selection", "running"],
+      [3, "persist-selection", "completed"]
+    ]);
+    expect(result.turnSequence).toBe(3);
+    expect(result.cards.some((card) => card.type === "recommendation")).toBe(true);
+  });
+
+  it("uses waiting for login or challenge and never exposes raw tool data", async () => {
+    const value = testContext();
+    value.continueExtraction.mockRejectedValueOnce(
+      new Error("browser_challenge_required cookie=secret browser_worker=raw")
+    );
+
+    await expect(value.service.execute(value.conversation.id, continueAction(value))).rejects.toThrow();
+
+    const event = value.processEvents.replay(value.conversation.id).events.at(-1);
+    expect(event).toMatchObject({ status: "waiting" });
+    expect(JSON.stringify(event)).not.toContain("cookie=secret");
+    expect(JSON.stringify(event)).not.toContain("browser_worker");
   });
 });
