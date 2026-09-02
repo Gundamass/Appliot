@@ -18,6 +18,7 @@ export type PrimaryGoal = z.infer<typeof PrimaryGoalSchema>;
 export const SubGoalSchema = z.enum([
   "select_latest_resume",
   "select_resume",
+  "analyze_resume",
   "identify_target_job",
   "analyze_job",
   "match_resume_to_job",

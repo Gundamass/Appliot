@@ -17,6 +17,10 @@ export const CapabilityIdempotencySchema = z.enum(["idempotent", "keyed", "none"
 export type CapabilityIdempotency = z.infer<typeof CapabilityIdempotencySchema>;
 
 const CapabilityNameSchema = z.string().regex(/^[a-z][a-z0-9_.:-]{1,120}$/u);
+const ApprovalPayloadHashSchema = z.string().regex(/^[a-f0-9]{64}$/iu);
+const ApprovalTokenSchema = z.string().regex(
+  /^approval\.v1\.[A-Za-z0-9_-]{1,4096}\.[A-Za-z0-9_-]{1,256}$/u
+).max(8_192);
 
 export const CapabilityDescriptorSchema = z.object({
   name: CapabilityNameSchema,
@@ -32,6 +36,12 @@ export const CapabilityDescriptorSchema = z.object({
   outputSchema: JsonValueSchema.optional(),
   handlerRef: z.string().min(1).max(256).optional()
 }).strict().superRefine((descriptor, context) => {
+  if (descriptor.sideEffect === "irreversible" && !descriptor.requiresApproval) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "irreversible_side_effect_requires_approval" });
+  }
+  if (descriptor.sideEffect === "irreversible" && descriptor.risk !== "irreversible") {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "irreversible_side_effect_requires_irreversible_risk" });
+  }
   if (descriptor.risk === "irreversible" && !descriptor.requiresApproval) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "irreversible_capability_requires_approval" });
   }
@@ -55,6 +65,13 @@ export const CapabilityDescriptorSchema = z.object({
 });
 
 export type CapabilityDescriptor = z.infer<typeof CapabilityDescriptorSchema>;
+
+export const FinalSubmitApprovalSchema = z.object({
+  approvalId: z.string().min(1).max(128),
+  token: ApprovalTokenSchema
+}).strict();
+
+export type FinalSubmitApproval = z.infer<typeof FinalSubmitApprovalSchema>;
 
 export const CapabilityInvocationSchema = z.object({
   invocationId: z.string().min(1).max(128),
