@@ -1,12 +1,14 @@
 import { ClipboardCheck, FileText, MessageCircle, ShieldCheck, Sparkles } from "lucide-react";
 import type { ReactNode } from "react";
+import { ConversationNavigation, type ConversationNavigationProps } from "./ConversationNavigation.js";
 
 export type WorkspaceView = "chat" | "applications" | "profile";
 
-interface WorkspaceFrameProps {
+export interface WorkspaceFrameProps {
   activeView: WorkspaceView;
   children: ReactNode;
   onSelectView(view: WorkspaceView): void;
+  conversationNavigation?: ConversationNavigationProps;
 }
 
 const WORKSPACE_VIEWS: Array<{
@@ -19,7 +21,7 @@ const WORKSPACE_VIEWS: Array<{
   { id: "profile", label: "我的简历", icon: FileText }
 ];
 
-export function WorkspaceFrame({ activeView, children, onSelectView }: WorkspaceFrameProps) {
+export function WorkspaceFrame({ activeView, children, onSelectView, conversationNavigation }: WorkspaceFrameProps) {
   return (
     <div className="workspace-shell">
       <header className="workspace-topbar">
@@ -35,7 +37,8 @@ export function WorkspaceFrame({ activeView, children, onSelectView }: Workspace
       <div className="profile-workspace">
         <aside className="workspace-sidebar">
           <nav className="workspace-navigation" aria-label="候选人工作台">
-            {WORKSPACE_VIEWS.map((item) => {
+            {conversationNavigation !== undefined && <ConversationNavigation {...conversationNavigation} />}
+            {WORKSPACE_VIEWS.filter((item) => conversationNavigation === undefined || item.id !== "chat").map((item) => {
               const Icon = item.icon;
               return (
                 <button
