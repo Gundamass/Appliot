@@ -1,5 +1,6 @@
 import { EventEmitter } from "node:events";
-import { describe, expect, it, vi } from "vitest";
+import { chromium } from "playwright-core";
+import { afterEach, describe, expect, it, vi } from "vitest";
 
 const runtime = vi.hoisted(() => ({
   context: undefined as FakeContext | undefined,
@@ -79,6 +80,7 @@ class FakeContext extends EventEmitter {
 
 vi.mock("playwright-core", () => ({
   chromium: {
+    executablePath: vi.fn(() => process.execPath),
     launchPersistentContext: vi.fn(async () => runtime.context)
   }
 }));
@@ -175,10 +177,33 @@ vi.mock("./job-observer.js", () => ({
   }
 }));
 
-import { BrowserSessionManager } from "./session-manager.js";
+import { BrowserSessionManager, resolveExecutablePath } from "./session-manager.js";
 
 const executablePath = process.execPath;
 const approvalKey = Buffer.alloc(32).toString("base64url");
+const originalBrowserExecutable = process.env.RESUME_BROWSER_EXECUTABLE;
+
+afterEach(() => {
+  if (originalBrowserExecutable === undefined) delete process.env.RESUME_BROWSER_EXECUTABLE;
+  else process.env.RESUME_BROWSER_EXECUTABLE = originalBrowserExecutable;
+  vi.mocked(chromium.executablePath).mockClear();
+});
+
+describe("browser executable resolution", () => {
+  it("prefers Playwright's matching Chromium when no explicit path is configured", () => {
+    delete process.env.RESUME_BROWSER_EXECUTABLE;
+
+    expect(resolveExecutablePath()).toBe(process.execPath);
+    expect(chromium.executablePath).toHaveBeenCalledTimes(1);
+  });
+
+  it("keeps an explicit executable ahead of Playwright's Chromium", () => {
+    process.env.RESUME_BROWSER_EXECUTABLE = process.execPath;
+
+    expect(resolveExecutablePath(import.meta.filename)).toBe(import.meta.filename);
+    expect(chromium.executablePath).not.toHaveBeenCalled();
+  });
+});
 
 it("replaces and disposes the main-document response listener with each page lifecycle", async () => {
   const initial = new FakePage("initial");

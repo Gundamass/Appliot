@@ -40,10 +40,20 @@ const executableCandidates = process.platform === "win32"
       "/usr/bin/chromium-browser"
     ];
 
-function resolveExecutablePath(configuredPath?: string): string {
-  const candidate = configuredPath ?? process.env.RESUME_BROWSER_EXECUTABLE
-    ?? executableCandidates.find((path) => existsSync(path));
-  if (!candidate || !existsSync(candidate)) {
+export function resolveExecutablePath(configuredPath?: string): string {
+  const explicitCandidate = configuredPath ?? process.env.RESUME_BROWSER_EXECUTABLE;
+  if (explicitCandidate !== undefined) {
+    if (!existsSync(explicitCandidate)) {
+      throw new Error("未找到可用的 Edge、Chrome 或 Chromium 浏览器");
+    }
+    return explicitCandidate;
+  }
+
+  const playwrightCandidate = chromium.executablePath();
+  const candidate = existsSync(playwrightCandidate)
+    ? playwrightCandidate
+    : executableCandidates.find((path) => existsSync(path));
+  if (!candidate) {
     throw new Error("未找到可用的 Edge、Chrome 或 Chromium 浏览器");
   }
   return candidate;

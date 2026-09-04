@@ -1,9 +1,10 @@
 import { defineConfig } from "@playwright/test";
 
-const systemBrowser = process.env.RESUME_BROWSER_EXECUTABLE
-  ?? (process.platform === "win32"
-    ? "C:\\Program Files (x86)\\Microsoft\\Edge\\Application\\msedge.exe"
-    : undefined);
+export function browserLaunchOptions(executablePath: string | undefined) {
+  return executablePath
+    ? { launchOptions: { executablePath } }
+    : {};
+}
 
 export default defineConfig({
   testDir: "./tests/browser",
@@ -16,6 +17,6 @@ export default defineConfig({
     screenshot: "only-on-failure",
     trace: "retain-on-failure",
     video: "retain-on-failure",
-    ...(systemBrowser ? { launchOptions: { executablePath: systemBrowser } } : {})
+    ...browserLaunchOptions(process.env.RESUME_BROWSER_EXECUTABLE)
   }
 });
