@@ -13,9 +13,15 @@ test("retains browser diagnostics for failed application flows", () => {
   });
 });
 
-test("uses Playwright's matching browser unless an executable is explicit", () => {
-  expect(browserLaunchOptions(undefined)).toEqual({});
-  expect(browserLaunchOptions("C:\\browsers\\approved.exe")).toEqual({
+test("prefers an explicit executable and otherwise uses an installed Playwright Chromium", () => {
+  const playwrightExecutable = "C:\\playwright\\chromium.exe";
+  const pathExists = (candidate: string) => candidate === playwrightExecutable;
+
+  expect(browserLaunchOptions(undefined, playwrightExecutable, pathExists)).toEqual({
+    launchOptions: { executablePath: playwrightExecutable }
+  });
+  expect(browserLaunchOptions("C:\\browsers\\approved.exe", playwrightExecutable, pathExists)).toEqual({
     launchOptions: { executablePath: "C:\\browsers\\approved.exe" }
   });
+  expect(browserLaunchOptions(undefined, playwrightExecutable, () => false)).toEqual({});
 });

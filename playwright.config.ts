@@ -1,6 +1,13 @@
-import { defineConfig } from "@playwright/test";
+import { existsSync } from "node:fs";
+import { chromium, defineConfig } from "@playwright/test";
 
-export function browserLaunchOptions(executablePath: string | undefined) {
+export function browserLaunchOptions(
+  explicitExecutablePath: string | undefined,
+  playwrightExecutablePath = chromium.executablePath(),
+  pathExists: (candidate: string) => boolean = existsSync
+) {
+  const executablePath = explicitExecutablePath
+    || (pathExists(playwrightExecutablePath) ? playwrightExecutablePath : undefined);
   return executablePath
     ? { launchOptions: { executablePath } }
     : {};
