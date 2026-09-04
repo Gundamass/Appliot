@@ -311,8 +311,8 @@ async function classifyIntent(
       traceIds: trace(dependencies, nodeEvent(state, "classify_intent", intent.kind, "manual_recruitment_url"), state.traceIds)
     });
   }
-  if (fallback.kind === "discover_recruitment_site") {
-    return finish({ intent: fallback, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", fallback.kind, "deterministic_recruitment_discovery"), state.traceIds) });
+  if (fallback.kind !== "unknown") {
+    return finish({ intent: fallback, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", fallback.kind, "deterministic_intent"), state.traceIds) });
   }
   if (dependencies.modelProvider === undefined) {
     return finish({ intent: fallback, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", fallback.kind, "deterministic_fallback"), state.traceIds) });

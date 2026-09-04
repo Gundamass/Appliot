@@ -415,6 +415,45 @@ describe("conversation graph", () => {
     expect(dependencies.createFromJob).not.toHaveBeenCalled();
   });
 
+  it("keeps an unambiguous application-status intent ahead of a conflicting model result", async () => {
+    const dependencies = fakeDependencies();
+    const generateStructured = vi.fn(async () => ({
+      kind: "list_recommendations",
+      requiresConfirmation: false
+    }));
+    dependencies.modelProvider = { generateStructured };
+
+    const response = await runConversationTurn(
+      dependencies,
+      "我投了哪些岗位？对应的网站有哪些？",
+      { version: 0, recentPostingIds: [] }
+    );
+
+    expect(response.message.intent?.kind).toBe("list_application_tasks");
+    expect(response.cards).toEqual(expect.arrayContaining([
+      expect.objectContaining({ type: "application_task" })
+    ]));
+    expect(generateStructured).not.toHaveBeenCalled();
+  });
+
+  it("uses the structured model when deterministic rules do not understand the message", async () => {
+    const dependencies = fakeDependencies();
+    const generateStructured = vi.fn(async () => ({
+      kind: "list_recommendations",
+      requiresConfirmation: false
+    }));
+    dependencies.modelProvider = { generateStructured };
+
+    const response = await runConversationTurn(
+      dependencies,
+      "帮我做点别的事情",
+      { version: 0, recentPostingIds: [] }
+    );
+
+    expect(response.message.intent?.kind).toBe("list_recommendations");
+    expect(generateStructured).toHaveBeenCalledTimes(1);
+  });
+
   it("falls back to unknown when a structured model returns an invalid intent", async () => {
     const dependencies = fakeDependencies();
     dependencies.modelProvider = {
