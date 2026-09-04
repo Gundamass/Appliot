@@ -934,8 +934,9 @@ function Get-ServiceStatusLines {
   $lines.Add(("{0,-24} {1}" -f $labels.supervisor, (Get-ServiceStatusText -State $supervisorState)))
   foreach ($name in @("remoteOcr", "remoteEmbedding", "tunnel", "api", "web")) {
     $record = $state.services.$name
-    $suffix = if (-not [string]::IsNullOrEmpty([string]$record.lastError) -and $record.state -ne "ready") { " - $($record.lastError)" } else { "" }
-    $lines.Add(("{0,-24} {1}{2}" -f $labels[$name], (Get-ServiceStatusText -State $record.state), $suffix))
+    $effectiveState = if ($supervisorState -eq "stopped") { "stopped" } else { $record.state }
+    $suffix = if ($supervisorState -ne "stopped" -and -not [string]::IsNullOrEmpty([string]$record.lastError) -and $effectiveState -ne "ready") { " - $($record.lastError)" } else { "" }
+    $lines.Add(("{0,-24} {1}{2}" -f $labels[$name], (Get-ServiceStatusText -State $effectiveState), $suffix))
   }
   return @($lines)
 }

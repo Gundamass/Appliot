@@ -116,6 +116,25 @@ try {
     Assert-Equal 6 $lines.Count "Status did not produce exactly six service lines."
   }
 
+  Invoke-Case "treats cached ready services as stopped when the supervisor is absent" {
+    $runtime = Join-Path $testRoot "stale-ready-runtime"
+    New-Item -ItemType Directory -Path $runtime | Out-Null
+    $state = New-ServiceRuntimeState -DesiredState "running"
+    $state.supervisorPid = 0
+    foreach ($name in @("remoteOcr", "remoteEmbedding", "tunnel", "api", "web")) {
+      $state.services.$name.state = "ready"
+    }
+    Write-RuntimeState -Path (Join-Path $runtime "runtime-state.json") -State $state
+
+    $notRunningLabel = '"\u672a\u8fd0\u884c"' | ConvertFrom-Json
+    $readyLabel = '"\u5c31\u7eea"' | ConvertFrom-Json
+    $lines = @(Get-ServiceStatusLines -RuntimeRoot $runtime)
+
+    Assert-Equal 6 $lines.Count "Status did not produce exactly six service lines."
+    Assert-Equal 6 (@($lines | Where-Object { $_.Contains($notRunningLabel) }).Count) "Stopped supervisor did not invalidate every cached child status."
+    Assert-True (-not (($lines -join "`n").Contains($readyLabel))) "Stopped supervisor exposed a stale ready status."
+  }
+
   Invoke-Case "lists only managed log files and uninstalls without deleting runtime data" {
     $logRoot = Join-Path $testRoot "logs"
     New-Item -ItemType Directory -Path $logRoot -Force | Out-Null
