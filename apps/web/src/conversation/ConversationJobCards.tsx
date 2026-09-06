@@ -195,7 +195,10 @@ function requirementExplanations(
 }
 
 function isUserFacingExplanation(summary: string): boolean {
-  return !(/Profile\s+fact|[a-z_][a-z0-9_]*\[\d+\](?:\.[a-z_][a-z0-9_]*)?|\b(?:requirement|evidence|fact)(?:Id)?[-_:]\s*[a-z0-9]|\b[a-z]+(?:_[a-z0-9]+)+\b/iu.test(summary));
+  const match = summary.match(
+    /^你的(?:学历|专业|技能|工作经历|已确认资料)“([^“”\r\n]+)”符合岗位(?:技能|工作职责|项目经验|学历|专业|工作年限|工作地点|用工类型|行业|工作方式|薪资|任职)要求。$/u
+  );
+  return match !== null && [...match[1]!].length <= 120;
 }
 
 function formatScore(score: number): string {

@@ -186,6 +186,34 @@ describe("ConversationJobMatchCards", () => {
     }));
   });
 
+  it("rejects evidence summaries outside the server natural-language grammar", async () => {
+    const user = userEvent.setup();
+    const { resultsSession } = makeJobMatchComponentFixtures();
+    const result: JobMatchResult = { ...resultsSession.results.find((item) => item.id === "result-1")! };
+    const unsafeSummaries = [
+      "$.education.major",
+      "/education/0/major",
+      "550e8400-e29b-41d4-a716-446655440000",
+      "evd-01J8Z8V4R4T4BX9E8D6M2N7Q5K"
+    ];
+    result.evidence = unsafeSummaries.map((summary, index) => ({
+      ...result.evidence[0]!,
+      evidenceId: `unsafe-evidence-${index}`,
+      summary
+    }));
+    const adversarialSession: JobMatchSession = {
+      ...resultsSession,
+      postings: resultsSession.postings.filter((posting) => posting.id === result.postingId),
+      results: [result]
+    };
+
+    render(<ConversationJobCards session={adversarialSession} onAction={vi.fn()} />);
+    await user.click(screen.getByRole("button", { name: "查看详情" }));
+
+    expect(screen.getByText("熟悉 React")).toBeVisible();
+    unsafeSummaries.forEach((summary) => expect(screen.queryByText(summary)).not.toBeInTheDocument());
+  });
+
   it("uses the legacy score explanation without exposing persisted internal evidence", async () => {
     const user = userEvent.setup();
     const { resultsSession } = makeJobMatchComponentFixtures();
