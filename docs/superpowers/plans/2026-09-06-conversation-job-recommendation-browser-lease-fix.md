@@ -30,7 +30,7 @@
 - Consumes: `ConversationConfirmation["action"]`, `pendingConfirmation`, and the API repository's pending confirmation.
 - Produces: local `confirmationDecisionText(action, approved)` helpers returning the approved or rejected user-visible message.
 
-- [ ] **Step 1: Add failing web tests for entry and recommendation confirmation copy**
+- [x] **Step 1: Add failing web tests for entry and recommendation confirmation copy**
 
 Extend the existing follow-up recruitment test so it inspects each optimistic user turn before resolving the corresponding API promise:
 
@@ -44,7 +44,7 @@ expect(within(await screen.findByTestId("conversation-turn-5"))
 
 Keep the existing `start_application` assertion for `确认开始投递` as the fallback action coverage.
 
-- [ ] **Step 2: Run the web test and verify RED**
+- [x] **Step 2: Run the web test and verify RED**
 
 Run:
 
@@ -54,7 +54,7 @@ corepack pnpm --filter @resume/web test -- src/conversation/ChatHome.test.tsx
 
 Expected: FAIL because both recruitment confirmations currently render `确认开始投递`.
 
-- [ ] **Step 3: Add failing API persistence tests**
+- [x] **Step 3: Add failing API persistence tests**
 
 In `conversation-service.test.ts`, exercise `confirm_recruitment_site` and `request_job_recommendations`, then assert the persisted user turns:
 
@@ -66,7 +66,7 @@ expect(repository.getMessages(session.id).filter((message) => message.role === "
 
 Retain an assertion that `start_application` persists `确认开始投递`.
 
-- [ ] **Step 4: Run the API test and verify RED**
+- [x] **Step 4: Run the API test and verify RED**
 
 Run:
 
@@ -76,7 +76,7 @@ corepack pnpm --filter @resume/api test -- src/conversations/conversation-servic
 
 Expected: FAIL because the service currently persists `确认开始投递` for every action.
 
-- [ ] **Step 5: Implement minimal action-specific helpers**
+- [x] **Step 5: Implement minimal action-specific helpers**
 
 Add equivalent local helpers in `ChatHome.tsx` and `conversation-service.ts`:
 
@@ -97,11 +97,11 @@ function confirmationDecisionText(
 
 The web handler resolves the action from the matching `pendingConfirmation`; the API service passes `pending.action` directly.
 
-- [ ] **Step 6: Run focused web and API tests and verify GREEN**
+- [x] **Step 6: Run focused web and API tests and verify GREEN**
 
 Run both commands from Steps 2 and 4. Expected: PASS with no new warnings.
 
-- [ ] **Step 7: Commit only the confirmation-copy hunks**
+- [x] **Step 7: Commit only the confirmation-copy hunks**
 
 ```powershell
 git add -p -- apps/web/src/conversation/ChatHome.tsx apps/web/src/conversation/ChatHome.test.tsx apps/api/src/conversations/conversation-service.ts apps/api/src/conversations/conversation-service.test.ts
@@ -124,7 +124,7 @@ Stage only hunks introduced by this task; reject pre-existing hunks already pres
 - Consumes: `releaseOwner(dependencies, sessionId)` and optional `JobMatchBrowserPort.releaseTask(ownerId)`.
 - Produces: `finalizeMatching(sessionId)` that returns `awaiting_job_selection` data while leaving `BrowserOwnershipLease.current()` undefined.
 
-- [ ] **Step 1: Add a failing lease-release regression test**
+- [x] **Step 1: Add a failing lease-release regression test**
 
 Extend `extracts and matches immediately after filter confirmation` with:
 
@@ -139,7 +139,7 @@ expect(() => value.browserOwnershipLease.acquire({
 
 This proves another recommendation can acquire the single controlled browser after the first reaches selection.
 
-- [ ] **Step 2: Run the job-match service test and verify RED**
+- [x] **Step 2: Run the job-match service test and verify RED**
 
 Run:
 
@@ -149,7 +149,7 @@ corepack pnpm --filter @resume/api test -- src/job-matching/job-match-service.te
 
 Expected: FAIL because `finalizeMatching` leaves the first session as the current browser owner and never calls `releaseTask`.
 
-- [ ] **Step 3: Release only after the successful terminal transition**
+- [x] **Step 3: Release only after the successful terminal transition**
 
 Change `finalizeMatching` after the state mutation:
 
@@ -162,7 +162,7 @@ return completed;
 
 Do not release in `awaiting_filter_confirmation`, `awaiting_login`, or `awaiting_challenge` states.
 
-- [ ] **Step 4: Run the focused job-match tests and verify GREEN**
+- [x] **Step 4: Run the focused job-match tests and verify GREEN**
 
 Run the command from Step 2. Expected: PASS, including the existing pause, cancel, conversion, and Baidu normalization tests.
 
@@ -189,7 +189,7 @@ Stage only the new release assertions and successful-terminal release logic; rej
 - Consumes: `userFacingError(code)` with `browser_lease_in_use` or `browser_task_in_use`.
 - Produces: a specific retryable assistant message while preserving the original audit reason code.
 
-- [ ] **Step 1: Add a failing graph regression test**
+- [x] **Step 1: Add a failing graph regression test**
 
 Clone the existing normalized job-match failure scenario, make `jobMatchService.create` throw `new Error("browser_lease_in_use")`, and assert:
 
@@ -200,7 +200,7 @@ expect(failed.response.message.text).toBe(
 expect(failed.traceIds).not.toHaveLength(0);
 ```
 
-- [ ] **Step 2: Run the graph test and verify RED**
+- [x] **Step 2: Run the graph test and verify RED**
 
 Run:
 
@@ -210,7 +210,7 @@ corepack pnpm --filter @resume/api test -- src/conversations/conversation-graph.
 
 Expected: FAIL because `browser_lease_in_use` currently falls through to the generic message.
 
-- [ ] **Step 3: Implement the explicit mapping**
+- [x] **Step 3: Implement the explicit mapping**
 
 Add this branch to `userFacingError`:
 
@@ -220,7 +220,7 @@ if (code === "browser_lease_in_use" || code === "browser_task_in_use") {
 }
 ```
 
-- [ ] **Step 4: Run the graph test and verify GREEN**
+- [x] **Step 4: Run the graph test and verify GREEN**
 
 Run the command from Step 2. Expected: PASS and existing `unsupported_job_entry` behavior remains unchanged.
 
@@ -249,7 +249,7 @@ Stage only the `browser_lease_in_use`/`browser_task_in_use` mapping and its regr
 - Consumes: the full conversation API, job-match service, browser worker, and web UI.
 - Produces: evidence that sequential recommendation flows no longer fail because of a stale lease.
 
-- [ ] **Step 1: Run focused package regressions**
+- [x] **Step 1: Run focused package regressions**
 
 ```powershell
 corepack pnpm --filter @resume/job-matching test
@@ -259,7 +259,7 @@ corepack pnpm --filter @resume/web test -- src/conversation/ChatHome.test.tsx
 
 Expected: all focused suites PASS.
 
-- [ ] **Step 2: Run type checks and the full workspace test suite**
+- [x] **Step 2: Run type checks and the full workspace test suite**
 
 ```powershell
 corepack pnpm -r --workspace-concurrency=1 typecheck
@@ -277,7 +277,7 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/service-control.ps1 
 
 Expected: API/browser worker and web report `就绪`; `http://localhost:5173` and API health return success.
 
-- [ ] **Step 4: Run local browser regression without real submission**
+- [x] **Step 4: Run local browser regression without real submission**
 
 ```powershell
 corepack pnpm test:e2e -- tests/browser/conversation-job-match-flow.spec.ts
@@ -327,3 +327,121 @@ git add docs/testing/2026-09-06-job-recommendation-browser-lease-regression.md
 git diff --cached --check
 git commit -m "docs: record browser lease regression results"
 ```
+
+---
+
+### Task 5: Align Baidu entry and filter semantics with the live site
+
+**Status:** Design addendum awaiting approval before production-code changes.
+
+**Live evidence (2026-09-06):**
+
+- The controlled browser opens `https://talent.baidu.com/jobs/list?projectType=4&recruitType=GRADUATE`, so the flow has reached a job-list page rather than the company home page.
+- Baidu currently defines `projectType=1` as `校招`, `projectType=3` as `AIDU项目`, and `projectType=4` as `管培生项目`.
+- The live page exposes the role category `技术`, not `开发`; passing the raw expectation value therefore raises `job_filter_value_missing:postType`.
+- `employment_type=全职` is not a Baidu `projectType`; mapping it to that control is semantically incorrect.
+- The live endpoint reports 145 positions for the generic campus URL with `projectType=1`.
+
+**Files:**
+
+- Modify: `packages/job-matching/src/adapters/baidu-job-adapter.test.ts`
+- Modify: `packages/job-matching/src/adapters/baidu-job-adapter.ts`
+- Modify: `apps/browser-worker/src/job-observer.test.ts`
+- Modify: `apps/browser-worker/src/job-observer.ts`
+- Modify: `apps/api/src/job-matching/job-match-service.test.ts`
+- Verify: `tests/browser/conversation-job-match-flow.spec.ts`
+
+**Design:**
+
+1. Normalize a generic Baidu recruitment entry to the ordinary campus project (`projectType=1`), not the management-trainee project.
+2. Keep the adapter boundary semantic: map recognizable target roles to Baidu's current category labels (`技术`, `产品`, `政企`, `销售`, `综合`). Unknown roles remain `localOnly` instead of causing a destructive or unverifiable click.
+3. Treat `employment_type` as `localOnly`; Baidu's `projectType` describes campus programs, not full-time/part-time employment.
+4. Keep location labels such as `全国` in the filter plan. The worker expands the location control when needed and the observer converts URL codes such as `9000` back to labels before readback validation.
+5. Preserve fail-closed behavior: missing controls, missing values, or mismatched readback still fail and never proceed to selection or application creation.
+
+- [ ] **Step 1: Add failing adapter tests for the live Baidu contract**
+
+Assert that a generic official entry normalizes to:
+
+```text
+https://talent.baidu.com/jobs/list?projectType=1&recruitType=GRADUATE
+```
+
+Assert that an expectation containing `开发 / 全国 / 全职` produces:
+
+```ts
+mapped: [
+  { criterionIndex: 0, key: "postType", values: ["技术"] },
+  { criterionIndex: 1, key: "workPlace", values: ["全国"] }
+]
+localOnly: [
+  { criterionIndex: 2, reasonCode: "unsupported_employment_type" }
+]
+```
+
+- [ ] **Step 2: Run the adapter test and verify RED**
+
+```powershell
+corepack pnpm --filter @resume/job-matching test -- src/adapters/baidu-job-adapter.test.ts
+```
+
+Expected: FAIL because the current adapter uses `projectType=4`, passes `开发` unchanged, and maps `全职` to `projectType`.
+
+- [ ] **Step 3: Implement the minimal adapter mapping**
+
+Add a small deterministic role-category mapper. It must not call a model or infer an unsupported site option. Unrecognized role values remain local-only.
+
+- [ ] **Step 4: Add failing browser-worker tests for Baidu filter expansion and labeled readback**
+
+Use a current-structure Baidu fixture with:
+
+- category label `技术`;
+- a collapsed location section whose `更多` action reveals `全国`;
+- `window.__INITIAL_DATA__.listData` code/label lists;
+- URL readback values `postType=1`, `workPlace=9000`, `projectType=1`.
+
+Assert that applying the semantic plan clicks only `技术` and `全国`, and that observation returns semantic values rather than numeric codes.
+
+- [ ] **Step 5: Run the browser-worker test and verify RED**
+
+```powershell
+corepack pnpm --filter @resume/browser-worker test -- src/job-observer.test.ts
+```
+
+Expected: FAIL because the current worker does not reveal the collapsed location options and reads raw URL codes.
+
+- [ ] **Step 6: Implement filter expansion and labeled readback**
+
+Make the Baidu branch expand only the relevant location container, re-query the container after the UI update, and select the requested label. Convert URL codes through the live initial-data option lists when observing filters.
+
+- [ ] **Step 7: Add a service regression proving extraction starts only after verified readback**
+
+Cover the exact `开发 / 全国 / 全职` expectation and assert that:
+
+- `confirmFilters` reaches extraction with version-safe state transitions;
+- generated recommendations are limited to six;
+- scores are presented as percentages;
+- browser ownership is released after `awaiting_job_selection`;
+- no application task or submission is created.
+
+- [ ] **Step 8: Run focused GREEN verification**
+
+```powershell
+corepack pnpm --filter @resume/job-matching test -- src/adapters/baidu-job-adapter.test.ts
+corepack pnpm --filter @resume/browser-worker test -- src/job-observer.test.ts
+corepack pnpm --filter @resume/api test -- src/job-matching/job-match-service.test.ts src/conversations/conversation-job-match-service.test.ts
+corepack pnpm --filter @resume/web test -- src/conversation/ConversationCards.test.tsx src/conversation/ChatHome.test.tsx
+```
+
+- [ ] **Step 9: Repeat the real Baidu smoke test**
+
+Run the same conversation flow through filter confirmation and verify that one to six recommendation cards are shown with percentage labels. Stop before creating an application task.
+
+---
+
+## Independently discovered follow-up defects
+
+These are intentionally not folded into Task 5 because they affect different subsystems and require separate designs:
+
+1. Opening the web root without a valid conversation causes repeated conversation creation due to an unstable `onSessionResolved` effect dependency. Use a stable callback/ref boundary and add a router-level create-once regression test.
+2. The service supervisor starts remote/tunnel dependencies before local API/Web; a remote startup failure aborts local startup while stale state still reports readiness. Local services should start in degraded mode and status must validate live process/probe state.
