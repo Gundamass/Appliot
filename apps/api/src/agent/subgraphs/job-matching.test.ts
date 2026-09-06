@@ -166,6 +166,41 @@ describe("job matching subgraph", () => {
     expect(advisor).not.toHaveBeenCalled();
   });
 
+  it("limits ranked recommendations to the six highest-ranked results", async () => {
+    const scoresByPosting = [30, 90, 50, 80, 10, 60, 70, 40];
+    const postings = scoresByPosting.map((_score, postingIndex) => {
+      const postingId = `posting-${postingIndex + 1}`;
+      return posting(postingId, Array.from({ length: 10 }, (_value, requirementIndex) =>
+        requirement(
+          `${postingId}-skill-${requirementIndex + 1}`,
+          "skill",
+          `${postingId}-value-${requirementIndex + 1}`
+        )
+      ));
+    });
+    const facts = scoresByPosting.flatMap((score, postingIndex) => {
+      const postingId = `posting-${postingIndex + 1}`;
+      return Array.from({ length: score / 10 }, (_value, factIndex) =>
+        fact(
+          `${postingId}-fact-${factIndex + 1}`,
+          `skills[${postingIndex * 10 + factIndex}].name`,
+          `${postingId}-value-${factIndex + 1}`
+        )
+      );
+    });
+    const { graph, savedResults } = createTestGraph({ postings, facts });
+
+    const result = await graph({ state: graphState() });
+    const persisted = savedResults[0] ?? [];
+    const recommendedIds = result.jobMatching?.recommendedResultIds ?? [];
+
+    expect(recommendedIds).toHaveLength(6);
+    expect(new Set(recommendedIds).size).toBe(6);
+    expect(recommendedIds.every((id) => persisted.some((item) => item.id === id))).toBe(true);
+    expect(recommendedIds.map((id) => persisted.find((item) => item.id === id)?.fitScore))
+      .toEqual([90, 80, 70, 60, 50, 40]);
+  });
+
   it("keeps unknown hard constraints rankable and separates confirmed conflicts", async () => {
     const conflict = posting("conflict", [requirement("degree", "education", "Master")]);
     const unknown = posting("unknown", [requirement("rust", "skill", "Rust")]);
@@ -191,6 +226,10 @@ describe("job matching subgraph", () => {
     expect(savedResults[0]?.find((item) => item.postingId === "unknown")?.outcomes[0]).toMatchObject({
       outcome: "unknown"
     });
+    const conflictEvidence = savedResults[0]?.find((item) => item.postingId === "conflict")?.evidence[0]?.summary;
+    expect(conflictEvidence).toContain("学历");
+    expect(conflictEvidence).toContain("Bachelor");
+    expect(conflictEvidence).not.toMatch(/education\[0\]\.degree|Profile fact/u);
     expect(result.jobMatching?.recommendedResultIds).toHaveLength(1);
     expect(result.jobMatching?.conflictResultIds).toHaveLength(1);
     expect(advisor.advise).not.toHaveBeenCalled();
@@ -261,7 +300,7 @@ describe("job matching subgraph", () => {
       confidence: 0.95,
       evidenceIds: [profileEvidence.id]
     }));
-    const { graph } = createTestGraph({
+    const { graph, savedResults } = createTestGraph({
       postings: [posting("platform", [requirement("containers", "skill", "container orchestration")])],
       facts: [profileEvidence],
       retrieval,
@@ -300,6 +339,10 @@ describe("job matching subgraph", () => {
         evidenceIds: [profileEvidence.id]
       }
     }]);
+    const summary = savedResults[0]?.[0]?.evidence[0]?.summary;
+    expect(summary).toContain("技能");
+    expect(summary).toContain("Kubernetes platform");
+    expect(summary).not.toMatch(/skills\[0\]\.name|Profile fact/u);
   });
 
   it("retrieves evidence through the graph-only tool registry when it is available", async () => {
@@ -350,7 +393,7 @@ describe("job matching subgraph", () => {
     expect(directRetrieval.retrieve).not.toHaveBeenCalled();
   });
 
-  it("uses accepted model advice only as a tie-breaker within an equal deterministic tier", async () => {
+  it("does not use accepted model advice to reorder final recommendations", async () => {
     const first = posting("a-first", [requirement("first-skill", "skill", "container orchestration")]);
     const supported = posting("z-supported", [requirement("supported-skill", "skill", "container orchestration")]);
     const advisor = vi.fn(async (input: { requirement: { id: string }; evidenceIds: string[] }) => ({
@@ -368,7 +411,7 @@ describe("job matching subgraph", () => {
     const firstResultId = result.jobMatching?.recommendedResultIds?.[0];
     const firstPostingId = savedResults[0]?.find((item) => item.id === firstResultId)?.postingId;
 
-    expect(firstPostingId).toBe("z-supported");
+    expect(firstPostingId).toBe("a-first");
     expect(savedResults[0]?.every((item) => item.outcomes[0]?.outcome === "unknown")).toBe(true);
   });
 
@@ -474,7 +517,7 @@ describe("job matching subgraph", () => {
     });
   });
 
-  it("uses only explicit local posting identities from the job index", async () => {
+  it("uses job-index relevance only for discovery, not final recommendation ordering", async () => {
     const profileEvidence = fact("evidence-1", "skills[0].name", "Platform engineering");
     const matched = posting("z-platform", [requirement("platform", "skill", "Platform engineering")]);
     const other = posting("a-other", [requirement("other", "skill", "Platform engineering")]);
@@ -521,7 +564,7 @@ describe("job matching subgraph", () => {
       postingId: expect.anything()
     }));
     expect(result.jobMatching).toMatchObject({ retrievalProvider: "lightrag", fallbackUsed: false });
-    expect(firstPostingId).toBe(matched.id);
+    expect(firstPostingId).toBe(other.id);
   });
 
   it("falls back when a job hit lacks a locally known explicit posting identity", async () => {

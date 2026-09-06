@@ -1,15 +1,17 @@
 import { createHash } from "node:crypto";
-import type {
-  AgentGraphState,
-  JobMatchResult,
-  JobMatchingState,
-  JobPosting,
-  JobRequirement,
-  ProfileFact
+import {
+  JOB_RECOMMENDATION_LIMIT,
+  type AgentGraphState,
+  type JobMatchResult,
+  type JobMatchingState,
+  type JobPosting,
+  type JobRequirement,
+  type ProfileFact
 } from "@resume/contracts";
 import {
   UNKNOWN_ADVISORY,
   scoreJobMatch,
+  sortJobMatches,
   validateAdvisory,
   type JobAdapter,
   type JobRequirementAdvisory,
@@ -20,6 +22,7 @@ import type {
   EvidenceRetrievalRequest
 } from "../../job-matching/lightrag-retrieval-client.js";
 import type { JobMatchAggregate, JobMatchRepository } from "../../job-matching/job-match-repository.js";
+import { presentMatchEvidence } from "../../job-matching/profile-fact-presentation.js";
 import type { SubgraphPort, SubgraphPortInput, SubgraphPortResult } from "../main-graph.js";
 import type { TraceSink } from "../trace-sink.js";
 import type { RestrictedToolRegistry } from "../tool-registry.js";
@@ -171,15 +174,11 @@ async function matchJobs(
     canonicalUrl: plans[index]!.posting.canonicalUrl,
     hasConflict: drafts[index]!.hasConflict
   }));
-  const recommendedResultIds = rankResults(
-    ranked.filter((result) => !result.hasConflict),
-    retrieval.jobDiscoveryScores,
-    advisorySupport
-  ).map((result) => result.id);
-  const conflictResultIds = rankResults(
-    ranked.filter((result) => result.hasConflict),
-    retrieval.jobDiscoveryScores,
-    advisorySupport
+  const recommendedResultIds = sortJobMatches(
+    ranked.filter((result) => !result.hasConflict)
+  ).slice(0, JOB_RECOMMENDATION_LIMIT).map((result) => result.id);
+  const conflictResultIds = sortJobMatches(
+    ranked.filter((result) => result.hasConflict)
   ).map((result) => result.id);
   const jobMatching = completedState({
     sessionId,
@@ -609,7 +608,7 @@ function confirmedEvidence(
     evidenceId: fact.id,
     source: "confirmed_fact",
     relation,
-    summary: `Profile fact ${fact.fieldPath}`
+    summary: presentMatchEvidence(requirement, fact)
   };
 }
 
@@ -677,7 +676,7 @@ function scoringEvidence(requirement: JobRequirement, candidate: RetrievalCandid
     evidenceId: candidate.fact.id,
     source: exact ? "confirmed_fact" : candidate.source,
     relation: exact ? "supports" : "related",
-    summary: `Profile fact ${candidate.fact.fieldPath}`
+    summary: presentMatchEvidence(requirement, candidate.fact)
   };
 }
 
@@ -689,29 +688,6 @@ function score(aggregate: JobMatchAggregate, plan: PostingPlan): ReturnType<type
     profileRevision: aggregate.profileRevision,
     evidence: plan.evidence
   });
-}
-
-function rankResults<
-  T extends {
-    postingId: string;
-    canonicalUrl: string;
-    rankingScore: number;
-    fitScore: number;
-    confidence: number;
-  }
->(
-  results: readonly T[],
-  discoveryScores: ReadonlyMap<string, number>,
-  advisorySupport: ReadonlyMap<string, number>
-): T[] {
-  return [...results].sort((left, right) =>
-    right.rankingScore - left.rankingScore
-    || right.fitScore - left.fitScore
-    || right.confidence - left.confidence
-    || (discoveryScores.get(right.postingId) ?? 0) - (discoveryScores.get(left.postingId) ?? 0)
-    || (advisorySupport.get(right.postingId) ?? 0) - (advisorySupport.get(left.postingId) ?? 0)
-    || compareText(left.canonicalUrl, right.canonicalUrl)
-  );
 }
 
 function advisorySupportByPosting(
