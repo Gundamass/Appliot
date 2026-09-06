@@ -1,11 +1,13 @@
 import type {
   JobExpectationSnapshot,
   JobMatchResult,
+  JobMatchScoreBreakdown,
   JobPosting,
   JobRequirement,
   MatchEvidence,
   RequirementAssessment
 } from "@resume/contracts";
+import { isUnrestrictedLocationValue } from "./expectation.js";
 
 export const JOB_MATCH_V1_DIMENSION_WEIGHTS = {
   skill: 35,
@@ -23,6 +25,14 @@ export const JOB_MATCH_V1_EVIDENCE_QUALITIES = {
 } as const;
 
 type ScoringDimension = keyof typeof JOB_MATCH_V1_DIMENSION_WEIGHTS;
+
+const SCORING_DIMENSION_LABELS: Record<ScoringDimension, string> = {
+  skill: "技能",
+  responsibility: "工作职责",
+  project: "项目经验",
+  qualification: "基本条件",
+  preference: "求职偏好"
+};
 
 export interface ScoringEvidence {
   requirementId: string;
@@ -85,19 +95,22 @@ export function scoreJobMatch(input: JobMatchScoringInput): JobMatchResultDraft 
   );
   const outcomeByRequirement = new Map(outcomes.map((item) => [item.requirementId, item]));
   const requirementWeights = calculateRequirementWeights(input.posting.requirements);
-  let fit = 0;
   let knownCoverage = 0;
   let evidenceQuality = 0;
 
   for (const requirement of input.posting.requirements) {
     const weight = requirementWeights.get(requirement.id) ?? 0;
     const outcome = outcomeByRequirement.get(requirement.id)?.outcome ?? "unknown";
-    fit += weight * (outcome === "satisfied" ? 1 : outcome === "conflict" ? 0 : 0.5);
     if (outcome !== "unknown") knownCoverage += weight;
     evidenceQuality += weight * bestEvidenceQuality(requirement.id, input.evidence);
   }
 
-  const fitScore = round2(100 * fit);
+  const scoreBreakdown = buildScoreBreakdown(
+    input.posting.requirements,
+    requirementWeights,
+    outcomeByRequirement
+  );
+  const fitScore = scoreBreakdown.total;
   const confidence = round2(100 * (0.7 * knownCoverage + 0.3 * evidenceQuality));
   const rankingScore = round2(fitScore * (0.75 + 0.25 * confidence / 100));
   const storedEvidence = toStoredEvidence(input.evidence, input.posting.requirements);
@@ -117,6 +130,7 @@ export function scoreJobMatch(input: JobMatchScoringInput): JobMatchResultDraft 
     fitScore,
     confidence,
     rankingScore,
+    scoreBreakdown,
     outcomes,
     evidence: storedEvidence,
     gaps,
@@ -131,8 +145,7 @@ export function scoreJobMatch(input: JobMatchScoringInput): JobMatchResultDraft 
 export function sortJobMatches<T extends Pick<JobMatchResultDraft,
   "rankingScore" | "fitScore" | "confidence" | "canonicalUrl">>(results: readonly T[]): T[] {
   return [...results].sort((left, right) =>
-    right.rankingScore - left.rankingScore
-    || right.fitScore - left.fitScore
+    right.fitScore - left.fitScore
     || right.confidence - left.confidence
     || compareText(left.canonicalUrl, right.canonicalUrl)
   );
@@ -146,6 +159,9 @@ function assessExpectation(
   if (kind === undefined) return "unknown";
   const criteria = expectation.criteria.filter((criterion) => criterion.kind === kind);
   if (criteria.length === 0) return "unknown";
+  if (kind === "location" && criteria.some((criterion) => criterion.values.some(isUnrestrictedLocationValue))) {
+    return "satisfied";
+  }
   const requirementValue = normalizeComparable(requirement.normalizedValue);
   if (requirementValue === "") return "unknown";
   const matches = criteria.some((criterion) =>
@@ -186,6 +202,68 @@ function calculateRequirementWeights(requirements: readonly JobRequirement[]): M
     for (const requirement of dimensionRequirements) weights.set(requirement.id, requirementWeight);
   }
   return weights;
+}
+
+function buildScoreBreakdown(
+  requirements: readonly JobRequirement[],
+  requirementWeights: ReadonlyMap<string, number>,
+  outcomeByRequirement: ReadonlyMap<string, RequirementAssessment>
+): JobMatchScoreBreakdown {
+  const rawDimensions = Object.keys(JOB_MATCH_V1_DIMENSION_WEIGHTS).flatMap((dimensionKey) => {
+    const dimension = dimensionKey as ScoringDimension;
+    const dimensionRequirements = requirements.filter((requirement) =>
+      scoringDimension(requirement.category) === dimension
+    );
+    if (dimensionRequirements.length === 0) return [];
+
+    let available = 0;
+    let earned = 0;
+    let satisfied = 0;
+    let unknown = 0;
+    let conflict = 0;
+    for (const requirement of dimensionRequirements) {
+      const weight = 100 * (requirementWeights.get(requirement.id) ?? 0);
+      const outcome = outcomeByRequirement.get(requirement.id)?.outcome ?? "unknown";
+      available += weight;
+      earned += weight * (outcome === "satisfied" ? 1 : 0);
+      if (outcome === "satisfied") satisfied += 1;
+      else if (outcome === "conflict") conflict += 1;
+      else unknown += 1;
+    }
+
+    return [{ dimension, available, earned, satisfied, unknown, conflict }];
+  });
+  const total = round2(rawDimensions.reduce((sum, dimension) => sum + dimension.earned, 0));
+  const availableTotal = round2(rawDimensions.reduce((sum, dimension) => sum + dimension.available, 0));
+  const roundedEarned = roundComponents(rawDimensions.map((dimension) => dimension.earned), total);
+  const roundedAvailable = roundComponents(
+    rawDimensions.map((dimension) => dimension.available),
+    availableTotal
+  );
+
+  return {
+    total,
+    dimensions: rawDimensions.map((dimension, index) => ({
+      dimension: dimension.dimension,
+      label: SCORING_DIMENSION_LABELS[dimension.dimension],
+      earned: roundedEarned[index] ?? 0,
+      available: roundedAvailable[index] ?? 0,
+      satisfied: dimension.satisfied,
+      unknown: dimension.unknown,
+      conflict: dimension.conflict
+    }))
+  };
+}
+
+function roundComponents(values: readonly number[], targetTotal: number): number[] {
+  const rounded = values.map(round2);
+  const adjustment = round2(targetTotal - rounded.reduce((sum, value) => sum + value, 0));
+  if (adjustment === 0) return rounded;
+  const adjustmentIndex = values.findLastIndex((value) => value > 0);
+  if (adjustmentIndex >= 0) {
+    rounded[adjustmentIndex] = round2((rounded[adjustmentIndex] ?? 0) + adjustment);
+  }
+  return rounded;
 }
 
 function scoringDimension(category: JobRequirement["category"]): ScoringDimension | undefined {

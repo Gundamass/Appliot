@@ -61,6 +61,16 @@ function posting(requirements: JobRequirement[], canonicalUrl = "https://jobs.ex
   };
 }
 
+function scoringInput(requirements: JobRequirement[], scoringEvidence: ScoringEvidence[] = []) {
+  return {
+    sessionId: "session-1",
+    posting: posting(requirements),
+    expectation,
+    profileRevision: 7,
+    evidence: scoringEvidence
+  };
+}
+
 describe("job-match-v1 requirement assessment", () => {
   it("marks only explicit incompatibility as conflict", () => {
     const explicitMismatch = requirement("location", "location", false, "上海");
@@ -80,6 +90,21 @@ describe("job-match-v1 requirement assessment", () => {
       .toBe("unknown");
     expect(assessRequirement(requiredSkill, [evidence("java", "confirmed_fact", "contradicts")], expectation).outcome)
       .toBe("conflict");
+  });
+
+  it("treats a nationwide location preference as unrestricted", () => {
+    const nationwide = {
+      ...expectation,
+      criteria: expectation.criteria.map((criterion) => criterion.kind === "location"
+        ? { ...criterion, values: ["\u5168\u56fd"] }
+        : criterion)
+    };
+
+    expect(assessRequirement(requirement("location", "location", false, "深圳"), [], nationwide)).toEqual({
+      requirementId: "location",
+      outcome: "satisfied",
+      reasonCode: "expectation_match"
+    });
   });
 });
 
@@ -115,9 +140,9 @@ describe("job-match-v1 scoring", () => {
     });
 
     expect(result).toMatchObject({
-      fitScore: 75,
+      fitScore: 57.5,
       confidence: 65.5,
-      rankingScore: 68.53,
+      rankingScore: 52.54,
       scoringVersion: "job-match-v1",
       profileRevision: 7,
       expectationRevision: 4,
@@ -142,9 +167,176 @@ describe("job-match-v1 scoring", () => {
       evidence: [evidence("skill-known", "confirmed_fact")]
     });
 
-    expect(result.fitScore).toBe(81.82);
+    expect(result.fitScore).toBe(63.64);
     expect(result.confidence).toBe(63.64);
-    expect(result.rankingScore).toBe(74.38);
+    expect(result.rankingScore).toBe(57.86);
+  });
+
+  it("awards zero fit points when the only requirement is unknown", () => {
+    const result = scoreJobMatch(scoringInput([
+      requirement("skill-unknown", "skill")
+    ]));
+
+    expect(result.fitScore).toBe(0);
+    expect(result.scoreBreakdown).toEqual({
+      total: 0,
+      dimensions: [{
+        dimension: "skill",
+        label: "技能",
+        earned: 0,
+        available: 100,
+        satisfied: 0,
+        unknown: 1,
+        conflict: 0
+      }]
+    });
+  });
+
+  it("retains full fit points when the only requirement is satisfied", () => {
+    const result = scoreJobMatch(scoringInput(
+      [requirement("skill-satisfied", "skill")],
+      [evidence("skill-satisfied", "confirmed_fact")]
+    ));
+
+    expect(result.fitScore).toBe(100);
+    expect(result.scoreBreakdown?.dimensions[0]).toMatchObject({
+      earned: 100,
+      available: 100,
+      satisfied: 1,
+      unknown: 0,
+      conflict: 0
+    });
+  });
+
+  it("splits one dimension evenly across multiple requirements", () => {
+    const result = scoreJobMatch(scoringInput(
+      [
+        requirement("skill-satisfied", "skill"),
+        requirement("skill-unknown", "skill")
+      ],
+      [evidence("skill-satisfied", "confirmed_fact")]
+    ));
+
+    expect(result.fitScore).toBe(50);
+    expect(result.scoreBreakdown?.dimensions).toEqual([{
+      dimension: "skill",
+      label: "技能",
+      earned: 50,
+      available: 100,
+      satisfied: 1,
+      unknown: 1,
+      conflict: 0
+    }]);
+  });
+
+  it("normalizes the dimensions present in the posting to 100 points", () => {
+    const result = scoreJobMatch(scoringInput(
+      [
+        requirement("skill-satisfied", "skill"),
+        requirement("qualification-satisfied", "education")
+      ],
+      [
+        evidence("skill-satisfied", "confirmed_fact"),
+        evidence("qualification-satisfied", "confirmed_fact")
+      ]
+    ));
+
+    expect(result.fitScore).toBe(100);
+    expect(result.scoreBreakdown?.dimensions).toEqual([
+      expect.objectContaining({ dimension: "skill", earned: 77.78, available: 77.78 }),
+      expect.objectContaining({ dimension: "qualification", earned: 22.22, available: 22.22 })
+    ]);
+  });
+
+  it("returns a zero score and empty breakdown when no requirements are scorable", () => {
+    const result = scoreJobMatch(scoringInput([
+      requirement("uncategorized", "other")
+    ]));
+
+    expect(result.fitScore).toBe(0);
+    expect(result.scoreBreakdown).toEqual({ total: 0, dimensions: [] });
+  });
+
+  it("keeps two-decimal dimension totals equal to the authoritative fit score", () => {
+    const result = scoreJobMatch(scoringInput(
+      [
+        requirement("skill-1", "skill"),
+        requirement("skill-2", "skill"),
+        requirement("skill-3", "skill"),
+        requirement("responsibility-1", "responsibility"),
+        requirement("responsibility-2", "responsibility"),
+        requirement("project-unknown", "project")
+      ],
+      [
+        evidence("skill-1", "confirmed_fact"),
+        evidence("responsibility-1", "confirmed_fact")
+      ]
+    ));
+
+    expect(result.fitScore).toBe(30.21);
+    expect(result.scoreBreakdown?.total).toBe(result.fitScore);
+    expect(result.scoreBreakdown?.dimensions.map(({ dimension, earned, available }) => ({
+      dimension,
+      earned,
+      available
+    }))).toEqual([
+      { dimension: "skill", earned: 14.58, available: 43.75 },
+      { dimension: "responsibility", earned: 15.63, available: 31.25 },
+      { dimension: "project", earned: 0, available: 25 }
+    ]);
+    expect(result.scoreBreakdown?.dimensions.reduce((total, dimension) => total + dimension.earned, 0))
+      .toBe(result.fitScore);
+  });
+
+  it("sorts by displayed fit before persisted ranking score", () => {
+    const lowFitHighConfidence = {
+      fitScore: 70,
+      confidence: 100,
+      rankingScore: 70,
+      canonicalUrl: "https://a.example"
+    };
+    const highFitLowConfidence = {
+      fitScore: 80,
+      confidence: 20,
+      rankingScore: 60,
+      canonicalUrl: "https://b.example"
+    };
+
+    expect(sortJobMatches([lowFitHighConfidence, highFitLowConfidence])[0]).toBe(highFitLowConfidence);
+  });
+
+  it("breaks fit ties by confidence before canonical URL", () => {
+    const lowConfidence = {
+      fitScore: 80,
+      confidence: 70,
+      rankingScore: 100,
+      canonicalUrl: "https://a.example"
+    };
+    const highConfidence = {
+      fitScore: 80,
+      confidence: 90,
+      rankingScore: 10,
+      canonicalUrl: "https://b.example"
+    };
+
+    expect(sortJobMatches([lowConfidence, highConfidence])[0]).toBe(highConfidence);
+  });
+
+  it("breaks fit and confidence ties by canonical URL", () => {
+    const right = {
+      fitScore: 80,
+      confidence: 90,
+      rankingScore: 100,
+      canonicalUrl: "https://b.example"
+    };
+    const left = {
+      fitScore: 80,
+      confidence: 90,
+      rankingScore: 10,
+      canonicalUrl: "https://a.example"
+    };
+
+    expect(sortJobMatches([right, left])).toEqual([left, right]);
   });
 
   it("is byte-stable and breaks score ties by canonical URL", () => {
