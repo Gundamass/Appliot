@@ -13,6 +13,19 @@ import { createJobMatchApi, type JobMatchApi } from "../job-matching/api.js";
 const defaultJobMatchApi = createJobMatchApi();
 const defaultConversationJobMatchApi = createConversationJobMatchApi();
 
+function confirmationDecisionText(
+  action: ConversationConfirmation["action"],
+  approved: boolean
+): string {
+  if (action === "confirm_recruitment_site") {
+    return approved ? "确认使用此入口" : "暂不使用此入口";
+  }
+  if (action === "request_job_recommendations") {
+    return approved ? "开始岗位推荐" : "暂不推荐";
+  }
+  return approved ? "确认开始投递" : "取消开始投递";
+}
+
 interface ChatHomeProps {
   api: ConversationApi;
   jobMatchApi?: JobMatchApi;
@@ -117,7 +130,10 @@ export function ChatHome({ api, jobMatchApi = defaultJobMatchApi, conversationJo
     const sessionId = session.id;
     const version = operationVersion.current;
     setSending(true); setError(undefined);
-    const decisionText = approved ? "确认开始投递" : "取消开始投递";
+    const action = pendingConfirmation?.confirmationId === confirmationId
+      ? pendingConfirmation.action
+      : "start_application";
+    const decisionText = confirmationDecisionText(action, approved);
     const optimistic: ConversationMessage = { id: `local-confirmation-${Date.now()}`, sessionId, sequence: (messages.at(-1)?.sequence ?? 0) + 1, role: "user", text: decisionText, cards: [], createdAt: new Date().toISOString() };
     setMessages((current) => [...current, optimistic]);
     try {

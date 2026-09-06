@@ -151,7 +151,7 @@ export function createConversationService(
           ...(input.selectedUrl === undefined ? {} : { selectedUrl: input.selectedUrl })
         }, graphConfig(id));
         const response = normalizeResponse(output, id, nextSequence, context.version);
-        const decisionText = input.approved ? "确认开始投递" : "取消开始投递";
+        const decisionText = confirmationDecisionText(pending.action, input.approved);
         const userMessage = message({
           id,
           sequence: nextSequence,
@@ -181,6 +181,19 @@ export function createConversationService(
       });
     }
   };
+}
+
+function confirmationDecisionText(
+  action: ConversationConfirmation["action"],
+  approved: boolean
+): string {
+  if (action === "confirm_recruitment_site") {
+    return approved ? "确认使用此入口" : "暂不使用此入口";
+  }
+  if (action === "request_job_recommendations") {
+    return approved ? "开始岗位推荐" : "暂不推荐";
+  }
+  return approved ? "确认开始投递" : "取消开始投递";
 }
 
 function readView(repository: ConversationRepository, conversationId: string): ConversationView {

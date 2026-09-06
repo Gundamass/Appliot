@@ -130,7 +130,9 @@ describe("conversation service confirmation input", () => {
       selectedUrl: "https://jobs.baidu.com/"
     }), expect.anything());
     expect(appendTurn).toHaveBeenCalledWith(expect.objectContaining({
-      requestId: expect.stringContaining("confirmation-choices:approved:")
+      requestId: expect.stringContaining("confirmation-choices:approved:"),
+      inputText: "确认使用此入口",
+      userMessage: expect.objectContaining({ text: "确认使用此入口" })
     }));
     expect(graph.invoke.mock.calls.at(-1)?.[0]).not.toHaveProperty("confirmationSourceTurnSequence");
   });
@@ -209,6 +211,10 @@ describe("conversation service confirmation input", () => {
       sequence: 3,
       confirmationSourceTurnSequence: 1
     }), expect.anything());
+    expect(appendTurn).toHaveBeenLastCalledWith(expect.objectContaining({
+      inputText: "开始岗位推荐",
+      userMessage: expect.objectContaining({ text: "开始岗位推荐" })
+    }));
   });
 
   it("returns the most recent pending confirmation when loading a conversation", async () => {

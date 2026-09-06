@@ -360,7 +360,7 @@ describe("ChatHome", () => {
     };
     const api = fakeConversationApi();
     vi.mocked(api.send).mockResolvedValue(turn("请选择招聘入口", entryConfirmation));
-    vi.mocked(api.confirm).mockResolvedValueOnce(turn("招聘入口已确认", recommendationConfirmation));
+    vi.mocked(api.confirm).mockResolvedValueOnce(turn("招聘入口已确认", recommendationConfirmation, 4));
     const user = userEvent.setup();
     render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
 
@@ -368,9 +368,14 @@ describe("ChatHome", () => {
     await user.click(screen.getByRole("button", { name: "发送" }));
     await user.click(await screen.findByRole("button", { name: "确认使用此入口" }));
 
+    expect(within(await screen.findByTestId("conversation-turn-4"))
+      .getByText("确认使用此入口")).toBeVisible();
+
     const recommendationButton = await screen.findByRole("button", { name: "开始岗位推荐" });
     expect(recommendationButton).toBeEnabled();
     await user.click(recommendationButton);
+    expect(within(await screen.findByTestId("conversation-turn-5"))
+      .getByText("开始岗位推荐")).toBeVisible();
     expect(api.confirm).toHaveBeenLastCalledWith(session.id, "confirmation-recommendations", true);
   });
 
