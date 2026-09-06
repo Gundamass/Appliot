@@ -1,6 +1,8 @@
 import { z } from "zod";
 import { ChallengeDiagnosticSchema, DomBoundarySchema } from "./browser-diagnostics.js";
 
+export const JOB_RECOMMENDATION_LIMIT = 6;
+
 const IdentifierSchema = z.string().min(1).max(256);
 const ShortTextSchema = z.string().min(1).max(2_000);
 const ContentHashSchema = z.string().min(1).max(256);
@@ -130,6 +132,21 @@ export const ScoringVersionSchema = z.literal("job-match-v1");
 
 const ScoreSchema = z.number().min(0).max(100);
 
+export const JobMatchScoreDimensionSchema = z.object({
+  dimension: z.enum(["skill", "responsibility", "project", "qualification", "preference"]),
+  label: z.string().min(1).max(40),
+  earned: z.number().min(0).max(100),
+  available: z.number().positive().max(100),
+  satisfied: z.number().int().nonnegative(),
+  unknown: z.number().int().nonnegative(),
+  conflict: z.number().int().nonnegative()
+}).strict();
+
+export const JobMatchScoreBreakdownSchema = z.object({
+  total: z.number().min(0).max(100),
+  dimensions: z.array(JobMatchScoreDimensionSchema).max(5)
+}).strict();
+
 export const JobMatchResultSchema = z.object({
   id: IdentifierSchema,
   version: z.number().int().nonnegative(),
@@ -142,6 +159,7 @@ export const JobMatchResultSchema = z.object({
   evidence: z.array(MatchEvidenceSchema).max(1_500),
   gaps: z.array(MatchGapSchema).max(500),
   scoringVersion: ScoringVersionSchema,
+  scoreBreakdown: JobMatchScoreBreakdownSchema.optional(),
   profileRevision: z.number().int().nonnegative(),
   expectationRevision: z.number().int().nonnegative(),
   postingContentHash: ContentHashSchema,
@@ -236,6 +254,8 @@ export type RequirementOutcome = z.infer<typeof RequirementOutcomeSchema>;
 export type RequirementAssessment = z.infer<typeof RequirementAssessmentSchema>;
 export type MatchEvidence = z.infer<typeof MatchEvidenceSchema>;
 export type MatchGap = z.infer<typeof MatchGapSchema>;
+export type JobMatchScoreDimension = z.infer<typeof JobMatchScoreDimensionSchema>;
+export type JobMatchScoreBreakdown = z.infer<typeof JobMatchScoreBreakdownSchema>;
 export type JobMatchResult = z.infer<typeof JobMatchResultSchema>;
 export type JobPageSnapshot = z.infer<typeof JobPageSnapshotSchema>;
 export type FilterPlan = z.infer<typeof FilterPlanSchema>;
