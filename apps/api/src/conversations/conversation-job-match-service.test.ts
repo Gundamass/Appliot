@@ -10,6 +10,7 @@ import { ConversationMessageSchema } from "@resume/contracts";
 import type { JobMatchAggregate, StoredJobMatchSession } from "../job-matching/job-match-repository.js";
 import type { createJobMatchService } from "../job-matching/job-match-service.js";
 import { migrateDatabase } from "../db/migrate.js";
+import { createJobMatchRepository } from "../job-matching/job-match-repository.js";
 import { createConversationRepository } from "./conversation-repository.js";
 import { createConversationProcessEventBus } from "./conversation-events.js";
 import { createConversationJobMatchService } from "./conversation-job-match-service.js";
@@ -208,6 +209,22 @@ describe("conversation job-match action service", () => {
     });
   });
 
+  it("reports completed recommendations when filter confirmation finishes matching", async () => {
+    const value = testContext();
+    value.setCurrent({ ...aggregate(value.sessionId), state: "awaiting_job_selection", version: 6 });
+
+    const response = await value.service.execute(value.conversation.id, {
+      conversationId: value.conversation.id,
+      sessionId: value.sessionId,
+      action: "confirm_filters",
+      sessionVersion: 3,
+      idempotencyKey: "confirm-filters-completed",
+      expectation: value.expectation
+    });
+
+    expect(response.message.text).toBe("筛选条件已确认，岗位推荐已生成。");
+  });
+
   it("dispatches each inline action with real guarded identifiers", async () => {
     const value = testContext();
     const guard = { sessionVersion: 3, idempotencyKey: "operation-1" };
@@ -301,6 +318,91 @@ describe("conversation job-match action service", () => {
       ["assistant", 2]
     ]);
     expect(messages[1]!.cards).toEqual(response.cards);
+  });
+
+  it("parses persisted current and legacy result shapes into conversation cards", async () => {
+    const database = new Database(":memory:");
+    databases.push(database);
+    migrateDatabase(database);
+    const conversations = createConversationRepository(database);
+    const conversation = conversations.createConversation();
+    const repository = createJobMatchRepository(database);
+    const sessionId = "77777777-7777-4777-8777-777777777777";
+    const legacyPosting = posting();
+    const currentPosting = {
+      ...posting(),
+      id: "88888888-8888-4888-8888-888888888888",
+      sourceJobId: "baidu-job-2",
+      canonicalUrl: "https://talent.baidu.com/job/frontend-platform",
+      title: "前端平台工程师",
+      contentHash: "sha256:posting-2"
+    };
+    repository.create({
+      id: sessionId,
+      initialUrl: "https://talent.baidu.com/jobs/list",
+      state: "extracting_jobs",
+      profileRevision: 4,
+      expectation,
+      createdAt: "2026-09-02T00:00:00.000Z"
+    });
+    repository.saveExtractionPage({
+      sessionId,
+      idempotencyKey: "conversation-current-and-legacy-results",
+      postings: [legacyPosting, currentPosting],
+      cursor: { value: "done", pagesRead: 1, elapsedMs: 300, newJobs: 2, consecutiveNoNewPages: 0 },
+      event: { type: "extraction_page_saved", payload: { page: 1 } },
+      createdAt: "2026-09-02T00:00:00.500Z"
+    });
+    const legacyResult = result(sessionId);
+    const currentResult: JobMatchResult = {
+      ...result(sessionId),
+      id: "99999999-9999-4999-8999-999999999999",
+      postingId: currentPosting.id,
+      postingContentHash: currentPosting.contentHash,
+      fitScore: 94,
+      rankingScore: 93,
+      scoreBreakdown: {
+        total: 94,
+        dimensions: [{
+          dimension: "skill",
+          label: "技能",
+          earned: 94,
+          available: 100,
+          satisfied: 1,
+          unknown: 0,
+          conflict: 0
+        }]
+      }
+    };
+    repository.saveResults(sessionId, [currentResult, legacyResult], "2026-09-02T00:00:01.000Z");
+    conversations.linkJobMatchSession(conversation.id, sessionId);
+
+    const getPersisted = vi.fn(() => repository.get(sessionId, { required: true }));
+    const jobMatches = {
+      get: getPersisted,
+      pause: vi.fn(async () => repository.get(sessionId, { required: true }))
+    } as unknown as ReturnType<typeof createJobMatchService>;
+    const service = createConversationJobMatchService({
+      conversations,
+      jobMatches,
+      now: () => new Date("2026-09-02T00:00:02.000Z")
+    });
+
+    const response = await service.execute(conversation.id, {
+      conversationId: conversation.id,
+      sessionId,
+      action: "pause",
+      sessionVersion: 0,
+      idempotencyKey: "parse-current-and-legacy-results"
+    });
+
+    const parsedAggregate = getPersisted.mock.results.at(-1)?.value as JobMatchAggregate | undefined;
+    expect(parsedAggregate?.results.find((candidate) => candidate.id === currentResult.id)).toEqual(currentResult);
+    const parsedLegacy = parsedAggregate?.results.find((candidate) => candidate.id === legacyResult.id);
+    expect(parsedLegacy).toEqual(legacyResult);
+    expect(parsedLegacy).not.toHaveProperty("scoreBreakdown");
+    expect(response.cards.filter((card) => card.type === "recommendation").map((card) => card.resultId))
+      .toEqual([currentResult.id, legacyResult.id]);
   });
 
   it("rejects a session linked to another conversation before invoking the domain action", async () => {
