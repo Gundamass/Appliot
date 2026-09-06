@@ -1,7 +1,9 @@
 import type { ConversationJobMatchAction, JobMatchResult } from "@resume/contracts";
 import { BriefcaseBusiness, Check, ChevronDown, ChevronUp, ExternalLink, ShieldAlert } from "lucide-react";
+import { JOB_RECOMMENDATION_LIMIT } from "@resume/contracts";
 import { useEffect, useMemo, useState } from "react";
 import type { JobMatchSession } from "../job-matching/api.js";
+import { createJobMatchActionKey } from "./job-match-action-key.js";
 
 export interface ConversationJobCardsProps {
   conversationId?: string;
@@ -14,11 +16,7 @@ export function ConversationJobCards({ conversationId, session, onAction }: Conv
   const [expandedResultId, setExpandedResultId] = useState<string>();
   const [pendingConflictId, setPendingConflictId] = useState<string>();
   const [actionError, setActionError] = useState<string>();
-  const results = useMemo(() => {
-    const recommendations = session.results.filter((result) => !hasConflict(result));
-    const conflicts = session.results.filter(hasConflict);
-    return [...recommendations, ...conflicts];
-  }, [session.results]);
+  const results = useMemo(() => visibleJobResults(session), [session.postings, session.results]);
   const postings = useMemo(() => new Map(session.postings.map((posting) => [posting.id, posting])), [session.postings]);
   const hasStaleResults = session.results.some((result) => result.stale);
 
@@ -48,7 +46,6 @@ export function ConversationJobCards({ conversationId, session, onAction }: Conv
           return (
             <JobCard
               key={result.id}
-              conversationId={ownerConversationId}
               result={result}
               posting={posting}
               selected={session.selectedResultId === result.id}
@@ -83,7 +80,6 @@ export function ConversationJobCards({ conversationId, session, onAction }: Conv
 }
 
 interface JobCardProps {
-  conversationId: string;
   result: JobMatchResult;
   posting: JobMatchSession["postings"][number];
   selected: boolean;
@@ -111,34 +107,15 @@ function JobCard({
   actionError
 }: JobCardProps) {
   const conflicts = countOutcomes(result, "conflict");
-  const summary = result.evidence[0]?.summary ?? result.gaps[0]?.summary ?? "暂无直接匹配依据";
   const stale = result.stale;
   return (
     <article className={`conversation-job-card${conflicts > 0 ? " conflict" : ""}${stale ? " stale" : ""}${selected ? " selected" : ""}`} aria-label={`岗位：${posting.title}`}>
       <header className="conversation-job-card-heading">
-        <div>
-          <strong>{posting.title}</strong>
-          <span>{posting.organization}</span>
-        </div>
+        <strong>{posting.title}</strong>
         <div className="conversation-job-card-score">
-          <b>{Math.round(result.fitScore)} 分</b>
-          <small>置信度 {Math.round(result.confidence)}</small>
+          <b>匹配度 {Math.round(result.fitScore)}%</b>
         </div>
       </header>
-      <div className="conversation-job-card-meta">
-        <span>{posting.location ?? "地点待确认"}</span>
-        <span>{posting.employmentType ?? "用工类型待确认"}</span>
-        <span>来源：{sourceLabel(posting.source)}</span>
-      </div>
-      <div className="conversation-job-card-outcomes" aria-label="匹配统计">
-        <span className="satisfied">满足 {countOutcomes(result, "satisfied")}</span>
-        <span className="unknown">未知 {countOutcomes(result, "unknown")}</span>
-        <span className="conflict">冲突 {conflicts}</span>
-      </div>
-      <div className="conversation-job-card-highlight">
-        <span>{result.evidence.length > 0 ? "匹配依据" : "主要差距"}</span>
-        <p>{summary}</p>
-      </div>
       {stale ? <p className="conversation-job-card-stale">结果已变化，暂不能选择</p> : null}
       {selected ? <p className="conversation-job-card-selected"><Check aria-hidden="true" size={14} />已选择，等待受控投递确认</p> : null}
       {pendingConflict && !stale ? (
@@ -149,7 +126,7 @@ function JobCard({
         </div>
       ) : null}
       {actionError && pendingConflict ? <p className="conversation-job-card-error" role="alert">{actionError}</p> : null}
-      {expanded ? <JobCardDetails result={result} /> : null}
+      {expanded ? <JobCardDetails result={result} posting={posting} /> : null}
       <footer className="conversation-job-card-actions">
         <button type="button" className="conversation-button" aria-expanded={expanded} onClick={onToggleDetails}>
           {expanded ? <ChevronUp aria-hidden="true" size={14} /> : <ChevronDown aria-hidden="true" size={14} />}查看详情
@@ -166,19 +143,73 @@ function JobCard({
   );
 }
 
-function JobCardDetails({ result }: { result: JobMatchResult }) {
+function JobCardDetails({ result, posting }: { result: JobMatchResult; posting: JobCardProps["posting"] }) {
+  const advantages = requirementExplanations(result, posting, "satisfied");
+  const unknowns = requirementExplanations(result, posting, "unknown");
+  const conflicts = requirementExplanations(result, posting, "conflict");
   return (
     <div className="conversation-job-card-details">
-      <section>
-        <h4>匹配依据</h4>
-        {result.evidence.length > 0 ? <ul>{result.evidence.map((item) => <li key={item.evidenceId}>{item.summary}</li>)}</ul> : <p>暂无直接证据</p>}
-      </section>
-      <section>
-        <h4>差距与风险</h4>
-        {result.gaps.length > 0 ? <ul>{result.gaps.map((gap) => <li key={gap.requirementId}>{gap.summary}</li>)}</ul> : <p>暂无明确差距</p>}
+      <ExplanationSection title="匹配优势" items={advantages} empty="暂无明确匹配优势" />
+      <ExplanationSection title="待确认条件" items={unknowns} empty="暂无待确认条件" />
+      <ExplanationSection title="差距与风险" items={conflicts} empty="暂无明确差距" />
+      <section className="conversation-job-card-score-details">
+        <h4>匹配度如何得出</h4>
+        {result.scoreBreakdown === undefined ? (
+          <p>此结果使用旧版评分，重新匹配后可查看分项说明</p>
+        ) : (
+          <ul>
+            {result.scoreBreakdown.dimensions.map((dimension) => (
+              <li key={dimension.dimension}>{dimension.label} {formatScore(dimension.earned)}/{formatScore(dimension.available)}</li>
+            ))}
+            <li className="total">总分 {formatScore(result.scoreBreakdown.total)}/100</li>
+          </ul>
+        )}
       </section>
     </div>
   );
+}
+
+function ExplanationSection({ title, items, empty }: { title: string; items: readonly string[]; empty: string }) {
+  return (
+    <section>
+      <h4>{title}</h4>
+      {items.length > 0 ? <ul>{items.map((item) => <li key={item}>{item}</li>)}</ul> : <p>{empty}</p>}
+    </section>
+  );
+}
+
+function requirementExplanations(
+  result: JobMatchResult,
+  posting: JobCardProps["posting"],
+  outcome: "satisfied" | "unknown" | "conflict"
+): string[] {
+  const outcomeByRequirement = new Map(result.outcomes.map((item) => [item.requirementId, item.outcome]));
+  return posting.requirements.flatMap((requirement) => {
+    if (outcomeByRequirement.get(requirement.id) !== outcome) return [];
+    if (outcome !== "satisfied" || result.scoreBreakdown === undefined) return [requirement.sourceEvidence];
+    const summaries = result.evidence
+      .filter((item) => item.requirementId === requirement.id && isUserFacingExplanation(item.summary))
+      .map((item) => item.summary);
+    return [requirement.sourceEvidence, ...summaries.filter((summary) => summary !== requirement.sourceEvidence)];
+  });
+}
+
+function isUserFacingExplanation(summary: string): boolean {
+  return !(/Profile\s+fact|[a-z_][a-z0-9_]*\[\d+\](?:\.[a-z_][a-z0-9_]*)?|\b(?:requirement|evidence|fact)(?:Id)?[-_:]\s*[a-z0-9]|\b[a-z]+(?:_[a-z0-9]+)+\b/iu.test(summary));
+}
+
+function formatScore(score: number): string {
+  return Number.isInteger(score) ? String(score) : score.toFixed(2).replace(/0+$/u, "").replace(/\.$/u, "");
+}
+
+export function visibleJobResults(session: JobMatchSession): JobMatchResult[] {
+  const postings = new Map(session.postings.map((posting) => [posting.id, posting]));
+  return [...session.results]
+    .filter((result) => postings.has(result.postingId))
+    .sort((left, right) => right.fitScore - left.fitScore
+      || right.confidence - left.confidence
+      || postings.get(left.postingId)!.canonicalUrl.localeCompare(postings.get(right.postingId)!.canonicalUrl))
+    .slice(0, JOB_RECOMMENDATION_LIMIT);
 }
 
 function hasConflict(result: JobMatchResult): boolean {
@@ -189,17 +220,13 @@ function countOutcomes(result: JobMatchResult, outcome: "satisfied" | "unknown" 
   return result.outcomes.filter((item) => item.outcome === outcome).length;
 }
 
-function sourceLabel(source: JobMatchSession["postings"][number]["source"]): string {
-  return ({ baidu: "百度招聘", dji: "大疆招聘", moka: "Moka 招聘" } as Record<string, string>)[source] ?? source;
-}
-
 function selectionAction(conversationId: string, session: JobMatchSession, result: JobMatchResult): ConversationJobMatchAction {
   return {
     conversationId,
     sessionId: session.id,
     action: "select_result",
     sessionVersion: session.version,
-    idempotencyKey: actionKey("select_result", session.version, result.id),
+    idempotencyKey: createJobMatchActionKey(session.id, "select_result", session.version, result.id),
     resultId: result.id,
     resultVersion: result.version,
     postingContentHash: result.postingContentHash
@@ -212,7 +239,7 @@ function rematchAction(conversationId: string, session: JobMatchSession): Conver
     sessionId: session.id,
     action: "rematch",
     sessionVersion: session.version,
-    idempotencyKey: actionKey("rematch", session.version)
+    idempotencyKey: createJobMatchActionKey(session.id, "rematch", session.version)
   };
 }
 
@@ -223,7 +250,7 @@ async function confirmConflict(onAction: ConversationJobCardsProps["onAction"], 
     sessionId: session.id,
     action: "select_conflict_result",
     sessionVersion: session.version,
-    idempotencyKey: actionKey("select_conflict_result", session.version, result.id),
+    idempotencyKey: createJobMatchActionKey(session.id, "select_conflict_result", session.version, result.id),
     resultId: result.id,
     resultVersion: result.version,
     postingContentHash: result.postingContentHash,
@@ -246,10 +273,6 @@ export async function createConflictSummaryHash(result: JobMatchResult): Promise
   });
   const digest = await subtle.digest("SHA-256", new TextEncoder().encode(payload));
   return `sha256:${Array.from(new Uint8Array(digest), (value) => value.toString(16).padStart(2, "0")).join("")}`;
-}
-
-function actionKey(action: string, version: number, resultId?: string): string {
-  return `inline-job-match:${action}:${version}${resultId === undefined ? "" : `:${resultId}`}`.slice(0, 128);
 }
 
 function dispatch(onAction: ConversationJobCardsProps["onAction"], action: ConversationJobMatchAction): void {
