@@ -12,14 +12,14 @@ This regression closes Phase A for explainable job recommendations without chang
 - Conversation integration reads both shapes through `createJobMatchRepository`, passes them through the conversation-facing service and response schemas, and projects both recommendation cards.
 - Browser regression supplies seven deliberately unsorted current results, including a 91% tie. The UI renders exactly six `article[aria-label^="岗位："]` cards in non-increasing visible percentage order.
 - Expanding the first card shows `匹配优势`, `待确认条件`, `差距与风险`, and `匹配度如何得出`, plus the safe Chinese explanation `你的技能“TypeScript”符合岗位技能要求。`.
-- The rendered page is checked for absence of fixture result/posting/requirement/session identifiers, hashes, and profile paths.
+- The rendered page is checked before and after selection against every fixture result, posting, source-job, requirement, evidence, session, hash, canonical URL/path, and reason-code value, plus patterns for UUIDs, opaque IDs, URLs, API/job paths, hashes, profile paths, and local filesystem paths.
 - Selecting the first non-conflict card sends exactly one `select_result` conversation action. The mock returns a valid `ConversationJobMatchActionResult` payload, the session refreshes to `selected`, and the selected-state copy becomes visible.
 
 ## Zero-side-effect mechanism
 
-This E2E is a deterministic mocked conversation flow, not a Synthetic ATS run. `mockInlineConversation` intercepts the conversation view, process event stream, job-match session, and job-match action endpoints. A page-level request observer inspects every non-GET `/api/` request. The conversation job-match selection POST is explicitly allowed; application-task creation endpoints and final-submit endpoints/commands are classified as forbidden. The test asserts the forbidden request list remains exactly empty.
+The visual browser flow remains deterministic: `mockInlineConversation` intercepts the conversation view, process event stream, job-match session, and job-match action endpoints. Its page-level request observer treats the selection POST as allowed and asserts that no application-task creation or final-submit request is emitted.
 
-No application task was created and no final submission request was made.
+A separate acceptance case starts Synthetic ATS and a migrated in-memory SQLite database, seeds a recommendation whose canonical URL belongs to that ATS task, then dispatches `select_result` through the real `ConversationJobMatchService` and `JobMatchService`. It first proves the selected session/result was persisted, then queries the real application-task repository and the same Synthetic ATS task state. After the action, repository count is `0` and `submissionCount` is `0`; these assertions are causally tied to the completed selection rather than untouched browser counters.
 
 ## Test-first evidence
 

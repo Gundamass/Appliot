@@ -1,6 +1,15 @@
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
 import { createServer, type ViteDevServer } from "../../apps/web/node_modules/vite/dist/node/index.js";
+import { startSyntheticAts, type SyntheticAtsServer } from "../../apps/synthetic-ats/src/server.js";
+import { createApplicationTaskRepository } from "../../apps/api/src/applications/application-task-repository.js";
+import { BrowserOwnershipLease } from "../../apps/api/src/browser/browser-ownership-lease.js";
+import { createConversationRepository } from "../../apps/api/src/conversations/conversation-repository.js";
+import { createConversationJobMatchService } from "../../apps/api/src/conversations/conversation-job-match-service.js";
+import { createSqliteDatabase } from "../../apps/api/src/db/client.js";
+import { migrateDatabase } from "../../apps/api/src/db/migrate.js";
+import { createJobMatchRepository } from "../../apps/api/src/job-matching/job-match-repository.js";
+import { createJobMatchService } from "../../apps/api/src/job-matching/job-match-service.js";
 import type {
   ConversationJobMatchAction,
   ConversationMessage,
@@ -11,8 +20,10 @@ import type { JobMatchSession } from "../../apps/web/src/job-matching/api.js";
 
 let web: ViteDevServer;
 let webBaseUrl: string;
+let ats: SyntheticAtsServer;
 
 test.beforeAll(async () => {
+  ats = await startSyntheticAts();
   web = await createServer({
     root: fileURLToPath(new URL("../../apps/web", import.meta.url)),
     server: { host: "127.0.0.1", port: 0 },
@@ -26,12 +37,14 @@ test.beforeAll(async () => {
 
 test.afterAll(async () => {
   await web.close();
+  await ats.close();
 });
 
 test("inline job-match acceptance flow keeps process points and cards in the owning turn", async ({ page }) => {
   const capturedActions: ConversationJobMatchAction[] = [];
   const applicationSideEffects: string[] = [];
-  await mockInlineConversation(page, capturedActions, applicationSideEffects);
+  const fixture = inlineJobMatchSession();
+  await mockInlineConversation(page, capturedActions, applicationSideEffects, fixture);
   await page.setViewportSize({ width: 1280, height: 900 });
   await page.goto(`${webBaseUrl}/?conversation=conversation-inline`);
 
@@ -52,14 +65,25 @@ test("inline job-match acceptance flow keeps process points and cards in the own
 
   const firstCard = jobCards.first();
   await firstCard.getByRole("button", { name: "查看详情" }).click();
-  await expect(firstCard.getByRole("heading", { name: "匹配优势" })).toBeVisible();
-  await expect(firstCard.getByRole("heading", { name: "待确认条件" })).toBeVisible();
-  await expect(firstCard.getByRole("heading", { name: "差距与风险" })).toBeVisible();
-  await expect(firstCard.getByRole("heading", { name: "匹配度如何得出" })).toBeVisible();
-  await expect(firstCard).toContainText("你的技能“TypeScript”符合岗位技能要求。");
-  await expect(page.locator("body")).not.toContainText(
-    /result-inline-|posting-inline-|requirement-inline-|match-inline-1|sha256:|profile\./u
-  );
+  const advantages = firstCard.locator(".conversation-job-card-details section").filter({ hasText: "匹配优势" });
+  const unknowns = firstCard.locator(".conversation-job-card-details section").filter({ hasText: "待确认条件" });
+  const conflicts = firstCard.locator(".conversation-job-card-details section").filter({ hasText: "差距与风险" });
+  const score = firstCard.locator(".conversation-job-card-details section").filter({ hasText: "匹配度如何得出" });
+  await expect(advantages.getByRole("heading", { name: "匹配优势" })).toBeVisible();
+  await expect(advantages).toContainText("岗位要求熟练掌握 TypeScript");
+  await expect(advantages).toContainText("你的技能“TypeScript”符合岗位技能要求。");
+  await expect(unknowns.getByRole("heading", { name: "待确认条件" })).toBeVisible();
+  await expect(unknowns).toContainText("工作地点需要上海");
+  await expect(conflicts.getByRole("heading", { name: "差距与风险" })).toBeVisible();
+  await expect(conflicts).toContainText("岗位要求五年工作经验");
+  await expect(score.getByRole("heading", { name: "匹配度如何得出" })).toBeVisible();
+  await expect(score).toContainText("技能 60/60");
+  await expect(score).toContainText("任职资格 20/25");
+  await expect(score).toContainText("求职偏好 15/15");
+  await expect(score).toContainText("总分 95/100");
+  const renderedText = await page.locator("body").innerText();
+  const internalValues = fixtureInternalValues(fixture);
+  expectNoInternalIdentifiers(renderedText, internalValues);
 
   const desktopScreenshot = await page.screenshot({
     path: "playwright-artifacts/conversation-job-match-flow-desktop.png",
@@ -74,7 +98,7 @@ test("inline job-match acceptance flow keeps process points and cards in the own
   }));
   expect(mobileDimensions.scrollWidth).toBeLessThanOrEqual(mobileDimensions.viewportWidth);
   await expect(assistantTurn.getByRole("list", { name: "执行过程" })).toBeVisible();
-  await expect(firstCard.getByRole("heading", { name: "匹配度如何得出" })).toBeVisible();
+  await expect(score.getByRole("heading", { name: "匹配度如何得出" })).toBeVisible();
 
   const mobileScreenshot = await page.screenshot({
     path: "playwright-artifacts/conversation-job-match-flow-mobile.png",
@@ -82,15 +106,167 @@ test("inline job-match acceptance flow keeps process points and cards in the own
   });
   expect(mobileScreenshot.byteLength).toBeGreaterThan(0);
 
-  await firstCard.getByRole("button", { name: "选择此岗位" }).click();
+  const firstNonConflictCard = assistantTurn
+    .locator('article[aria-label^="岗位："]:not(.conflict)')
+    .first();
+  await firstNonConflictCard.getByRole("button", { name: "选择此岗位" }).click();
   await expect.poll(() => capturedActions.length).toBe(1);
   expect(capturedActions[0]).toMatchObject({
     conversationId: "conversation-inline",
     sessionId: "match-inline-1",
     action: "select_result"
   });
-  await expect(firstCard).toContainText("已选择，等待受控投递确认");
+  await expect(firstNonConflictCard).toContainText("已选择，等待受控投递确认");
+  expectNoInternalIdentifiers(await page.locator("body").innerText(), internalValues);
   expect(applicationSideEffects).toEqual([]);
+});
+
+test("real select_result creates no application task and submits nothing to Synthetic ATS", async () => {
+  const taskId = "conversation-selection-safety";
+  const initialUrl = `${ats.baseUrl}/job-list.html?taskId=${taskId}`;
+  const canonicalUrl = `${ats.baseUrl}/job-detail.html?taskId=${taskId}&job=frontend-safety`;
+  const initialized = await fetch(canonicalUrl);
+  expect(initialized.ok).toBe(true);
+
+  const database = createSqliteDatabase(":memory:");
+  try {
+    migrateDatabase(database);
+    const jobMatchesRepository = createJobMatchRepository(database);
+    const applicationTasks = createApplicationTaskRepository(database);
+    const conversations = createConversationRepository(database);
+    const conversation = conversations.createConversation();
+    const sessionId = "real-selection-session";
+    const posting = {
+      id: "real-selection-posting",
+      source: "moka" as const,
+      sourceJobId: "synthetic-frontend-safety",
+      canonicalUrl,
+      title: "前端安全验收工程师",
+      organization: "合成招聘站",
+      location: "上海",
+      employmentType: "校招",
+      description: "用于验证选择岗位不会创建或提交投递。",
+      requirements: [{
+        id: "real-selection-requirement",
+        category: "skill" as const,
+        normalizedValue: "TypeScript",
+        required: true,
+        sourceEvidence: "熟练掌握 TypeScript"
+      }],
+      adapterVersion: "synthetic-selection-v1",
+      contentHash: "sha256:real-selection-posting",
+      extractedAt: "2026-09-06T00:00:00.000Z"
+    };
+    const result = {
+      id: "real-selection-result",
+      version: 0,
+      sessionId,
+      postingId: posting.id,
+      fitScore: 96,
+      confidence: 94,
+      rankingScore: 95,
+      outcomes: [{
+        requirementId: posting.requirements[0]!.id,
+        outcome: "satisfied" as const,
+        reasonCode: "confirmed_skill"
+      }],
+      evidence: [{
+        requirementId: posting.requirements[0]!.id,
+        evidenceId: "real-selection-evidence",
+        source: "confirmed_fact" as const,
+        quality: 1,
+        summary: "你的技能“TypeScript”符合岗位技能要求。"
+      }],
+      gaps: [],
+      scoringVersion: "job-match-v1" as const,
+      scoreBreakdown: {
+        total: 96,
+        dimensions: [{
+          dimension: "skill" as const,
+          label: "技能",
+          earned: 96,
+          available: 100,
+          satisfied: 1,
+          unknown: 0,
+          conflict: 0
+        }]
+      },
+      profileRevision: 1,
+      expectationRevision: 1,
+      postingContentHash: posting.contentHash,
+      stale: false
+    };
+    const expectation = {
+      revision: 1,
+      confirmedAt: "2026-09-06T00:00:00.000Z",
+      criteria: [{ kind: "target_role" as const, values: ["前端工程师"], strength: "required" as const }]
+    };
+    jobMatchesRepository.create({
+      id: sessionId,
+      initialUrl,
+      state: "awaiting_job_selection",
+      profileRevision: 1,
+      expectation,
+      createdAt: "2026-09-06T00:00:00.000Z"
+    });
+    jobMatchesRepository.saveExtractionPage({
+      sessionId,
+      idempotencyKey: "real-selection-seed",
+      postings: [posting],
+      cursor: { value: "done", pagesRead: 1, elapsedMs: 1, newJobs: 1, consecutiveNoNewPages: 0 },
+      event: { type: "seed", payload: {} },
+      createdAt: "2026-09-06T00:00:00.100Z"
+    });
+    jobMatchesRepository.saveResults(sessionId, [result], "2026-09-06T00:00:00.200Z");
+    conversations.linkJobMatchSession(conversation.id, sessionId);
+
+    const jobMatches = createJobMatchService({
+      repository: jobMatchesRepository,
+      applicationTasks,
+      browser: {
+        open: async () => undefined,
+        observeJob: async () => { throw new Error("unexpected browser observation"); }
+      },
+      browserOwnershipLease: new BrowserOwnershipLease(),
+      adapters: [],
+      expectationSnapshot: () => expectation,
+      profileRevision: () => 1,
+      extraction: {
+        confirmFilters: async () => undefined,
+        runExtraction: async () => undefined
+      },
+      matcher: { match: async () => undefined },
+      submissionCount: () => ats.state(taskId).submissionCount
+    });
+    const conversationJobMatches = createConversationJobMatchService({
+      conversations,
+      jobMatches,
+      now: () => new Date("2026-09-06T00:00:01.000Z")
+    });
+
+    const response = await conversationJobMatches.execute(conversation.id, {
+      conversationId: conversation.id,
+      sessionId,
+      action: "select_result",
+      sessionVersion: 0,
+      idempotencyKey: "real-select-result",
+      resultId: result.id,
+      resultVersion: result.version,
+      postingContentHash: result.postingContentHash
+    });
+
+    expect(response).toMatchObject({ sessionId, state: "selected", version: 1 });
+    expect(jobMatchesRepository.get(sessionId, { required: true })).toMatchObject({
+      state: "selected",
+      version: 1,
+      selectedResultId: result.id,
+      selectedPostingContentHash: result.postingContentHash
+    });
+    expect(applicationTasks.list()).toHaveLength(0);
+    expect(ats.state(taskId).submissionCount).toBe(0);
+  } finally {
+    database.close();
+  }
 });
 
 test("legacy job-match URL returns to the owning conversation instead of rendering a workbench", async ({ page }) => {
@@ -114,10 +290,11 @@ test("legacy job-match URL returns to the owning conversation instead of renderi
 async function mockInlineConversation(
   page: Page,
   capturedActions: ConversationJobMatchAction[] = [],
-  applicationSideEffects: string[] = []
+  applicationSideEffects: string[] = [],
+  initialJobMatchSession = inlineJobMatchSession()
 ): Promise<void> {
   const view = inlineConversationView();
-  let jobMatchSession = inlineJobMatchSession();
+  let jobMatchSession = initialJobMatchSession;
   page.on("request", (request) => {
     if (request.method() === "GET") return;
     const pathname = new URL(request.url()).pathname;
@@ -299,7 +476,25 @@ function inlineJobMatchSession(): JobMatchSession {
     location: "杭州",
     employmentType: "校招",
     description: "负责前端产品开发",
-    requirements: [{
+    requirements: ordinal === 2 ? [{
+      id: "requirement-skill-inline-2",
+      category: "skill" as const,
+      normalizedValue: "TypeScript",
+      required: true,
+      sourceEvidence: "岗位要求熟练掌握 TypeScript"
+    }, {
+      id: "requirement-location-inline-2",
+      category: "location" as const,
+      normalizedValue: "上海",
+      required: false,
+      sourceEvidence: "工作地点需要上海"
+    }, {
+      id: "requirement-experience-inline-2",
+      category: "experience_years" as const,
+      normalizedValue: "5",
+      required: true,
+      sourceEvidence: "岗位要求五年工作经验"
+    }] : [{
       id: `requirement-inline-${ordinal}`,
       category: "skill" as const,
       normalizedValue: "TypeScript",
@@ -318,7 +513,19 @@ function inlineJobMatchSession(): JobMatchSession {
     fitScore,
     confidence,
     rankingScore: fitScore,
-    outcomes: [{
+    outcomes: ordinal === 2 ? [{
+      requirementId: "requirement-skill-inline-2",
+      outcome: "satisfied" as const,
+      reasonCode: "confirmed_skill"
+    }, {
+      requirementId: "requirement-location-inline-2",
+      outcome: "unknown" as const,
+      reasonCode: "location_unconfirmed"
+    }, {
+      requirementId: "requirement-experience-inline-2",
+      outcome: "conflict" as const,
+      reasonCode: "experience_conflict"
+    }] : [{
       requirementId: postings[index]!.requirements[0]!.id,
       outcome: "satisfied" as const,
       reasonCode: "confirmed_skill"
@@ -330,11 +537,43 @@ function inlineJobMatchSession(): JobMatchSession {
       quality: 1,
       summary: "你的技能“TypeScript”符合岗位技能要求。"
     }],
-    gaps: [],
+    gaps: ordinal === 2 ? [{
+      requirementId: "requirement-location-inline-2",
+      outcome: "unknown" as const,
+      summary: "尚未确认上海工作地点偏好"
+    }, {
+      requirementId: "requirement-experience-inline-2",
+      outcome: "conflict" as const,
+      summary: "已确认经验年限与岗位要求存在差距"
+    }] : [],
     scoringVersion: "job-match-v1" as const,
     scoreBreakdown: {
       total: fitScore,
-      dimensions: [{
+      dimensions: ordinal === 2 ? [{
+        dimension: "skill" as const,
+        label: "技能",
+        earned: 60,
+        available: 60,
+        satisfied: 1,
+        unknown: 0,
+        conflict: 0
+      }, {
+        dimension: "qualification" as const,
+        label: "任职资格",
+        earned: 20,
+        available: 25,
+        satisfied: 0,
+        unknown: 0,
+        conflict: 1
+      }, {
+        dimension: "preference" as const,
+        label: "求职偏好",
+        earned: 15,
+        available: 15,
+        satisfied: 0,
+        unknown: 1,
+        conflict: 0
+      }] : [{
         dimension: "skill" as const,
         label: "技能",
         earned: fitScore,
@@ -370,4 +609,48 @@ function inlineJobMatchSession(): JobMatchSession {
     postings,
     results
   };
+}
+
+function fixtureInternalValues(session: JobMatchSession): string[] {
+  const values = new Set<string>([
+    session.id,
+    session.initialUrl,
+    ...(session.adapterVersion === undefined ? [] : [session.adapterVersion]),
+    session.scoringVersion
+  ]);
+  for (const posting of session.postings) {
+    values.add(posting.id);
+    if (posting.sourceJobId !== undefined) values.add(posting.sourceJobId);
+    values.add(posting.canonicalUrl);
+    values.add(new URL(posting.canonicalUrl).pathname);
+    values.add(posting.adapterVersion);
+    values.add(posting.contentHash);
+    for (const requirement of posting.requirements) values.add(requirement.id);
+  }
+  for (const result of session.results) {
+    values.add(result.id);
+    values.add(result.sessionId);
+    values.add(result.postingId);
+    values.add(result.postingContentHash);
+    values.add(result.scoringVersion);
+    for (const outcome of result.outcomes) {
+      values.add(outcome.requirementId);
+      values.add(outcome.reasonCode);
+    }
+    for (const evidence of result.evidence) {
+      values.add(evidence.requirementId);
+      values.add(evidence.evidenceId);
+    }
+    for (const gap of result.gaps) values.add(gap.requirementId);
+  }
+  return [...values];
+}
+
+function expectNoInternalIdentifiers(renderedText: string, internalValues: string[]): void {
+  for (const internalValue of internalValues) {
+    expect(renderedText).not.toContain(internalValue);
+  }
+  expect(renderedText).not.toMatch(
+    /(?:https?:\/\/|\/api\/|\/jobs?\/[^\s]+|\b[0-9a-f]{8}-[0-9a-f]{4}-[1-5][0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}\b|\b[0-9a-f]{24,}\b|\b[A-Za-z0-9_-]{32,}\b|\b(?:result|posting|requirement|evidence|session|match)[-_][a-z0-9][a-z0-9_-]*\b|sha256:|profile\.|(?:[a-z]:\\|\/(?:users|home|var|tmp)\/)[^\s]+)/iu
+  );
 }
