@@ -141,4 +141,66 @@ describe("synthetic ATS application scenarios", () => {
       });
     }
   });
+
+  it("serves deterministic Skill runtime pages for every supported site and adverse variant", async () => {
+    const server = await startSyntheticAts();
+    servers.push(server);
+
+    const sites = ["moka", "dji", "baidu"] as const;
+    const scenarios = [
+      "stable",
+      "renamed-label",
+      "duplicate-label",
+      "delayed-render",
+      "stale-node",
+      "ambiguous-fingerprint",
+      "unexpected-navigation"
+    ] as const;
+
+    for (const site of sites) {
+      for (const scenario of scenarios) {
+        const taskId = `skill-${site}-${scenario}`;
+        const response = await fetch(
+          `${server.baseUrl}/skill-runtime?taskId=${taskId}&site=${site}&scenario=${scenario}`
+        );
+        expect(response.status).toBe(200);
+        const html = await response.text();
+        expect(html).toContain('data-fixture="application-skill-runtime"');
+        expect(html).toContain(`data-site="${site}"`);
+        expect(html).toContain(`data-scenario="${scenario}"`);
+        expect(server.state(taskId)).toMatchObject({
+          skillRuntime: { site, scenario, values: {}, writeCounts: {} },
+          submissionCount: 0
+        });
+      }
+    }
+  });
+
+  it("records Skill runtime field readback without accepting a final submission", async () => {
+    const server = await startSyntheticAts();
+    servers.push(server);
+
+    const recorded = await fetch(`${server.baseUrl}/api/skill-runtime-state?taskId=skill-state`, {
+      method: "POST",
+      headers: { "content-type": "application/json" },
+      body: JSON.stringify({
+        site: "moka",
+        scenario: "stable",
+        values: { "basics.name": "Skill Runtime Candidate" },
+        writeCounts: { "basics.name": 1 },
+        navigationCount: 0
+      })
+    }).then((response) => response.json());
+
+    expect(recorded).toMatchObject({
+      skillRuntime: {
+        site: "moka",
+        scenario: "stable",
+        values: { "basics.name": "Skill Runtime Candidate" },
+        writeCounts: { "basics.name": 1 },
+        navigationCount: 0
+      },
+      submissionCount: 0
+    });
+  });
 });

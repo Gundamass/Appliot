@@ -35,6 +35,32 @@ describe("SkillInterpreter", () => {
     }, skill)).toMatchObject({ kind: "matched", pageVariantId: "personal-form" });
   });
 
+  it("matches repeated-field templates to concrete observed indexes and compiles concrete directives", () => {
+    const interpreter = new SkillInterpreter();
+    const skill = skillFixture();
+    skill.content.pageVariants[0]!.match.requiredFields = ["education[].institution"];
+    skill.content.fields = [{
+      semantic: "education[].institution",
+      controlTypes: ["text"],
+      locatorHints: [{ key: "education-institution", by: "label", text: "毕业院校" }]
+    }];
+    skill.content.workflow[0]!.actions = [
+      { capability: "fill_empty_fields", semantics: ["education[].institution"] },
+      { capability: "readback", semantics: ["education[].institution"] },
+      { capability: "full_page_audit" }
+    ];
+    const match = interpreter.matchPage({
+      ...observationFixture(),
+      fields: [{ semantic: "education[0].institution", empty: true }]
+    }, skill);
+
+    expect(match).toMatchObject({ kind: "matched", pageVariantId: "personal-form" });
+    expect(interpreter.compileDirectives(match, ["education[].institution"])).toEqual(expect.arrayContaining([
+      { kind: "resolve-field", semantic: "education[].institution", locatorKeys: ["education-institution"] },
+      { kind: "verify-field", semantic: "education[].institution" }
+    ]));
+  });
+
   it("does not match a job detail page that lacks required form semantics", () => {
     const interpreter = new SkillInterpreter();
 

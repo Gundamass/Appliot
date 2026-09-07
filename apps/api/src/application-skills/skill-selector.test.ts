@@ -163,6 +163,36 @@ describe("SkillSelector", () => {
     expect(store.persistedCount).toBe(1);
   });
 
+  it("hands off before binding when a writable semantic maps to multiple observed controls", async () => {
+    const store = new MemoryBindingStore();
+    const skill = skillFixture("1.0.0", "champion");
+    skill.content.capabilities = ["observe", "fill_empty_fields", "readback", "full_page_audit"];
+    skill.content.workflow[0]!.actions = [
+      { capability: "fill_empty_fields", semantics: ["basics.name"] },
+      { capability: "readback", semantics: ["basics.name"] },
+      { capability: "full_page_audit" }
+    ];
+    const registry = new FakeRegistry(undefined, [skill]);
+    const runtime = createApplicationSkillRuntime({ registry, bindingStoreFor: () => store });
+    const original = applicationSnapshot().fields[0]!;
+
+    const result = await runtime.resolve({
+      runId: "run-duplicate-semantic",
+      taskId: "task-duplicate-semantic",
+      snapshot: applicationSnapshot({
+        fields: [original, {
+          ...original,
+          id: "candidate-name-duplicate",
+          nodeRef: { ...original.nodeRef, nodeId: "node-candidate-name-duplicate" }
+        }]
+      })
+    });
+
+    expect(result).toEqual({ kind: "observe_only_handoff", reason: "safe_version_unavailable" });
+    expect(registry.boundPages).toHaveLength(0);
+    expect(store.putAttempts).toBe(0);
+  });
+
   it("does not pin or write registry allocation state for an unmatched company landing page", async () => {
     const store = new MemoryBindingStore();
     const registry = new FakeRegistry(undefined, [skillFixture("1.0.0", "champion")]);

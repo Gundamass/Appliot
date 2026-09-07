@@ -195,6 +195,10 @@ export function createApplicationSkillRuntime(options: {
       }
       const match = interpreter.matchPage(observation, champion.data);
       if (match.kind !== "matched") return observeOnly("page_unmatched");
+      const directives = interpreter.compileDirectives(match, observedSemantics(observation));
+      if (hasAmbiguousResolvableSemantic(observation, directives)) {
+        return observeOnly("safe_version_unavailable");
+      }
 
       let existingAllocation: SkillPageAllocation | undefined;
       try {
@@ -244,7 +248,7 @@ export function createApplicationSkillRuntime(options: {
         binding: selected.binding,
         pageVariantId: match.pageVariantId,
         allocation: "champion",
-        directives: interpreter.compileDirectives(match, observedSemantics(observation))
+        directives
       };
     }
   };
@@ -304,12 +308,16 @@ function compileSelection(
 ): Awaited<ReturnType<ApplicationSkillRuntime["resolve"]>> {
   const match = interpreter.matchPage(observation, version);
   if (match.kind !== "matched") return observeOnly("page_unmatched");
+  const directives = interpreter.compileDirectives(match, observedSemantics(observation));
+  if (hasAmbiguousResolvableSemantic(observation, directives)) {
+    return observeOnly("safe_version_unavailable");
+  }
   return {
     kind: "selected",
     binding,
     pageVariantId: match.pageVariantId,
     allocation: "champion",
-    directives: interpreter.compileDirectives(match, observedSemantics(observation))
+    directives
   };
 }
 
@@ -317,7 +325,7 @@ function skillObservation(snapshot: FormSnapshot): NormalizedSkillPageObservatio
   const url = new URL(snapshot.url);
   const fields: Array<{ semantic: ApplicationFieldSemantic; empty: boolean }> = [];
   for (const field of snapshot.fields) {
-    const semantic = ApplicationFieldSemanticSchema.safeParse(field.semanticHint);
+    const semantic = ApplicationFieldSemanticSchema.safeParse(semanticTemplate(field.semanticHint));
     if (!semantic.success) continue;
     fields.push({ semantic: semantic.data, empty: !hasValue(field.currentValue) });
   }
@@ -333,6 +341,20 @@ function skillObservation(snapshot: FormSnapshot): NormalizedSkillPageObservatio
     availableCapabilities: ["observe", "fill_empty_fields", "readback", "full_page_audit"],
     challengePresent: snapshot.challenge !== undefined
   };
+}
+
+function hasAmbiguousResolvableSemantic(
+  observation: NormalizedSkillPageObservation,
+  directives: ReturnType<SkillInterpreter["compileDirectives"]>
+): boolean {
+  return directives.some((directive) => directive.kind === "resolve-field"
+    && observation.fields.filter((field) => field.semantic === directive.semantic).length !== 1);
+}
+
+function semanticTemplate(value: unknown): unknown {
+  return typeof value === "string"
+    ? value.replace(/^([a-z]+)\[\d+\]/u, "$1[]")
+    : value;
 }
 
 function siteForObservation(observation: NormalizedSkillPageObservation): SkillBinding["site"] | undefined {

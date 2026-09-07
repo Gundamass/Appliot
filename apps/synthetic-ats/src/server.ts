@@ -44,6 +44,7 @@ export interface SyntheticTaskState {
   internshipAddCount: number;
   projectAddCount: number;
   runtime: SyntheticRuntimeState;
+  skillRuntime: SyntheticSkillRuntimeState;
   challenge?: SyntheticChallengeState;
 }
 
@@ -59,6 +60,24 @@ export interface SyntheticChallengeState {
   scenario: string;
   kind: "captcha" | "access_denied" | "rate_limited" | "device_verification" | "risk_control" | "unsupported_iframe" | "unsupported_shadow_dom";
   fillCount: number;
+}
+
+export type SyntheticSkillRuntimeSite = "moka" | "dji" | "baidu";
+export type SyntheticSkillRuntimeScenario =
+  | "stable"
+  | "renamed-label"
+  | "duplicate-label"
+  | "delayed-render"
+  | "stale-node"
+  | "ambiguous-fingerprint"
+  | "unexpected-navigation";
+
+export interface SyntheticSkillRuntimeState {
+  site: SyntheticSkillRuntimeSite | "";
+  scenario: SyntheticSkillRuntimeScenario | "";
+  values: Record<string, string>;
+  writeCounts: Record<string, number>;
+  navigationCount: number;
 }
 
 export interface SyntheticAtsServer {
@@ -103,6 +122,13 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
         writeCounts: {},
         mutationCount: 0,
         auditCount: 0
+      },
+      skillRuntime: {
+        site: "",
+        scenario: "",
+        values: {},
+        writeCounts: {},
+        navigationCount: 0
       }
     };
     tasks.set(taskId, created);
@@ -171,6 +197,34 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
         sendHtml(response, render(challengeP0Template, taskId, scenario));
         return;
       }
+      if (request.method === "GET" && url.pathname === "/skill-runtime") {
+        const site = parseSkillRuntimeSite(url.searchParams.get("site"));
+        const skillScenario = parseSkillRuntimeScenario(scenario);
+        const state = taskState(taskId);
+        if (state.skillRuntime.site !== site || state.skillRuntime.scenario !== skillScenario) {
+          state.skillRuntime = {
+            site,
+            scenario: skillScenario,
+            values: {},
+            writeCounts: {},
+            navigationCount: 0
+          };
+        }
+        sendHtml(response, skillRuntimePage(
+          taskId,
+          site,
+          skillScenario,
+          state.skillRuntime.values,
+          state.skillRuntime.writeCounts
+        ));
+        return;
+      }
+      if (request.method === "GET" && url.pathname === "/skill-runtime-unexpected") {
+        const state = taskState(taskId);
+        state.skillRuntime.navigationCount += 1;
+        sendHtml(response, `<!doctype html><html><head><meta charset="utf-8"><title>Unexpected navigation</title></head><body data-fixture="application-skill-runtime-unexpected"><h1>Session changed</h1><label>Search<input name="search"></label></body></html>`);
+        return;
+      }
       if (request.method === "POST" && url.pathname === "/api/mokahr-state") {
         const body = JSON.parse(await readText(request)) as { draft?: SyntheticDraft; uploaded?: boolean };
         if (body.uploaded) taskState(taskId).uploadCount += 1;
@@ -210,6 +264,18 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
         const body = JSON.parse(await readText(request)) as { fillCount?: number };
         const state = taskState(taskId);
         if (state.challenge && body.fillCount !== undefined) state.challenge.fillCount = body.fillCount;
+        response.setHeader("Content-Type", "application/json; charset=utf-8");
+        response.end(JSON.stringify(state));
+        return;
+      }
+      if (request.method === "POST" && url.pathname === "/api/skill-runtime-state") {
+        const body = JSON.parse(await readText(request)) as Partial<SyntheticSkillRuntimeState>;
+        const state = taskState(taskId);
+        if (body.site !== undefined) state.skillRuntime.site = parseSkillRuntimeSite(body.site);
+        if (body.scenario !== undefined) state.skillRuntime.scenario = parseSkillRuntimeScenario(body.scenario);
+        if (body.values !== undefined) state.skillRuntime.values = { ...body.values };
+        if (body.writeCounts !== undefined) state.skillRuntime.writeCounts = { ...body.writeCounts };
+        if (body.navigationCount !== undefined) state.skillRuntime.navigationCount = body.navigationCount;
         response.setHeader("Content-Type", "application/json; charset=utf-8");
         response.end(JSON.stringify(state));
         return;
@@ -278,6 +344,113 @@ export async function startSyntheticAts(): Promise<SyntheticAtsServer> {
       server.close((error) => error ? reject(error) : resolve());
     })
   };
+}
+
+function parseSkillRuntimeSite(value: unknown): SyntheticSkillRuntimeSite {
+  if (value === "moka" || value === "dji" || value === "baidu") return value;
+  throw new Error("unknown_skill_runtime_site");
+}
+
+function parseSkillRuntimeScenario(value: unknown): SyntheticSkillRuntimeScenario {
+  if (
+    value === "stable"
+    || value === "renamed-label"
+    || value === "duplicate-label"
+    || value === "delayed-render"
+    || value === "stale-node"
+    || value === "ambiguous-fingerprint"
+    || value === "unexpected-navigation"
+  ) return value;
+  throw new Error("unknown_skill_runtime_scenario");
+}
+
+function skillRuntimePage(
+  taskId: string,
+  site: SyntheticSkillRuntimeSite,
+  scenario: SyntheticSkillRuntimeScenario,
+  values: Readonly<Record<string, string>>,
+  writeCounts: Readonly<Record<string, number>>
+): string {
+  const fields = skillRuntimeFields(site, scenario, values);
+  const encodedTaskId = encodeURIComponent(taskId);
+  const encodedSite = encodeURIComponent(site);
+  const encodedScenario = encodeURIComponent(scenario);
+  const formMarkup = `<form id="skill-form" method="post" action="/submit?taskId=${encodedTaskId}">${fields}<button type="submit">提交申请</button></form>`;
+  const initialMarkup = scenario === "delayed-render" ? "" : formMarkup;
+  const delayedRender = scenario === "delayed-render"
+    ? `setTimeout(() => { root.innerHTML = ${JSON.stringify(formMarkup)}; bind(); }, 250);`
+    : "";
+  return `<!doctype html>
+  <html lang="zh-CN"><head><meta charset="utf-8"><title>申请职位 - 个人信息</title></head>
+  <body data-fixture="application-skill-runtime" data-site="${site}" data-scenario="${scenario}">
+    <main><h1>申请职位</h1><h2>个人信息</h2><div id="skill-root">${initialMarkup}</div></main>
+    <script>
+      const root = document.querySelector('#skill-root');
+      const taskId = ${JSON.stringify(encodedTaskId)};
+      const site = ${JSON.stringify(encodedSite)};
+      const scenario = ${JSON.stringify(encodedScenario)};
+      const values = ${JSON.stringify(values)};
+      const writeCounts = ${JSON.stringify(writeCounts)};
+      let syncPromise = Promise.resolve();
+      const sync = () => syncPromise = fetch('/api/skill-runtime-state?taskId=' + taskId, {
+        method: 'POST',
+        headers: { 'content-type': 'application/json' },
+        body: JSON.stringify({ site, scenario, values, writeCounts }),
+        keepalive: true
+      });
+      const onValue = (event) => {
+        const field = event.target;
+        const semantic = field.dataset.semantic;
+        if (!semantic) return;
+        values[semantic] = field.value;
+        writeCounts[semantic] = (writeCounts[semantic] || 0) + 1;
+        if (scenario === 'unexpected-navigation') {
+          void sync().finally(() => { location.href = '/skill-runtime-unexpected?taskId=' + taskId; });
+        } else {
+          void sync();
+        }
+      };
+      const bind = () => root.querySelectorAll('[data-semantic]').forEach((field) => {
+        field.addEventListener('input', onValue);
+      });
+      bind();
+      window.skillRuntimeFixture = {
+        flush() { return syncPromise; },
+        triggerStaleNode() {
+          const field = root.querySelector('[data-semantic]');
+          if (!field) throw new Error('skill_runtime_field_missing');
+          field.replaceWith(field.cloneNode(true));
+          bind();
+        }
+      };
+      ${delayedRender}
+    </script>
+  </body></html>`;
+}
+
+function skillRuntimeFields(
+  site: SyntheticSkillRuntimeSite,
+  scenario: SyntheticSkillRuntimeScenario,
+  values: Readonly<Record<string, string>>
+): string {
+  const renamed = scenario === "renamed-label";
+  const fields: Array<[string, string]> = site === "moka"
+    ? [
+        ["basics.name", renamed ? "Full legal name" : "姓名"],
+        ["basics.email", renamed ? "Primary email" : "邮箱"],
+        ["basics.phone", renamed ? "Mobile contact" : "手机号码"]
+      ]
+    : site === "dji"
+      ? [
+          ["basics.name", renamed ? "Full legal name" : "姓名"],
+          ["basics.phone", renamed ? "Mobile contact" : "手机号码"],
+          ["education[0].institution", renamed ? "University" : "毕业院校"]
+        ]
+      : [["basics.name", renamed ? "Full legal name" : "姓名"]];
+  if (scenario === "duplicate-label") fields.push(["basics.name", renamed ? "Full legal name" : "姓名"]);
+  return fields.map(([semantic, label], index) => `
+    <label for="skill-field-${index}">${label}</label>
+    <input id="skill-field-${index}" name="${semantic}" data-semantic="${semantic}" value="${escapeHtml(values[semantic] ?? "")}" required>`).join("");
 }
 
 function challengeKindForScenario(scenario: string): SyntheticChallengeState["kind"] {

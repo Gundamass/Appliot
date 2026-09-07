@@ -617,11 +617,17 @@ function selectSkillOrderedResolution(
   if (semanticOrder.length === 0) return undefined;
   for (const semantic of semanticOrder) {
     const candidate = resolutions.find((resolution) =>
-      resolution.field.semanticHint === semantic || resolution.fieldPath === semantic
+      semanticMatches(resolution.field.semanticHint, semantic)
+      || semanticMatches(resolution.fieldPath, semantic)
     );
     if (candidate !== undefined) return candidate;
   }
   return undefined;
+}
+
+function semanticMatches(observed: string | undefined, declared: ApplicationFieldSemantic): boolean {
+  if (observed === undefined) return false;
+  return observed === declared || observed.replace(/^([a-z]+)\[\d+\]/u, "$1[]") === declared;
 }
 
 function isHumanAcknowledgement(field: FormField): boolean {

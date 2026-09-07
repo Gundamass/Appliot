@@ -184,7 +184,7 @@ function normalizeObservation(input: unknown): NormalizedSkillPageObservation | 
   for (const fieldInput of value.fields) {
     if (typeof fieldInput !== "object" || fieldInput === null || Array.isArray(fieldInput)) return undefined;
     const field = fieldInput as Record<string, unknown>;
-    const semantic = ApplicationFieldSemanticSchema.safeParse(field.semantic);
+    const semantic = ApplicationFieldSemanticSchema.safeParse(semanticTemplate(field.semantic));
     if (!semantic.success || typeof field.empty !== "boolean") return undefined;
     fields.push({ semantic: semantic.data, empty: field.empty });
   }
@@ -202,6 +202,12 @@ function normalizeObservation(input: unknown): NormalizedSkillPageObservation | 
     availableCapabilities,
     challengePresent: value.challengePresent
   };
+}
+
+function semanticTemplate(value: unknown): unknown {
+  return typeof value === "string"
+    ? value.replace(/^([a-z]+)\[\d+\]/u, "$1[]")
+    : value;
 }
 
 function originAllowed(originValue: string, allowedDomains: readonly string[]): boolean {

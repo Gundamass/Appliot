@@ -307,6 +307,48 @@ describe("ApplicationTools", () => {
     });
   });
 
+  it("maps a repeated-field Skill template to its concrete observed field", async () => {
+    const institution = field({
+      id: "field-institution",
+      label: "毕业院校",
+      semanticHint: "education[0].institution",
+      nodeRef: nodeRef("node-field-institution")
+    });
+    const page = snapshot({ fields: [institution] });
+    const tools = createApplicationTools({
+      browser: {
+        observe: vi.fn(async () => page),
+        execute: vi.fn(async (command) => executionResult(command.type, page))
+      },
+      resolveField: async () => ({
+        status: "verified" as const,
+        value: "Skill Runtime University",
+        fieldPath: "education[0].institution"
+      }),
+      approve: () => "approved-token"
+    });
+    const observed = await tools.observe(taskId);
+    const resolutions = await tools.resolveFields({
+      taskId,
+      snapshot: observed,
+      profileRevision: 1,
+      phase: "deterministic"
+    });
+
+    const [draft] = await tools.buildPlan({
+      taskId,
+      snapshot: observed,
+      resolutions,
+      executionEpoch: 1,
+      skillSemanticOrder: ["education[].institution"]
+    });
+
+    expect(draft).toMatchObject({
+      fieldId: "field-institution",
+      value: "Skill Runtime University"
+    });
+  });
+
   it("does not plan a write when the selected Skill declares no resolvable field", async () => {
     const { tools } = createHarness();
     const observed = await tools.observe(taskId);
