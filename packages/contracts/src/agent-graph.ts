@@ -54,6 +54,9 @@ const TraceIdentifierSchema = z.string()
   .regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/u)
   .refine(isSafeTraceIdentifier, "sensitive_trace_token");
 const TraceCodeSchema = TraceIdentifierSchema.refine((value) => value.length <= 80);
+const LowercaseTraceCodeSchema = z.string()
+  .regex(/^[a-z0-9_:-]{1,80}$/u)
+  .refine(isSafeTraceIdentifier, "sensitive_trace_token");
 const SkillTraceIdentifierSchema = z.string()
   .min(1)
   .max(128)
@@ -98,8 +101,8 @@ export const AuditTraceInputSchema = z.object({
   confidence: z.number().min(0).max(1).optional(), candidateIds: z.array(TraceIdentifierSchema).max(100).optional(),
   evidenceIds: z.array(TraceIdentifierSchema).max(100).optional(), durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
   counts: z.record(TraceCodeSchema, z.number().int().nonnegative()).optional(), contentHash: TraceIdentifierSchema.optional(),
-  toolName: z.string().regex(/^[a-z0-9_:-]{1,80}$/u).optional(),
-  errorCode: z.string().regex(/^[a-z0-9_:-]{1,80}$/u).optional(),
+  toolName: LowercaseTraceCodeSchema.optional(),
+  errorCode: LowercaseTraceCodeSchema.optional(),
   skill: SkillTraceDimensionsSchema.optional()
 }).strict();
 

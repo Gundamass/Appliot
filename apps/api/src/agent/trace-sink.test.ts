@@ -68,6 +68,10 @@ describe("SQLite TraceSink", () => {
       outcome: "accepted", reasonCode: "sk-proj-abc123"
     })).toThrow();
     expect(() => sink.record({
+      runId: "run-1", taskId: "task-1", node: "judge", kind: "tool_call",
+      outcome: "accepted", reasonCode: "grounded", toolName: "sk-proj-abc123"
+    })).toThrow();
+    expect(() => sink.record({
       runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
       outcome: "accepted", reasonCode: "grounded",
       candidateIds: ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjYW5kaWRhdGUifQ.signature123"]

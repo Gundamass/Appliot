@@ -60,6 +60,8 @@ describe("LangSmith outbox", () => {
   it("rejects credential-like tokens before creating an export event", () => {
     expect(() => projectLangSmithEvent({ ...input, reasonCode: "approval_token_secret" })).toThrow();
     expect(() => projectLangSmithEvent({ ...input, reasonCode: "sk-proj-abc123" })).toThrow();
+    expect(() => projectLangSmithEvent({ ...input, toolName: "sk-proj-abc123" })).toThrow();
+    expect(() => projectLangSmithEvent({ ...input, graphVersion: "sk-proj-abc123" })).toThrow("trace_pii_rejected");
     expect(() => projectLangSmithEvent({
       ...input,
       candidateIds: ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjYW5kaWRhdGUifQ.signature123"]

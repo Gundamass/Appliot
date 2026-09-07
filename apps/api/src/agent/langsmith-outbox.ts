@@ -30,8 +30,6 @@ const ProjectionInputSchema = AuditTraceInputSchema.extend({
   parentRunId: z.string().min(1).max(256).optional(),
   graphVersion: z.string().min(1).max(40).optional(),
   nodeVersion: z.string().min(1).max(40).optional(),
-  toolName: z.string().min(1).max(80).optional(),
-  errorCode: z.string().min(1).max(80).optional(),
   summary: z.string().max(2_000).optional(),
   prompt: z.string().max(20_000).optional(),
   dom: z.string().max(20_000).optional(),
@@ -241,6 +239,10 @@ function rejectSensitiveProjectionValues(input: z.infer<typeof ProjectionInputSc
     /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i.test(value)
     || /(?:^|\D)(?:\+?86[- ]?)?1[3-9]\d{9}(?:$|\D)/.test(value)
     || /<\/?[a-z][^>]*>/i.test(value)
+    || /https?:\/\/[^\s?#]+[^\s#]*\?[^\s#]+/iu.test(value)
+    || /(?:approval|access|refresh|secret|auth|bearer|session|credential|private)[_.:-]?(?:token|key|secret)/iu.test(value)
+    || /^sk-(?:proj-)?[A-Za-z0-9_-]{6,}$/u.test(value)
+    || /^eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}$/u.test(value)
   );
   const hasChineseNameSummary = sensitiveFields.some((value) => /^[\u4e00-\u9fff]{2,4}$/.test(value.trim()));
   if (hasSensitivePattern || hasChineseNameSummary || input.prompt !== undefined || input.dom !== undefined || input.evidenceQuote !== undefined) {

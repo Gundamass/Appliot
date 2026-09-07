@@ -81,6 +81,8 @@ describe("agent graph contracts", () => {
     { candidateIds: ["approval_token_secret"] },
     { reasonCode: "sk-proj-abc123" },
     { candidateIds: ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjYW5kaWRhdGUifQ.signature123"] },
+    { toolName: "sk-proj-abc123" },
+    { errorCode: "approval_token_secret" },
     { contentHash: "https://example.test/apply?token=secret" },
     { counts: { "<input-value>": 1 } }
   ])("rejects sensitive material smuggled through trace metadata", (unsafe) => {

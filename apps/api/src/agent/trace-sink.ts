@@ -113,7 +113,7 @@ function assertTraceSafe(input: AuditTraceInput): void {
   const values = [
     input.runId, input.taskId, input.node, input.outcome, input.reasonCode,
     ...(input.candidateIds ?? []), ...(input.evidenceIds ?? []), input.contentHash,
-    ...Object.keys(input.counts ?? {}),
+    ...Object.keys(input.counts ?? {}), input.toolName, input.errorCode,
     input.skill?.skillId, input.skill?.skillVersion, input.skill?.pageFingerprintHash,
     input.skill?.pageVariantId, input.skill?.allocation
   ].filter((value): value is string => value !== undefined);
