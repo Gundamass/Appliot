@@ -532,6 +532,7 @@ function normalizeRiskText(value: string): string {
 function hasPersistedLiteralRisk(value: string): boolean {
   const normalized = normalizeRiskText(value);
   const compactPhone = normalized.replace(/[\s()+-]/gu, "");
+  const credentialWords = normalized.replace(/[_/\-\s]+/gu, " ");
   return /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[a-z]{2,}/iu.test(normalized)
     || /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u.test(compactPhone)
     || /(?:https?|ftp|file|data|javascript):|www\./iu.test(normalized)
@@ -539,7 +540,9 @@ function hasPersistedLiteralRisk(value: string): boolean {
     || /(?:^|[^a-f0-9])[a-f0-9]{32,}(?:[^a-f0-9]|$)/iu.test(normalized)
     || /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:[^A-Za-z0-9_-]|$)/u.test(value)
     || /[A-Za-z0-9+_=]{32,}/u.test(value)
-    || /\b(?:approval|authorization|bearer|token|secret|api[_ -]?key)\b|批准令牌|审批令牌|密钥|秘钥|口令/iu.test(normalized);
+    || /(?:^|[^a-z0-9])(?:approval|authorization|bearer|token|secret|api\s*key)(?:$|[^a-z0-9])/iu.test(credentialWords)
+    || /批准令牌|审批令牌|密钥|秘钥|口令/u.test(normalized)
+    || hasSegmentedOpaqueValue(value);
 }
 
 function addPersistedLiteralRiskIssue(value: string, context: z.RefinementCtx, message: string): boolean {
@@ -553,8 +556,21 @@ function hasSensitivePath(value: string): boolean {
 }
 
 function hasExecutableLiteralSyntax(value: string): boolean {
-  return /(?:^|\s)\/\/[A-Za-z*]|\/html(?:\/|$)|\[@/u.test(value)
-    || /javascript\s*:|document\s*(?:\.|\[)|window\s*(?:\.|\[)|\beval\s*\(/iu.test(value);
+  return /(?:^|\s)\/\/[A-Za-z*]|\/html(?:\/|$)|\[[^\]]*@[A-Za-z_:][^\]]*\]/u.test(value)
+    || /(?:ancestor|ancestor-or-self|attribute|child|descendant|descendant-or-self|following|following-sibling|namespace|parent|preceding|preceding-sibling|self)\s*::/iu.test(value)
+    || /javascript\s*:|document\s*(?:\.|\[)|window\s*(?:\.|\[)|\b(?:eval|fetch|xmlhttprequest)\s*\(/iu.test(value)
+    || /\baxios\s*(?:\.[a-z][a-z0-9_]*\s*\(|\()/iu.test(value);
+}
+
+function hasSegmentedOpaqueValue(value: string): boolean {
+  const chunks = value.split(/[-_/]/u).filter((chunk) => /^[A-Za-z0-9]{6,}$/u.test(chunk));
+  if (chunks.length < 3) return false;
+  const combined = chunks.join("");
+  if (combined.length < 24) return false;
+  const mixedCase = /[a-z]/u.test(combined) && /[A-Z]/u.test(combined);
+  const mixedAlphaNumericChunks = chunks.filter((chunk) => /[A-Za-z]/u.test(chunk) && /\d/u.test(chunk)).length;
+  const alphaNumericTransitions = combined.match(/(?:[A-Za-z]\d|\d[A-Za-z])/gu)?.length ?? 0;
+  return mixedCase || mixedAlphaNumericChunks >= 2 || alphaNumericTransitions >= 4;
 }
 
 function checkUnique(

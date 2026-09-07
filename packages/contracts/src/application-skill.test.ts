@@ -192,11 +192,19 @@ const unsafeStaticTexts = [
   "//input[@name='phone']",
   "javascript:alert(1)",
   "document.querySelector('input')",
+  "fetch('/collect')",
+  "new XMLHttpRequest()",
+  "axios.post('/collect')",
+  "ancestor::form/input",
+  "input[contains(@name,'phone')]",
   "550e8400-e29b-41d4-a716-446655440000",
   "a".repeat(64),
   "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturePart123456",
   "QWxhZGRpbjpPcGVuU2VzYW1lVG9rZW5WYWx1ZQ==",
-  "approval-token-secret"
+  "approval-token-secret",
+  "approval_token_secret",
+  "bearer_token",
+  "AkJ3m9Qx-7VpT2n4C-Z8r5W1Ys"
 ] as const;
 
 const textBearingPositions = ["label", "role", "placeholder", "requiredText"] as const;
@@ -220,20 +228,28 @@ const evolvableIdentifierPositions = [
 
 const unsafeIdentifierValues = [
   "approval-token-secret",
+  "approval_token_secret",
+  "bearer_token",
   "workflow-13800138000",
   "candidate-abcdefab-cdef-abcd-efab-cdefabcdefab",
   "a".repeat(64),
-  "qwxhzgrpbjppcgvuu2vzyw1lvg9rzw5wywx1zq"
+  "qwxhzgrpbjppcgvuu2vzyw1lvg9rzw5wywx1zq",
+  "akj3m9qx-7vpt2n4c-z8r5w1ys",
+  "m9qx7vpt_2n4cz8r5_w1ys6kbd"
 ] as const;
 
 const unsafeRoutePatterns = [
   "/profile/13800138000",
   "/apply/candidate@example.com",
   "/apply/approval-token-secret",
+  "/apply/approval_token_secret",
+  "/apply/bearer_token",
   "/apply/abcdefab-cdef-abcd-efab-cdefabcdefab",
   `/apply/${"a".repeat(64)}`,
   "/apply/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturePart123456",
   "/apply/QWxhZGRpbjpPcGVuU2VzYW1lVG9rZW5WYWx1ZQ",
+  "/payload/AkJ3m9Qx/7VpT2n4C/Z8r5W1Ys",
+  "/payload/akj3m9qx-7vpt2n4c-z8r5w1ys",
   "/api/v1/profile",
   "/home/admin/resume.txt",
   "/redirect/https://evil.example/collect"
@@ -464,6 +480,27 @@ describe("ApplicationSkillContentSchema", () => {
       };
       expect(() => ApplicationSkillContentSchema.parse(candidate), `route accepted ${routePattern}`).toThrow();
     }
+  });
+
+  it("preserves normal lowercase descriptive identifiers and routes", () => {
+    for (const position of evolvableIdentifierPositions) {
+      expect(
+        () => ApplicationSkillContentSchema.parse(
+          contentWithIdentifier(position, "candidate-application-workflow-step")
+        ),
+        `${position} rejected a descriptive identifier`
+      ).not.toThrow();
+    }
+    expect(() => ApplicationSkillContentSchema.parse({
+      ...baiduCampusSkill,
+      pageVariants: [{
+        ...baiduCampusSkill.pageVariants[0],
+        match: {
+          ...baiduCampusSkill.pageVariants[0].match,
+          routePatterns: ["/candidate/application/workflow/step"]
+        }
+      }]
+    })).not.toThrow();
   });
 
   it("rejects dynamic identifiers in restricted CSS attribute values", () => {

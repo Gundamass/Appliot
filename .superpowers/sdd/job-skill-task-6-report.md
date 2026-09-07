@@ -86,3 +86,29 @@ Second-review GREEN verification:
 - Root typecheck: exit 0.
 
 Natural-language profile overlap cannot be decided safely from syntax alone. Task 8 remains responsible for proving that accepted static hints originate from the observed page at the registered origin before activation.
+
+## Third reviewer fix cycle
+
+The third review identified credential markers hidden behind underscore separators, segmented opaque payloads, and additional executable network/XPath literal shapes.
+
+Third-review RED command:
+
+`rtk corepack pnpm --filter @resume/contracts exec vitest run src/application-skill.test.ts`
+
+Result: exit 1; 23 failed / 33 passed. Failures reproduced underscore-separated credentials across direct and typed-patch carriers, segmented high-entropy values, and `fetch`, XHR, axios, XPath-axis, and XPath-predicate literals in all static text positions. The descriptive identifier/route and legitimate static-label retention sets remained green during RED.
+
+Fixes:
+
+- Credential detection normalizes underscore, slash, hyphen, and whitespace separators before matching non-alphanumeric term boundaries, closing `approval_token_secret` and `bearer_token` bypasses.
+- A conservative segmented-opaque check requires at least three substantial chunks, at least 24 alphanumeric characters, and mixed case or repeated letter/digit interleaving; ordinary lowercase descriptive IDs and routes remain valid.
+- Static executable-shape detection now covers `fetch(...)`, `XMLHttpRequest(...)`, axios method calls, XPath axes using `::`, and XPath predicates containing attribute references.
+- Shared refinements continue to protect evolvable identifiers, locator keys, stable attributes, relative routes, static hints, and the same values nested in typed patches.
+- Mandatory full-page audit, context-free patch removal restrictions, CSS dynamic-value checks, runtime opaque-ID compatibility, and legitimate literal labels remain unchanged.
+
+Third-review GREEN verification:
+
+- Focused Skill test: 1 file passed, 56/56 tests passed.
+- Required combined test: 2 files passed, 58/58 tests passed.
+- Full contracts regression: 17 files passed, 164/164 tests passed.
+- Contracts typecheck: exit 0.
+- Root typecheck: exit 0.
