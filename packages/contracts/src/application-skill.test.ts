@@ -700,6 +700,7 @@ describe("application skill registry and runtime contracts", () => {
         allocationId: "allocation-1"
       }),
       pageVariantId: "baidu-campus-application",
+      allocation: "champion",
       fieldOutcomes: [{
         semantic: "basics.name",
         outcome: "verified",
@@ -715,6 +716,7 @@ describe("application skill registry and runtime contracts", () => {
       completedAt: "2026-09-06T08:00:01.200Z"
     });
     expect(record.terminalResult).toBe("completed_pre_submit");
+    expect(record.allocation).toBe("champion");
     expect(() => SkillExecutionRecordSchema.parse({ ...record, rawFieldValue: "张三" })).toThrow();
   });
 

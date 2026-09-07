@@ -325,6 +325,18 @@ describe("SkillRegistry", () => {
     };
 
     registry.appendExecutionRecord(execution);
+    registry.appendExecutionRecord({
+      ...execution,
+      terminalResult: "failed",
+      completedAt: "2026-09-07T08:05:00.000Z"
+    });
+    const persistedExecution = JSON.parse((database.prepare(
+      "SELECT payload_json FROM skill_execution_records WHERE record_id = ?"
+    ).get(execution.recordId) as { payload_json: string }).payload_json);
+    expect(persistedExecution).toMatchObject({
+      terminalResult: "completed_pre_submit",
+      completedAt: execution.completedAt
+    });
     registry.appendEvaluation(evaluation);
     registry.appendEvolutionRun(evolution);
     registry.appendReplaySample(sample);
@@ -410,6 +422,7 @@ function executionFixture(): SkillExecutionRecord {
     attemptId: "attempt-1",
     binding: binding("1.0.0", "allocation-main"),
     pageVariantId: "application-form",
+    allocation: "champion",
     fieldOutcomes: [{ semantic: "basics.name", outcome: "verified" }],
     counts: { observed: 1, planned: 1, verified: 1, auditMismatches: 0, userCorrections: 0 },
     auditMismatchClasses: [],

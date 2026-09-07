@@ -28,6 +28,10 @@ interface TraceRow {
 const emailPattern = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const phonePattern = /(?:^|\D)(?:\+?86[- ]?)?1[3-9]\d{9}(?:$|\D)/;
 const markupPattern = /<\/?[a-z][^>]*>/i;
+const queryUrlPattern = /https?:\/\/[^\s?#]+[^\s#]*\?[^\s#]+/iu;
+const credentialPattern = /(?:approval|access|refresh|secret|auth|bearer|session|credential|private)[_.:-]?(?:token|key|secret)/iu;
+const apiKeyPattern = /^sk-(?:proj-)?[A-Za-z0-9_-]{6,}$/u;
+const jwtPattern = /^eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}$/u;
 
 export function createSqliteTraceSink(database: SqliteDatabase, options: TraceSinkOptions = {}): TraceSink {
   const insert = database.prepare(`
@@ -106,8 +110,22 @@ export function traceId(runId: string, sequence: number): string {
 }
 
 function assertTraceSafe(input: AuditTraceInput): void {
-  const values = [input.runId, input.taskId, input.node, input.outcome, input.reasonCode];
-  if (values.some((value) => emailPattern.test(value) || phonePattern.test(value) || markupPattern.test(value))) {
+  const values = [
+    input.runId, input.taskId, input.node, input.outcome, input.reasonCode,
+    ...(input.candidateIds ?? []), ...(input.evidenceIds ?? []), input.contentHash,
+    ...Object.keys(input.counts ?? {}),
+    input.skill?.skillId, input.skill?.skillVersion, input.skill?.pageFingerprintHash,
+    input.skill?.pageVariantId, input.skill?.allocation
+  ].filter((value): value is string => value !== undefined);
+  if (values.some((value) => (
+    emailPattern.test(value)
+    || phonePattern.test(value)
+    || markupPattern.test(value)
+    || queryUrlPattern.test(value)
+    || credentialPattern.test(value)
+    || apiKeyPattern.test(value)
+    || jwtPattern.test(value)
+  ))) {
     throw new Error("trace_pii_rejected");
   }
 }

@@ -17,7 +17,14 @@ afterEach(() => {
 
 const event = projectLangSmithEvent({
   runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
-  outcome: "accepted", reasonCode: "grounded"
+  outcome: "accepted", reasonCode: "grounded",
+  skill: {
+    skillId: "baidu-application",
+    skillVersion: "1.0.0",
+    pageFingerprintHash: "e".repeat(64),
+    pageVariantId: "application-form",
+    allocation: "champion"
+  }
 });
 
 describe("LangSmith exporter", () => {
@@ -31,7 +38,13 @@ describe("LangSmith exporter", () => {
     });
 
     await expect(exporter.flushOnce()).resolves.toEqual({ sent: 0, retried: 1, deadLetter: 0 });
-    expect(outbox.list()[0]).toEqual(expect.objectContaining({ status: "pending", attempts: 1 }));
+    expect(outbox.list()[0]).toEqual(expect.objectContaining({
+      status: "pending",
+      attempts: 1,
+      event: expect.objectContaining({
+        skill: expect.objectContaining({ skillId: "baidu-application", allocation: "champion" })
+      })
+    }));
   });
 
   it("uses the trace id as an idempotency key and does not resend sent rows", async () => {

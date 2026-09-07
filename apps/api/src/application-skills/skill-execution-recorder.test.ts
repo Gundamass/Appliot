@@ -35,6 +35,7 @@ describe("SkillExecutionRecorder", () => {
       userCorrections: 1
     });
     expect(record.auditMismatchClasses).toEqual(["required_empty", "unexpected_value"]);
+    expect(record.allocation).toBe("champion");
     expect(record.firstError).toEqual({
       stage: "write",
       errorClass: "write_failed",
@@ -93,6 +94,8 @@ describe("SkillExecutionRecorder", () => {
     ["DOM", { dom: "<input value='secret'>" }],
     ["screenshot", { screenshot: "data:image/png;base64,secret" }],
     ["approval token", { approvalToken: "approval-secret" }],
+    ["API key", { source: "sk-proj-abc123" }],
+    ["JWT", { source: "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjYW5kaWRhdGUifQ.signature123" }],
     ["query URL", { source: "https://talent.baidu.com/apply?candidate=secret" }]
   ])("rejects %s material instead of retaining it", async (_label, forbidden) => {
     const sink = new MemorySink();
@@ -151,6 +154,7 @@ function inputFixture(): SkillExecutionRecordInput {
     attemptId: "attempt-1",
     binding: bindingFixture(),
     pageVariantId: "baidu-campus-application",
+    allocation: "champion",
     observedSemantics: ["basics.name", "basics.email", "basics.phone", "education[].institution"],
     fieldPlans: [
       { semantic: "basics.name", outcome: "filled" },

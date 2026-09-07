@@ -53,7 +53,13 @@ export interface ApplicationSkillRuntime {
     snapshot: FormSnapshot;
     binding?: SkillBinding;
   }): Promise<
-    | { kind: "selected"; binding: SkillBinding; directives: ReturnType<SkillInterpreter["compileDirectives"]> }
+    | {
+        kind: "selected";
+        binding: SkillBinding;
+        pageVariantId: string;
+        allocation: "champion" | "challenger";
+        directives: ReturnType<SkillInterpreter["compileDirectives"]>;
+      }
     | { kind: "observe_only_handoff"; reason: "page_unmatched" | "safe_version_unavailable" }
     | { kind: "not_applicable" }
   >;
@@ -236,6 +242,8 @@ export function createApplicationSkillRuntime(options: {
       return {
         kind: "selected",
         binding: selected.binding,
+        pageVariantId: match.pageVariantId,
+        allocation: "champion",
         directives: interpreter.compileDirectives(match, observedSemantics(observation))
       };
     }
@@ -299,6 +307,8 @@ function compileSelection(
   return {
     kind: "selected",
     binding,
+    pageVariantId: match.pageVariantId,
+    allocation: "champion",
     directives: interpreter.compileDirectives(match, observedSemantics(observation))
   };
 }

@@ -54,6 +54,7 @@ const SkillExecutionRecordInputSchema = z.object({
   attemptId: z.string().min(1).max(128).regex(/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u),
   binding: SkillBindingSchema,
   pageVariantId: z.string().min(1).max(128).regex(/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u),
+  allocation: z.enum(["champion", "challenger"]),
   observedSemantics: z.array(ApplicationFieldSemanticSchema).max(200),
   fieldPlans: z.array(FieldPlanSchema).max(200),
   readbacks: z.array(ReadbackSchema).max(200),
@@ -101,6 +102,7 @@ export class SkillExecutionRecorder {
       attemptId: data.attemptId,
       binding: data.binding,
       pageVariantId: data.pageVariantId,
+      allocation: data.allocation,
       fieldOutcomes: fieldOutcomes(data),
       counts: {
         observed: uniqueCount(data.observedSemantics),
@@ -167,10 +169,16 @@ const FORBIDDEN_KEY = /(?:name|phone|email|resume|value|selector|dom|screenshot|
 const EMAIL_VALUE = /^[^\s@]+@[^\s@]+\.[^\s@]+$/u;
 const PHONE_VALUE = /^\+?\d{7,15}$/u;
 const QUERY_URL_VALUE = /^https?:\/\/[^\s?#]+(?:[^\s#]*)\?[^\s#]+/iu;
+const API_KEY_VALUE = /^sk-(?:proj-)?[A-Za-z0-9_-]{6,}$/u;
+const JWT_VALUE = /^eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}$/u;
 
 function containsForbiddenMaterial(value: unknown, seen = new WeakSet<object>()): boolean {
   if (typeof value === "string") {
-    return EMAIL_VALUE.test(value) || PHONE_VALUE.test(value) || QUERY_URL_VALUE.test(value);
+    return EMAIL_VALUE.test(value)
+      || PHONE_VALUE.test(value)
+      || QUERY_URL_VALUE.test(value)
+      || API_KEY_VALUE.test(value)
+      || JWT_VALUE.test(value);
   }
   if (typeof value !== "object" || value === null) return false;
   if (seen.has(value)) return false;

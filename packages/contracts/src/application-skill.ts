@@ -443,6 +443,7 @@ export const SkillExecutionRecordSchema = z.object({
   attemptId: RuntimeIdentifierSchema,
   binding: SkillBindingSchema,
   pageVariantId: IdentifierSchema,
+  allocation: z.enum(["champion", "challenger"]),
   fieldOutcomes: z.array(SkillFieldOutcomeSchema).max(200),
   counts: SkillExecutionCountsSchema,
   auditMismatchClasses: z.array(z.enum([

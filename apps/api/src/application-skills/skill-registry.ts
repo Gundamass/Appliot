@@ -483,6 +483,7 @@ export class SkillRegistry {
         record_id, skill_id, version, site, page_fingerprint_hash,
         payload_json, started_at, completed_at, created_at
       ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
+      ON CONFLICT(record_id) DO NOTHING
     `).run(
       record.recordId,
       record.binding.skillId,

@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { z } from "zod";
-import { AuditTraceInputSchema, type AuditTraceInput } from "@resume/contracts";
+import { AuditTraceInputSchema, SkillTraceDimensionsSchema, type AuditTraceInput } from "@resume/contracts";
 import type { SqliteDatabase } from "../db/client.js";
 
 const HashSchema = z.string().regex(/^[a-f0-9]{64}$/);
@@ -20,6 +20,7 @@ export const LangSmithReviewEventSchema = z.object({
   evidenceCount: z.number().int().nonnegative().max(100),
   durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
   errorCode: z.string().min(1).max(80).optional(),
+  skill: SkillTraceDimensionsSchema.optional(),
   createdAt: z.string().datetime()
 }).strict();
 
@@ -100,7 +101,8 @@ export function projectLangSmithEvent(input: unknown, createdAt = new Date().toI
     ...(parsed.toolName === undefined ? {} : { toolName: parsed.toolName }),
     ...(parsed.confidence === undefined ? {} : { confidence: parsed.confidence }),
     ...(parsed.durationMs === undefined ? {} : { durationMs: parsed.durationMs }),
-    ...(parsed.errorCode === undefined ? {} : { errorCode: parsed.errorCode })
+    ...(parsed.errorCode === undefined ? {} : { errorCode: parsed.errorCode }),
+    ...(parsed.skill === undefined ? {} : { skill: parsed.skill })
   });
 }
 

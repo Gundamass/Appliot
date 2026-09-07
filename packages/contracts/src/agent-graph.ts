@@ -40,12 +40,47 @@ export const JobMatchingStateSchema = z.object({
     postingId: z.string().min(1), requirementId: z.string().min(1), advisory: JobRequirementAdvisoryStateSchema
   }).strict()).max(100).optional()
 }).strict();
+const SensitiveTraceTokenPattern = /(?:approval|access|refresh|secret|auth|bearer|session|credential|private)[_.:-]?(?:token|key|secret)/iu;
+const ApiKeyTracePattern = /^sk-(?:proj-)?[A-Za-z0-9_-]{6,}$/u;
+const JwtTracePattern = /^eyJ[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}\.[A-Za-z0-9_-]{5,}$/u;
+const isSafeTraceIdentifier = (value: string) => (
+  !SensitiveTraceTokenPattern.test(value)
+  && !ApiKeyTracePattern.test(value)
+  && !JwtTracePattern.test(value)
+);
+const TraceIdentifierSchema = z.string()
+  .min(1)
+  .max(256)
+  .regex(/^[A-Za-z0-9][A-Za-z0-9_.:-]*$/u)
+  .refine(isSafeTraceIdentifier, "sensitive_trace_token");
+const TraceCodeSchema = TraceIdentifierSchema.refine((value) => value.length <= 80);
+const SkillTraceIdentifierSchema = z.string()
+  .min(1)
+  .max(128)
+  .regex(/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u)
+  .refine(isSafeTraceIdentifier, "sensitive_trace_token");
+export const SkillTraceDimensionsSchema = z.object({
+  skillId: SkillTraceIdentifierSchema,
+  skillVersion: z.string().max(64).regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u),
+  pageFingerprintHash: z.string().regex(/^[a-f0-9]{64}$/u),
+  pageVariantId: SkillTraceIdentifierSchema,
+  allocation: z.enum(["champion", "challenger"])
+}).strict();
 export const ApplicationExecutionStateSchema = z.object({
   applicationUrl: z.string().url(), snapshotId: z.string().optional(), executionEpoch: z.number().int().nonnegative(),
   fieldIds: z.array(z.string()).optional(), plannedCommandIds: z.array(z.string()).optional(),
   completedCommandIds: z.array(z.string()).optional(), retryCount: z.number().int().min(0).max(1),
-  finalReviewLocked: z.boolean(), skillBinding: SkillBindingSchema.optional()
-}).strict();
+  finalReviewLocked: z.boolean(), skillBinding: SkillBindingSchema.optional(),
+  skillTrace: SkillTraceDimensionsSchema.optional()
+}).strict().superRefine((value, context) => {
+  if (value.skillTrace === undefined) return;
+  if (value.skillBinding === undefined
+    || value.skillTrace.skillId !== value.skillBinding.skillId
+    || value.skillTrace.skillVersion !== value.skillBinding.version
+    || value.skillTrace.pageFingerprintHash !== value.skillBinding.pageFingerprintHash) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["skillTrace"], message: "skill_trace_binding_mismatch" });
+  }
+});
 export const AgentGraphStateSchema = z.object({
   threadId: z.string().min(1), runId: z.string().min(1), taskId: z.string().min(1),
   graphVersion: z.literal("agent-v1"), status: GraphStatusSchema,
@@ -57,14 +92,15 @@ export const AgentGraphStateSchema = z.object({
   auditEventIds: z.array(z.string())
 }).strict();
 export const AuditTraceInputSchema = z.object({
-  runId: z.string(), taskId: z.string(), node: z.string(),
+  runId: TraceIdentifierSchema, taskId: TraceIdentifierSchema, node: TraceCodeSchema,
   kind: z.enum(["node", "tool_call", "model_decision", "interrupt", "checkpoint", "safety_block"]),
-  outcome: z.string().max(80), reasonCode: z.string().max(80),
-  confidence: z.number().min(0).max(1).optional(), candidateIds: z.array(z.string()).max(100).optional(),
-  evidenceIds: z.array(z.string()).max(100).optional(), durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
-  counts: z.record(z.number().int().nonnegative()).optional(), contentHash: z.string().optional(),
+  outcome: TraceCodeSchema, reasonCode: TraceCodeSchema,
+  confidence: z.number().min(0).max(1).optional(), candidateIds: z.array(TraceIdentifierSchema).max(100).optional(),
+  evidenceIds: z.array(TraceIdentifierSchema).max(100).optional(), durationMs: z.number().int().nonnegative().max(86_400_000).optional(),
+  counts: z.record(TraceCodeSchema, z.number().int().nonnegative()).optional(), contentHash: TraceIdentifierSchema.optional(),
   toolName: z.string().regex(/^[a-z0-9_:-]{1,80}$/u).optional(),
-  errorCode: z.string().regex(/^[a-z0-9_:-]{1,80}$/u).optional()
+  errorCode: z.string().regex(/^[a-z0-9_:-]{1,80}$/u).optional(),
+  skill: SkillTraceDimensionsSchema.optional()
 }).strict();
 
 export type GraphStatus = z.infer<typeof GraphStatusSchema>;
@@ -77,4 +113,5 @@ export type JobRequirementAdvisoryState = z.infer<typeof JobRequirementAdvisoryS
 export type JobMatchingState = z.infer<typeof JobMatchingStateSchema>;
 export type ApplicationExecutionState = z.infer<typeof ApplicationExecutionStateSchema>;
 export type AgentGraphState = z.infer<typeof AgentGraphStateSchema>;
+export type SkillTraceDimensions = z.infer<typeof SkillTraceDimensionsSchema>;
 export type AuditTraceInput = z.infer<typeof AuditTraceInputSchema>;

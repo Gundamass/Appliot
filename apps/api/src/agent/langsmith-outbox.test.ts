@@ -36,12 +36,45 @@ describe("LangSmith outbox", () => {
     expect(JSON.stringify(event)).not.toContain("evidence-1");
   });
 
+  it("projects the bounded Skill dimensions without raw page data", () => {
+    const skill = {
+      skillId: "baidu-campus-application",
+      skillVersion: "1.0.0",
+      pageFingerprintHash: "c".repeat(64),
+      pageVariantId: "application-form",
+      allocation: "champion" as const
+    };
+    const event = projectLangSmithEvent({ ...input, skill });
+
+    expect(event).toMatchObject({ skill });
+    expect(JSON.stringify(event)).not.toContain("https://talent.baidu.com/jobs?token=secret");
+  });
+
   it.each(["张三", "13800138000", "person@example.com", "<div>resume</div>"])(
     "rejects sensitive export value %s",
     (value) => {
       expect(() => projectLangSmithEvent({ ...input, summary: value })).toThrow("trace_pii_rejected");
     }
   );
+
+  it("rejects credential-like tokens before creating an export event", () => {
+    expect(() => projectLangSmithEvent({ ...input, reasonCode: "approval_token_secret" })).toThrow();
+    expect(() => projectLangSmithEvent({ ...input, reasonCode: "sk-proj-abc123" })).toThrow();
+    expect(() => projectLangSmithEvent({
+      ...input,
+      candidateIds: ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjYW5kaWRhdGUifQ.signature123"]
+    })).toThrow();
+    expect(() => projectLangSmithEvent({
+      ...input,
+      skill: {
+        skillId: "approval_token_secret",
+        skillVersion: "1.0.0",
+        pageFingerprintHash: "a".repeat(64),
+        pageVariantId: "application-form",
+        allocation: "champion"
+      }
+    })).toThrow();
+  });
 
   it("enqueues, claims, and transitions an item to sent", () => {
     const outbox = createSqliteLangSmithOutbox(createDatabase());

@@ -46,7 +46,32 @@ describe("SQLite TraceSink", () => {
     expect(() => sink.record({
       runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
       outcome: "person@example.com", reasonCode: "grounded"
-    })).toThrow("trace_pii_rejected");
+    })).toThrow();
+    expect(() => sink.record({
+      runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
+      outcome: "https://talent.baidu.com/apply?token=secret", reasonCode: "grounded"
+    })).toThrow();
+    expect(() => sink.record({
+      runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
+      outcome: "accepted", reasonCode: "grounded", candidateIds: ["candidate@example.com"]
+    })).toThrow();
+    expect(() => sink.record({
+      runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
+      outcome: "accepted", reasonCode: "grounded", evidenceIds: ["input[name=email]"]
+    })).toThrow();
+    expect(() => sink.record({
+      runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
+      outcome: "accepted", reasonCode: "approval_token_secret"
+    })).toThrow();
+    expect(() => sink.record({
+      runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
+      outcome: "accepted", reasonCode: "sk-proj-abc123"
+    })).toThrow();
+    expect(() => sink.record({
+      runId: "run-1", taskId: "task-1", node: "judge", kind: "model_decision",
+      outcome: "accepted", reasonCode: "grounded",
+      candidateIds: ["eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiJjYW5kaWRhdGUifQ.signature123"]
+    })).toThrow();
     expect(database.prepare("SELECT COUNT(*) AS count FROM agent_trace_events").get())
       .toEqual({ count: 0 });
   });
@@ -69,5 +94,27 @@ describe("SQLite TraceSink", () => {
 
     expect(database.prepare("SELECT trace_id, status FROM langsmith_trace_outbox").all())
       .toEqual([{ trace_id: id, status: "pending" }]);
+  });
+
+  it("persists and projects only safe Skill dimensions", () => {
+    const database = createDatabase();
+    const sink = createSqliteTraceSink(database, { langSmithEnabled: true });
+    const skill = {
+      skillId: "baidu-campus-application",
+      skillVersion: "1.0.0",
+      pageFingerprintHash: "b".repeat(64),
+      pageVariantId: "application-form",
+      allocation: "champion" as const
+    };
+
+    sink.record({
+      runId: "run-1", taskId: "task-1", node: "execute_plan", kind: "tool_call",
+      outcome: "completed", reasonCode: "command_applied", skill
+    });
+
+    expect(sink.list("run-1")[0]).toMatchObject({ skill });
+    const payload = database.prepare("SELECT payload_json FROM langsmith_trace_outbox").get() as { payload_json: string };
+    expect(JSON.parse(payload.payload_json)).toMatchObject({ skill });
+    expect(payload.payload_json).not.toContain("token=");
   });
 });

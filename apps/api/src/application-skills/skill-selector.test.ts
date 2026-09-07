@@ -155,6 +155,8 @@ describe("SkillSelector", () => {
     expect(result).toMatchObject({
       kind: "selected",
       binding: { skillId: "baidu-application", version: "1.0.0", site: "baidu" },
+      pageVariantId: "application-form",
+      allocation: "champion",
       directives: expect.arrayContaining([{ kind: "verify-field", semantic: "basics.name" }])
     });
     expect(registry.boundPages).toHaveLength(1);
