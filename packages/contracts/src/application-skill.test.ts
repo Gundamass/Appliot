@@ -203,8 +203,10 @@ const unsafeStaticTexts = [
   "QWxhZGRpbjpPcGVuU2VzYW1lVG9rZW5WYWx1ZQ==",
   "approval-token-secret",
   "approval_token_secret",
+  "approvalTokenSecret",
   "bearer_token",
   "AkJ3m9Qx-7VpT2n4C-Z8r5W1Ys",
+  "QWxh-ZGRp-bjpP-cGVu-U2Vz-YW1l",
   "akj3-m9qx-7vpt-2n4c-z8r5-w1ys"
 ] as const;
 
@@ -230,6 +232,7 @@ const evolvableIdentifierPositions = [
 const unsafeIdentifierValues = [
   "approval-token-secret",
   "approval_token_secret",
+  "approvaltokensecret",
   "bearer_token",
   "workflow-13800138000",
   "candidate-abcdefab-cdef-abcd-efab-cdefabcdefab",
@@ -237,7 +240,8 @@ const unsafeIdentifierValues = [
   "qwxhzgrpbjppcgvuu2vzyw1lvg9rzw5wywx1zq",
   "akj3m9qx-7vpt2n4c-z8r5w1ys",
   "m9qx7vpt_2n4cz8r5_w1ys6kbd",
-  "akj3-m9qx-7vpt-2n4c-z8r5-w1ys"
+  "akj3-m9qx-7vpt-2n4c-z8r5-w1ys",
+  "qwxh-zgrp-bjpp-cgvu-u2vz-yw1l"
 ] as const;
 
 const unsafeRoutePatterns = [
@@ -245,12 +249,14 @@ const unsafeRoutePatterns = [
   "/apply/candidate@example.com",
   "/apply/approval-token-secret",
   "/apply/approval_token_secret",
+  "/apply/approvalTokenSecret",
   "/apply/bearer_token",
   "/apply/abcdefab-cdef-abcd-efab-cdefabcdefab",
   `/apply/${"a".repeat(64)}`,
   "/apply/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturePart123456",
   "/apply/QWxhZGRpbjpPcGVuU2VzYW1lVG9rZW5WYWx1ZQ",
   "/payload/AkJ3m9Qx/7VpT2n4C/Z8r5W1Ys",
+  "/payload/QWxh-ZGRp-bjpP-cGVu-U2Vz-YW1l",
   "/payload/akj3m9qx-7vpt2n4c-z8r5w1ys",
   "/payload/akj3-m9qx-7vpt-2n4c-z8r5-w1ys",
   "/api/v1/profile",

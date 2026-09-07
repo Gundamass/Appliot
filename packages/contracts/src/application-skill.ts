@@ -533,6 +533,7 @@ function hasPersistedLiteralRisk(value: string): boolean {
   const normalized = normalizeRiskText(value);
   const compactPhone = normalized.replace(/[\s()+-]/gu, "");
   const credentialWords = normalized.replace(/[_/\-\s]+/gu, " ");
+  const compactCredential = normalized.replace(/[^a-z0-9]+/gu, "");
   return /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[a-z]{2,}/iu.test(normalized)
     || /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u.test(compactPhone)
     || /(?:https?|ftp|file|data|javascript):|www\./iu.test(normalized)
@@ -541,6 +542,7 @@ function hasPersistedLiteralRisk(value: string): boolean {
     || /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:[^A-Za-z0-9_-]|$)/u.test(value)
     || /[A-Za-z0-9+_=]{32,}/u.test(value)
     || /(?:^|[^a-z0-9])(?:approval|authorization|bearer|token|secret|api\s*key)(?:$|[^a-z0-9])/iu.test(credentialWords)
+    || /(?:approvaltoken|authorizationtoken|bearertoken|tokensecret|clientsecret|apikey)/u.test(compactCredential)
     || /批准令牌|审批令牌|密钥|秘钥|口令/u.test(normalized)
     || hasSegmentedOpaqueValue(value);
 }
@@ -592,16 +594,24 @@ function hasOpaqueChunkWindow(chunks: readonly string[]): boolean {
       const alphaNumericTransitions = normalized.match(/(?:[a-z]\d|\d[a-z])/gu)?.length ?? 0;
       const digitDensity = digitCount / normalized.length;
       const vowelRatio = letterCount === 0 ? 0 : vowelCount / letterCount;
+      const segmentCount = end - start + 1;
+      const normalizedEntropy = shannonEntropy(normalized);
+      const originalEntropy = shannonEntropy(combined);
+      const uppercaseCount = combined.match(/[A-Z]/gu)?.length ?? 0;
+      const lowercaseCount = combined.match(/[a-z]/gu)?.length ?? 0;
 
       // These combined thresholds target encoded/random payloads without treating
       // camelCase or long descriptive routes as suspicious on casing alone.
-      if (
-        shannonEntropy(normalized) >= 4
+      const randomAlphaNumeric = normalizedEntropy >= 4
         && digitCount >= 4
         && digitDensity >= 0.15
         && vowelRatio <= 0.2
-        && alphaNumericTransitions >= 4
-      ) {
+        && alphaNumericTransitions >= 4;
+      const segmentedEncoding = vowelRatio <= 0.15 && (
+        (segmentCount >= 4 && normalizedEntropy >= 3.75)
+        || (originalEntropy >= 4.15 && uppercaseCount >= 3 && lowercaseCount >= 3)
+      );
+      if (randomAlphaNumeric || segmentedEncoding) {
         return true;
       }
     }

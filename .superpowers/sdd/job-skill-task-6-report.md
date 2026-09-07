@@ -143,3 +143,12 @@ Fourth-review GREEN verification:
 - Root typecheck: exit 0.
 
 Caveat: entropy screening is intentionally conservative and syntactic; it is not proof that a retained literal came from the target ATS page. Task 8 must still validate static-text origin, profile overlap, and registered-domain context before activating evolved Skill content.
+
+## Final literal hardening follow-up
+
+The next review added two concrete bypass classes: concatenated credential markers such as `approvalTokenSecret`/`approvaltokensecret`, and segmented Base64-like payloads with few digits. New RED fixtures failed in 23 parameterized carriers before implementation. Credential checks now also inspect a separator-free normalized form, while segmented payload detection uses separate random-alphanumeric and low-vowel encoded-text branches with case-preserving Shannon entropy. Descriptive camelCase labels, attributes, CSS fallbacks, and routes remain covered by positive compatibility fixtures.
+
+- Focused Skill test: 61/61 passed.
+- Full contracts regression: 169/169 passed.
+- Contracts typecheck: passed.
+- Root typecheck: passed.
