@@ -1,15 +1,27 @@
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { expect, test, type Page } from "@playwright/test";
+import Fastify from "../../apps/api/node_modules/fastify/fastify.js";
 import { createServer, type ViteDevServer } from "../../apps/web/node_modules/vite/dist/node/index.js";
+import { ActionPolicy } from "../../packages/action-policy/src/index.js";
 import { startSyntheticAts, type SyntheticAtsServer } from "../../apps/synthetic-ats/src/server.js";
+import { createApplicationService } from "../../apps/api/src/applications/application-service.js";
 import { createApplicationTaskRepository } from "../../apps/api/src/applications/application-task-repository.js";
+import { createCheckpointRepository } from "../../apps/api/src/applications/checkpoint-repository.js";
+import { registerApplicationRoutes } from "../../apps/api/src/applications/routes.js";
+import { createTaskEventBus } from "../../apps/api/src/applications/task-events.js";
 import { BrowserOwnershipLease } from "../../apps/api/src/browser/browser-ownership-lease.js";
+import { BrowserWorkerClient } from "../../apps/api/src/browser/worker-client.js";
+import { registerConversationJobMatchRoutes } from "../../apps/api/src/conversations/conversation-job-match-routes.js";
 import { createConversationRepository } from "../../apps/api/src/conversations/conversation-repository.js";
 import { createConversationJobMatchService } from "../../apps/api/src/conversations/conversation-job-match-service.js";
 import { createSqliteDatabase } from "../../apps/api/src/db/client.js";
 import { migrateDatabase } from "../../apps/api/src/db/migrate.js";
 import { createJobMatchRepository } from "../../apps/api/src/job-matching/job-match-repository.js";
 import { createJobMatchService } from "../../apps/api/src/job-matching/job-match-service.js";
+import { createProfileRepository } from "../../apps/api/src/profile/profile-repository.js";
 import type {
   ConversationJobMatchAction,
   ConversationMessage,
@@ -121,18 +133,66 @@ test("inline job-match acceptance flow keeps process points and cards in the own
   expect(applicationSideEffects).toEqual([]);
 });
 
-test("real select_result creates no application task and submits nothing to Synthetic ATS", async () => {
-  const taskId = "conversation-selection-safety";
-  const initialUrl = `${ats.baseUrl}/job-list.html?taskId=${taskId}`;
-  const canonicalUrl = `${ats.baseUrl}/job-detail.html?taskId=${taskId}&job=frontend-safety`;
-  const initialized = await fetch(canonicalUrl);
-  expect(initialized.ok).toBe(true);
-
+test("HTTP select_result leaves the production-capable application graph and Synthetic ATS untouched", async () => {
+  const selectionTaskId = "conversation-selection-safety";
+  const applicationControlTaskId = "application-route-control";
+  const counterControlTaskId = "submission-counter-control";
+  const initialUrl = `${ats.baseUrl}/job-list.html?taskId=${selectionTaskId}`;
+  const canonicalUrl = `${ats.baseUrl}/job-detail.html?taskId=${selectionTaskId}&job=frontend-safety`;
+  const profileDir = await mkdtemp(join(tmpdir(), "resume-selection-safety-"));
   const database = createSqliteDatabase(":memory:");
+  let browser: BrowserWorkerClient | undefined;
+  let app: ReturnType<typeof Fastify> | undefined;
   try {
     migrateDatabase(database);
-    const jobMatchesRepository = createJobMatchRepository(database);
+    const initialized = await fetch(canonicalUrl);
+    expect(initialized.ok).toBe(true);
+
+    const positiveSubmission = await fetch(`${ats.baseUrl}/submit?taskId=${counterControlTaskId}`, {
+      method: "POST",
+      headers: { "content-type": "application/x-www-form-urlencoded" },
+      body: "syntheticControl=1"
+    });
+    expect(positiveSubmission.ok).toBe(true);
+    expect(ats.state(counterControlTaskId).submissionCount).toBe(1);
+
+    const approvalKey = Buffer.alloc(32, 41);
+    const policy = new ActionPolicy(approvalKey);
+    const browserOwnershipLease = new BrowserOwnershipLease();
+    browser = await BrowserWorkerClient.start({ profileDir, headless: true, approvalKey });
     const applicationTasks = createApplicationTaskRepository(database);
+    const taskEvents = createTaskEventBus(database);
+    const profileRepository = createProfileRepository(database);
+    const applicationService = createApplicationService({
+      checkpoints: createCheckpointRepository(database),
+      taskRepository: applicationTasks,
+      taskEvents,
+      browserOwnershipLease,
+      browser: {
+        open: (taskId, url) => browser!.open(taskId, url),
+        observe: async (taskId) => (await browser!.observe(taskId)).snapshot,
+        execute: (command, executionEpoch) => browser!.execute(command, executionEpoch),
+        invalidateExecution: (taskId, executionEpoch) => browser!.invalidateExecution(taskId, executionEpoch),
+        releaseTask: (taskId) => browser!.releaseTask(taskId),
+        onActivity: (listener) => browser!.onActivity(listener)
+      },
+      resolveField: async (_taskId, field) => {
+        const values: Record<string, string> = {
+          "邮箱": "synthetic@example.com",
+          "城市": "杭州",
+          "自我评价": "合成验收数据"
+        };
+        return field.label in values
+          ? { status: "verified" as const, value: values[field.label] }
+          : { status: "needs_question" as const, question: `请补充${field.label}` };
+      },
+      listProfileFacts: () => profileRepository.listActive(),
+      approve: (request, snapshot) => policy.approve(request, snapshot, {
+        valid: snapshot.errors.length === 0
+      }).token
+    });
+
+    const jobMatchesRepository = createJobMatchRepository(database);
     const conversations = createConversationRepository(database);
     const conversation = conversations.createConversation();
     const sessionId = "real-selection-session";
@@ -224,10 +284,12 @@ test("real select_result creates no application task and submits nothing to Synt
       repository: jobMatchesRepository,
       applicationTasks,
       browser: {
-        open: async () => undefined,
-        observeJob: async () => { throw new Error("unexpected browser observation"); }
+        open: (ownerId, url) => browser!.open(ownerId, url),
+        observeJob: (ownerId) => browser!.observeJob(ownerId),
+        invalidateExecution: (ownerId, executionEpoch) => browser!.invalidateExecution(ownerId, executionEpoch),
+        releaseTask: (ownerId) => browser!.releaseTask(ownerId)
       },
-      browserOwnershipLease: new BrowserOwnershipLease(),
+      browserOwnershipLease,
       adapters: [],
       expectationSnapshot: () => expectation,
       profileRevision: () => 1,
@@ -236,26 +298,70 @@ test("real select_result creates no application task and submits nothing to Synt
         runExtraction: async () => undefined
       },
       matcher: { match: async () => undefined },
-      submissionCount: () => ats.state(taskId).submissionCount
+      submissionCount: () => ats.state(selectionTaskId).submissionCount
     });
     const conversationJobMatches = createConversationJobMatchService({
       conversations,
       jobMatches,
       now: () => new Date("2026-09-06T00:00:01.000Z")
     });
+    app = Fastify();
+    registerApplicationRoutes(app, {
+      applicationService,
+      taskEvents,
+      tasks: applicationTasks,
+      profileRepository,
+    });
+    registerConversationJobMatchRoutes(app, { service: conversationJobMatches });
+    await app.ready();
 
-    const response = await conversationJobMatches.execute(conversation.id, {
-      conversationId: conversation.id,
-      sessionId,
-      action: "select_result",
-      sessionVersion: 0,
-      idempotencyKey: "real-select-result",
-      resultId: result.id,
-      resultVersion: result.version,
-      postingContentHash: result.postingContentHash
+    const applicationControl = await app.inject({
+      method: "POST",
+      url: "/api/applications",
+      payload: {
+        applicationUrl: `${ats.baseUrl}/application?taskId=${applicationControlTaskId}&scenario=default`
+      }
+    });
+    expect(applicationControl.statusCode).toBe(201);
+    const applicationTask = applicationControl.json() as { id: string; state: string };
+    for (let step = 0; step < 5 && applicationService.state(applicationTask.id).value !== "review_locked"; step += 1) {
+      await applicationService.runUntilPause(applicationTask.id);
+    }
+    const applicationState = await app.inject({ method: "GET", url: `/api/applications/${applicationTask.id}` });
+    expect(applicationState.statusCode).toBe(200);
+    expect(applicationState.json()).toMatchObject({ state: "review_locked" });
+    const terminalActions = (await browser.observe(applicationTask.id)).snapshot.actions
+      .filter((action) => action.class === "terminal_submit");
+    expect(terminalActions.length).toBeGreaterThan(0);
+    expect(ats.state(applicationControlTaskId)).toMatchObject({
+      submissionCount: 0,
+      draft: {
+        email: "synthetic@example.com",
+        city: "hangzhou",
+        selfEvaluation: "合成验收数据"
+      }
+    });
+    const deletedControl = await app.inject({ method: "DELETE", url: `/api/applications/${applicationTask.id}` });
+    expect(deletedControl.statusCode).toBe(204);
+    expect(applicationTasks.list()).toHaveLength(0);
+
+    const selectionResponse = await app.inject({
+      method: "POST",
+      url: `/api/conversations/${conversation.id}/job-match-actions`,
+      payload: {
+        conversationId: conversation.id,
+        sessionId,
+        action: "select_result",
+        sessionVersion: 0,
+        idempotencyKey: "real-select-result",
+        resultId: result.id,
+        resultVersion: result.version,
+        postingContentHash: result.postingContentHash
+      }
     });
 
-    expect(response).toMatchObject({ sessionId, state: "selected", version: 1 });
+    expect(selectionResponse.statusCode).toBe(200);
+    expect(selectionResponse.json()).toMatchObject({ sessionId, state: "selected", version: 1 });
     expect(jobMatchesRepository.get(sessionId, { required: true })).toMatchObject({
       state: "selected",
       version: 1,
@@ -263,9 +369,13 @@ test("real select_result creates no application task and submits nothing to Synt
       selectedPostingContentHash: result.postingContentHash
     });
     expect(applicationTasks.list()).toHaveLength(0);
-    expect(ats.state(taskId).submissionCount).toBe(0);
+    expect(ats.state(selectionTaskId).submissionCount).toBe(0);
+    expect(ats.state(counterControlTaskId).submissionCount).toBe(1);
   } finally {
+    await app?.close();
+    await browser?.stop();
     database.close();
+    await rm(profileDir, { recursive: true, force: true });
   }
 });
 
