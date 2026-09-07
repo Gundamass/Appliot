@@ -79,6 +79,30 @@ describe("SkillInterpreter", () => {
     }
   });
 
+  it("keeps dynamic job IDs stable when they match the same page variant", () => {
+    const interpreter = new SkillInterpreter();
+    const skill = skillFixture();
+    skill.content.pageVariants[0]!.match.routePatterns = ["/jobs/detail/GRADUATE/**/apply"];
+    const first = interpreter.matchPage({
+      ...observationFixture(),
+      route: "/jobs/detail/GRADUATE/123/apply"
+    }, skill);
+    const second = interpreter.matchPage({
+      ...observationFixture(),
+      route: "/jobs/detail/GRADUATE/456/apply",
+      fields: [
+        ...observationFixture().fields,
+        { semantic: "basics.wechat", empty: true }
+      ]
+    }, skill);
+
+    expect(first.kind).toBe("matched");
+    expect(second.kind).toBe("matched");
+    if (first.kind === "matched" && second.kind === "matched") {
+      expect(second.fingerprintHash).toBe(first.fingerprintHash);
+    }
+  });
+
   it("returns origin and fingerprint misses without compiling directives", () => {
     const interpreter = new SkillInterpreter();
     const skill = skillFixture();

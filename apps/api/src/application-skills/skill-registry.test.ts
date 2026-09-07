@@ -276,6 +276,17 @@ describe("SkillRegistry", () => {
     expect(database.prepare(`
       SELECT champion_percent, challenger_percent FROM skill_traffic_allocations
     `).get()).toEqual({ champion_percent: 100, challenger_percent: 0 });
+    expect(registry.getPageAllocation({
+      site: key.site,
+      pageFingerprintHash: key.pageFingerprintHash
+    })).toEqual({
+      allocationId: "allocation-main",
+      ...key,
+      championVersion: "1.0.0",
+      championPercent: 100,
+      challengerPercent: 0,
+      updatedAt: "2026-09-07T08:00:00.000Z"
+    });
   });
 
   it("appends validated audit records and database triggers reject updates and deletes", () => {

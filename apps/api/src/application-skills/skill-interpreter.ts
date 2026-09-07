@@ -81,7 +81,7 @@ export class SkillInterpreter {
     const match: PageMatch = Object.freeze({
       kind: "matched",
       pageVariantId: first.id,
-      fingerprintHash: fingerprint(observation, skill.pageFingerprintRule.ruleHash)
+      fingerprintHash: fingerprint(observation, skill.pageFingerprintRule.ruleHash, first.id)
     });
     this.matches.set(match, { observation, skill, pageVariantId: first.id });
     return match;
@@ -295,15 +295,15 @@ function pushDirective(directives: SkillDirective[], input: SkillDirective): voi
   directives.push(SkillDirectiveSchema.parse(input));
 }
 
-function fingerprint(observation: NormalizedSkillPageObservation, ruleHash: string): string {
+function fingerprint(
+  observation: NormalizedSkillPageObservation,
+  ruleHash: string,
+  pageVariantId: string
+): string {
   return createHash("sha256").update(canonicalJson({
     ruleHash,
     origin: observation.origin,
-    route: observation.route,
-    landmarks: [...observation.landmarks].sort(),
-    fields: [...observation.fields]
-      .map((field) => field.semantic)
-      .sort((left, right) => left.localeCompare(right))
+    pageVariantId
   }), "utf8").digest("hex");
 }
 

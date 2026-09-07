@@ -1,12 +1,13 @@
-import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   ApplicationSkillVersionSchema,
   SkillBindingSchema,
   type ApplicationSkillVersion,
+  type FormSnapshot,
   type SkillBinding
 } from "@resume/contracts";
 import {
+  createApplicationSkillRuntime,
   SkillSelector,
   type SkillBindingStorePort,
   type SkillPageAllocation,
@@ -16,28 +17,20 @@ import {
 const PAGE_HASH = "c".repeat(64);
 
 describe("SkillSelector", () => {
-  it("selects champion or challenger by a deterministic task bucket", async () => {
+  it("selects only the Champion before controlled live allocation is enabled", async () => {
     const allocation = allocationFixture({ championPercent: 50, challengerPercent: 50 });
     const registry = new FakeRegistry(allocation, [
       skillFixture("1.0.0", "champion"),
       skillFixture("1.1.0", "challenger")
     ]);
-    const championTask = findTaskId(allocation.allocationId, (bucket) => bucket >= 50);
-    const challengerTask = findTaskId(allocation.allocationId, (bucket) => bucket < 50);
 
-    const champion = await new SkillSelector(registry, new MemoryBindingStore()).selectForTask({
-      taskId: championTask,
-      site: "baidu",
-      pageFingerprintHash: PAGE_HASH
-    });
-    const challenger = await new SkillSelector(registry, new MemoryBindingStore()).selectForTask({
-      taskId: challengerTask,
+    const selection = await new SkillSelector(registry, new MemoryBindingStore()).selectForTask({
+      taskId: "task-before-live-allocation",
       site: "baidu",
       pageFingerprintHash: PAGE_HASH
     });
 
-    expect(champion).toMatchObject({ kind: "selected", binding: { version: "1.0.0" } });
-    expect(challenger).toMatchObject({ kind: "selected", binding: { version: "1.1.0" } });
+    expect(selection).toMatchObject({ kind: "selected", binding: { version: "1.0.0" } });
   });
 
   it("persists only a strict SkillBinding and returns the same binding after restart and promotion", async () => {
@@ -147,11 +140,98 @@ describe("SkillSelector", () => {
 
     expect(result).toMatchObject({ kind: "selected", binding: { version: "1.0.0" } });
   });
+
+  it("matches the observed application page before pinning and compiles finite directives", async () => {
+    const store = new MemoryBindingStore();
+    const registry = new FakeRegistry(undefined, [skillFixture("1.0.0", "champion")]);
+    const runtime = createApplicationSkillRuntime({ registry, bindingStoreFor: () => store });
+
+    const result = await runtime.resolve({
+      runId: "run-matched",
+      taskId: "task-matched",
+      snapshot: applicationSnapshot()
+    });
+
+    expect(result).toMatchObject({
+      kind: "selected",
+      binding: { skillId: "baidu-application", version: "1.0.0", site: "baidu" },
+      directives: expect.arrayContaining([{ kind: "verify-field", semantic: "basics.name" }])
+    });
+    expect(registry.boundPages).toHaveLength(1);
+    expect(store.persistedCount).toBe(1);
+  });
+
+  it("does not pin or write registry allocation state for an unmatched company landing page", async () => {
+    const store = new MemoryBindingStore();
+    const registry = new FakeRegistry(undefined, [skillFixture("1.0.0", "champion")]);
+    const runtime = createApplicationSkillRuntime({ registry, bindingStoreFor: () => store });
+
+    const result = await runtime.resolve({
+      runId: "run-unmatched",
+      taskId: "task-unmatched-page",
+      snapshot: applicationSnapshot({ url: "https://talent.baidu.com/jobs/campus" })
+    });
+
+    expect(result).toEqual({ kind: "observe_only_handoff", reason: "page_unmatched" });
+    expect(registry.boundPages).toHaveLength(0);
+    expect(store.putAttempts).toBe(0);
+  });
+
+  it("does not overwrite an existing controlled allocation while pinning the Champion", async () => {
+    const store = new MemoryBindingStore();
+    const registry = new FakeRegistry(undefined, [skillFixture("1.0.0", "champion")]);
+    const runtime = createApplicationSkillRuntime({ registry, bindingStoreFor: () => store });
+    const first = await runtime.resolve({
+      runId: "run-allocation",
+      taskId: "task-allocation-first",
+      snapshot: applicationSnapshot()
+    });
+    expect(first.kind).toBe("selected");
+    const controlled = {
+      ...registry.allocation!,
+      challengerVersion: "1.1.0",
+      championPercent: 90,
+      challengerPercent: 10
+    };
+    registry.allocation = controlled;
+
+    const second = await runtime.resolve({
+      runId: "run-allocation-2",
+      taskId: "task-allocation-second",
+      snapshot: applicationSnapshot({ taskId: "task-allocation-second" })
+    });
+
+    expect(second).toMatchObject({ kind: "selected", binding: { version: "1.0.0" } });
+    expect(registry.allocation).toEqual(controlled);
+    expect(registry.boundPages).toHaveLength(1);
+  });
+
+  it("fails closed when an already-bound task is redirected outside its Skill domain", async () => {
+    const store = new MemoryBindingStore();
+    const registry = new FakeRegistry(undefined, [skillFixture("1.0.0", "champion")]);
+    const runtime = createApplicationSkillRuntime({ registry, bindingStoreFor: () => store });
+    const first = await runtime.resolve({
+      runId: "run-cross-origin",
+      taskId: "task-cross-origin",
+      snapshot: applicationSnapshot()
+    });
+    if (first.kind !== "selected") throw new Error("expected initial Skill binding");
+
+    const redirected = await runtime.resolve({
+      runId: "run-cross-origin",
+      taskId: "task-cross-origin",
+      binding: first.binding,
+      snapshot: applicationSnapshot({ url: "https://evil.example/apply" })
+    });
+
+    expect(redirected).toEqual({ kind: "observe_only_handoff", reason: "page_unmatched" });
+  });
 });
 
 class FakeRegistry implements SkillRegistrySelectionPort {
   public allocationReads = 0;
   public readonly versions = new Map<string, unknown>();
+  public readonly boundPages: SkillBinding[] = [];
 
   public constructor(
     public allocation: SkillPageAllocation | undefined,
@@ -169,6 +249,21 @@ class FakeRegistry implements SkillRegistrySelectionPort {
 
   public async getVersion(skillId: string, version: string): Promise<unknown> {
     return this.versions.get(`${skillId}@${version}`);
+  }
+
+  public getChampionForSite(site: SkillBinding["site"]): unknown {
+    return [...this.versions.values()].find((value) => {
+      const parsed = ApplicationSkillVersionSchema.safeParse(value);
+      return parsed.success && parsed.data.site === site && parsed.data.status === "champion";
+    });
+  }
+
+  public bindPage(binding: SkillBinding): void {
+    this.boundPages.push(binding);
+  }
+
+  public setAllocation(input: SkillPageAllocation): void {
+    this.allocation = input;
   }
 }
 
@@ -259,11 +354,27 @@ function skillFixture(
   });
 }
 
-function findTaskId(allocationId: string, predicate: (bucket: number) => boolean): string {
-  for (let index = 0; index < 10_000; index += 1) {
-    const taskId = `task-${index}`;
-    const digest = createHash("sha256").update(`${taskId}\0${allocationId}`, "utf8").digest();
-    if (predicate(digest.readUInt32BE(0) % 100)) return taskId;
-  }
-  throw new Error("test_task_bucket_not_found");
+function applicationSnapshot(overrides: Partial<FormSnapshot> = {}): FormSnapshot {
+  return {
+    id: "snapshot-application",
+    taskId: "task-matched",
+    url: "https://talent.baidu.com/jobs/application",
+    title: "Application",
+    stage: "application_form",
+    frameRef: { documentId: "document-application", kind: "main" },
+    mutationEpoch: 1,
+    fields: [{
+      id: "candidate-name",
+      label: "Name",
+      type: "text",
+      required: true,
+      options: [],
+      currentValue: "",
+      semanticHint: "basics.name",
+      nodeRef: { documentId: "document-application", nodeId: "node-candidate-name", observedAt: 1 }
+    }],
+    actions: [],
+    errors: [],
+    ...overrides
+  };
 }

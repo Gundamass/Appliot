@@ -83,6 +83,18 @@ interface BoundVersionRow {
   active_status: "challenger" | "champion" | null;
 }
 
+interface SkillTrafficAllocationRow {
+  allocation_id: string;
+  skill_id: string;
+  site: SkillSite;
+  page_fingerprint_hash: string;
+  champion_version: string;
+  challenger_version: string | null;
+  champion_percent: number;
+  challenger_percent: number;
+  updated_at: string;
+}
+
 const SKILL_ID = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 const HASH = /^[a-f0-9]{64}$/u;
@@ -162,6 +174,46 @@ export class SkillRegistry {
       SELECT * FROM skill_versions WHERE skill_id = ? AND version = ?
     `).get(skillId, version) as SkillVersionRow | undefined;
     return row === undefined ? undefined : versionFromRow(row);
+  }
+
+  public getChampionForSite(site: SkillSite): ApplicationSkillVersion | undefined {
+    validateSite(site);
+    const rows = this.database.prepare(`
+      SELECT * FROM skill_versions
+      WHERE site = ? AND status = 'champion'
+      ORDER BY skill_id ASC, version DESC
+      LIMIT 2
+    `).all(site) as SkillVersionRow[];
+    return rows.length === 1 ? versionFromRow(rows[0]!) : undefined;
+  }
+
+  public getPageAllocation(input: {
+    site: SkillSite;
+    pageFingerprintHash: string;
+  }): SkillTrafficAllocationInput | undefined {
+    validateSite(input.site);
+    validateHash(input.pageFingerprintHash);
+    const row = this.database.prepare(`
+      SELECT allocation_id, skill_id, site, page_fingerprint_hash,
+             champion_version, challenger_version, champion_percent,
+             challenger_percent, updated_at
+      FROM skill_traffic_allocations
+      WHERE site = ? AND page_fingerprint_hash = ?
+      ORDER BY updated_at DESC, allocation_id ASC
+      LIMIT 1
+    `).get(input.site, input.pageFingerprintHash) as SkillTrafficAllocationRow | undefined;
+    if (row === undefined) return undefined;
+    return {
+      allocationId: row.allocation_id,
+      skillId: row.skill_id,
+      site: row.site,
+      pageFingerprintHash: row.page_fingerprint_hash,
+      championVersion: row.champion_version,
+      ...(row.challenger_version === null ? {} : { challengerVersion: row.challenger_version }),
+      championPercent: row.champion_percent,
+      challengerPercent: row.challenger_percent,
+      updatedAt: row.updated_at
+    };
   }
 
   public bindPage(input: SkillBinding): void {
