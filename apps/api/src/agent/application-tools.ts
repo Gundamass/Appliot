@@ -2,6 +2,7 @@ import { createHash, randomUUID } from "node:crypto";
 import type {
   ApplicationContentReview,
   ApplicationFieldAssessment,
+  ApplicationFieldSemantic,
   ExecutableCommand,
   FormField,
   FormSnapshot,
@@ -60,6 +61,8 @@ export interface BuildFillPlanInput {
   snapshot: FormSnapshot;
   resolutions: FieldResolutionBatch;
   executionEpoch: number;
+  /** Skill-provided ordering only; command authorization and NodeRef checks remain local. */
+  skillSemanticOrder?: readonly ApplicationFieldSemantic[];
 }
 
 export interface BuildNavigationPlanInput {
@@ -260,12 +263,13 @@ export function createApplicationTools(dependencies: ApplicationToolDependencies
       if (known === undefined || known !== input.resolutions || known.snapshotId !== input.snapshot.id) {
         throw new Error("resolution_batch_invalid");
       }
-      const candidate = known.resolutions.find(({ field, status, value, requiresContentReview }) =>
+      const candidates = known.resolutions.filter(({ field, status, value, requiresContentReview }) =>
         status === "verified"
         && !requiresContentReview
         && value !== undefined
         && !hasValue(input.snapshot.fields.find((item) => item.id === field.id)?.currentValue)
       );
+      const candidate = selectSkillOrderedResolution(candidates, input.skillSemanticOrder);
       if (candidate === undefined) return [];
 
       reserveEpoch(input.taskId, input.executionEpoch);
@@ -603,6 +607,21 @@ function hasValue(value: unknown): boolean {
   if (typeof value === "string") return value.trim().length > 0;
   if (Array.isArray(value)) return value.length > 0;
   return value !== undefined && value !== null && value !== false;
+}
+
+function selectSkillOrderedResolution(
+  resolutions: readonly ResolvedApplicationField[],
+  semanticOrder: readonly ApplicationFieldSemantic[] | undefined
+): ResolvedApplicationField | undefined {
+  if (semanticOrder === undefined) return resolutions[0];
+  if (semanticOrder.length === 0) return undefined;
+  for (const semantic of semanticOrder) {
+    const candidate = resolutions.find((resolution) =>
+      resolution.field.semanticHint === semantic || resolution.fieldPath === semantic
+    );
+    if (candidate !== undefined) return candidate;
+  }
+  return undefined;
 }
 
 function isHumanAcknowledgement(field: FormField): boolean {

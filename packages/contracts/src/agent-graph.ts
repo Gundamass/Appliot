@@ -1,4 +1,5 @@
 import { z } from "zod";
+import { SkillBindingSchema } from "./application-skill.js";
 
 export const GraphStatusSchema = z.enum(["running", "interrupted", "completed", "failed", "cancelled"]);
 export const SubgraphNameSchema = z.enum(["resume_ingestion", "job_matching", "application"]);
@@ -43,7 +44,7 @@ export const ApplicationExecutionStateSchema = z.object({
   applicationUrl: z.string().url(), snapshotId: z.string().optional(), executionEpoch: z.number().int().nonnegative(),
   fieldIds: z.array(z.string()).optional(), plannedCommandIds: z.array(z.string()).optional(),
   completedCommandIds: z.array(z.string()).optional(), retryCount: z.number().int().min(0).max(1),
-  finalReviewLocked: z.boolean()
+  finalReviewLocked: z.boolean(), skillBinding: SkillBindingSchema.optional()
 }).strict();
 export const AgentGraphStateSchema = z.object({
   threadId: z.string().min(1), runId: z.string().min(1), taskId: z.string().min(1),

@@ -262,4 +262,67 @@ describe("ApplicationTools", () => {
       .resolves.toBeUndefined();
     expect(browser.execute).not.toHaveBeenCalled();
   });
+
+  it("uses Skill semantic order while retaining the existing safe plan builder", async () => {
+    const nameField = field({
+      id: "field-name",
+      label: "Name",
+      semanticHint: "basics.name",
+      nodeRef: nodeRef("node-field-name")
+    });
+    const emailField = field();
+    const page = snapshot({ fields: [emailField, nameField] });
+    const tools = createApplicationTools({
+      browser: {
+        observe: vi.fn(async () => page),
+        execute: vi.fn(async (command) => executionResult(command.type, page))
+      },
+      resolveField: async (_task, current) => ({
+        status: "verified" as const,
+        value: current.id === "field-name" ? "Candidate" : "me@example.com",
+        ...(current.semanticHint === undefined ? {} : { fieldPath: current.semanticHint })
+      }),
+      approve: () => "approved-token"
+    });
+    const observed = await tools.observe(taskId);
+    const resolutions = await tools.resolveFields({
+      taskId,
+      snapshot: observed,
+      profileRevision: 1,
+      phase: "deterministic"
+    });
+
+    const [draft] = await tools.buildPlan({
+      taskId,
+      snapshot: observed,
+      resolutions,
+      executionEpoch: 1,
+      skillSemanticOrder: ["basics.name", "basics.email"]
+    });
+
+    expect(draft).toMatchObject({ fieldId: "field-name", value: "Candidate" });
+    await expect(tools.authorize(draft!, observed)).resolves.toMatchObject({
+      fieldId: "field-name",
+      approval: "approved-token"
+    });
+  });
+
+  it("does not plan a write when the selected Skill declares no resolvable field", async () => {
+    const { tools } = createHarness();
+    const observed = await tools.observe(taskId);
+    const resolutions = await tools.resolveFields({
+      taskId,
+      snapshot: observed,
+      profileRevision: 1,
+      phase: "deterministic"
+    });
+
+    await expect(tools.buildPlan({
+      taskId,
+      snapshot: observed,
+      resolutions,
+      executionEpoch: 1,
+      skillSemanticOrder: []
+    })).resolves.toEqual([]);
+  });
 });
