@@ -387,6 +387,38 @@ describe("migrateDatabase", () => {
     database.close();
   });
 
+  it("creates application Skill persistence idempotently", () => {
+    const database = new Database(":memory:");
+
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    expect(database.prepare(`
+      SELECT name FROM sqlite_master
+      WHERE type = 'table' AND name IN (
+        'skill_versions',
+        'skill_page_bindings',
+        'skill_traffic_allocations',
+        'skill_execution_records',
+        'skill_evaluations',
+        'skill_evolution_runs',
+        'skill_replay_samples',
+        'skill_replay_run_samples'
+      )
+      ORDER BY name
+    `).all()).toEqual([
+      { name: "skill_evaluations" },
+      { name: "skill_evolution_runs" },
+      { name: "skill_execution_records" },
+      { name: "skill_page_bindings" },
+      { name: "skill_replay_run_samples" },
+      { name: "skill_replay_samples" },
+      { name: "skill_traffic_allocations" },
+      { name: "skill_versions" }
+    ]);
+    database.close();
+  });
+
   it("creates the LangSmith outbox schema idempotently", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

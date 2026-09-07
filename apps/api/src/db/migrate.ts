@@ -4,6 +4,7 @@ import {
   LEGACY_CONVERSATION_TITLE,
   conversationTitleFromFirstMessage
 } from "../conversations/conversation-title.js";
+import { migrateApplicationSkillSchema } from "../application-skills/skill-schema-migration.js";
 
 export function migrateDatabase(database: SqliteDatabase): void {
   upgradeConversationProcessEvents(database);
@@ -535,6 +536,8 @@ export function migrateDatabase(database: SqliteDatabase): void {
     WHEN NOT ((NEW.scope = 'profile' AND NEW.task_id IS NULL) OR (NEW.scope = 'application' AND NEW.task_id IS NOT NULL))
     BEGIN SELECT RAISE(ABORT, 'fact revision scope and task mismatch'); END;
   `);
+
+  migrateApplicationSkillSchema(database);
 }
 
 function upgradeChallengeStateConstraints(database: SqliteDatabase): void {
