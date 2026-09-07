@@ -216,12 +216,30 @@ function variantScore(
     observation.landmarks.some((landmark) => landmark.includes(normalizeText(required))));
   const semantics = new Set(observation.fields.map((field) => field.semantic));
   const semanticScore = ratio(signature.requiredFields, (required) => semantics.has(required));
+  if (signature.requiredFields.length > 0 && semanticScore < 1) return 0;
   return routeScore * 0.5 + landmarkScore * 0.25 + semanticScore * 0.25;
 }
 
 function routeMatches(route: string, patternValue: string): boolean {
   const pattern = normalizeRoute(patternValue);
+  if (pattern.includes("*")) return wildcardRoutePattern(pattern).test(route);
   return route === pattern || route.startsWith(pattern.endsWith("/") ? pattern : `${pattern}/`);
+}
+
+function wildcardRoutePattern(pattern: string): RegExp {
+  let source = "^";
+  for (let index = 0; index < pattern.length; index += 1) {
+    const character = pattern[index]!;
+    if (character === "*" && pattern[index + 1] === "*") {
+      source += ".*";
+      index += 1;
+    } else if (character === "*") {
+      source += "[^/]*";
+    } else {
+      source += character.replace(/[\\^$.*+?()[\]{}|]/gu, "\\$&");
+    }
+  }
+  return new RegExp(`${source}$`, "u");
 }
 
 function ratio<T>(values: readonly T[], predicate: (value: T) => boolean): number {
@@ -275,10 +293,8 @@ function fingerprint(observation: NormalizedSkillPageObservation, ruleHash: stri
     route: observation.route,
     landmarks: [...observation.landmarks].sort(),
     fields: [...observation.fields]
-      .map((field) => ({ semantic: field.semantic, empty: field.empty }))
-      .sort((left, right) => left.semantic.localeCompare(right.semantic)),
-    availableCapabilities: [...observation.availableCapabilities].sort(),
-    challengePresent: observation.challengePresent
+      .map((field) => field.semantic)
+      .sort((left, right) => left.localeCompare(right))
   }), "utf8").digest("hex");
 }
 

@@ -24,6 +24,44 @@ describe("SkillInterpreter", () => {
     expect(interpreter.matchPage(observationFixture(), skillFixture())).toEqual(match);
   });
 
+  it("matches bounded wildcard application routes used by seeded Skills", () => {
+    const interpreter = new SkillInterpreter();
+    const skill = skillFixture();
+    skill.content.pageVariants[0]!.match.routePatterns = ["/jobs/detail/GRADUATE/**/apply"];
+
+    expect(interpreter.matchPage({
+      ...observationFixture(),
+      route: "/jobs/detail/GRADUATE/bcde01c3-883b-4d2f-a6a6-7abafb95b642/apply"
+    }, skill)).toMatchObject({ kind: "matched", pageVariantId: "personal-form" });
+  });
+
+  it("does not match a job detail page that lacks required form semantics", () => {
+    const interpreter = new SkillInterpreter();
+
+    expect(interpreter.matchPage({
+      ...observationFixture(),
+      fields: []
+    }, skillFixture())).toEqual({ kind: "unmatched", reason: "fingerprint" });
+  });
+
+  it("keeps the structural fingerprint stable across values and challenges", () => {
+    const interpreter = new SkillInterpreter();
+    const skill = skillFixture();
+    const first = interpreter.matchPage(observationFixture(), skill);
+    const second = interpreter.matchPage({
+      ...observationFixture(),
+      fields: observationFixture().fields.map((field) => ({ ...field, empty: !field.empty })),
+      availableCapabilities: ["observe", "readback", "full_page_audit"],
+      challengePresent: true
+    }, skill);
+
+    expect(first.kind).toBe("matched");
+    expect(second.kind).toBe("matched");
+    if (first.kind === "matched" && second.kind === "matched") {
+      expect(second.fingerprintHash).toBe(first.fingerprintHash);
+    }
+  });
+
   it("returns origin and fingerprint misses without compiling directives", () => {
     const interpreter = new SkillInterpreter();
     const skill = skillFixture();
