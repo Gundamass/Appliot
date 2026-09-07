@@ -184,7 +184,6 @@ function patchWithStaticText(position: TextBearingPosition, value: string) {
 }
 
 const unsafeStaticTexts = [
-  "姓名：张三",
   "candidate@example.com",
   "13800138000",
   "https://evil.example/collect",
@@ -201,6 +200,130 @@ const unsafeStaticTexts = [
 ] as const;
 
 const textBearingPositions = ["label", "role", "placeholder", "requiredText"] as const;
+
+type EvolvableIdentifierPosition =
+  | "locatorKey"
+  | "pageVariantId"
+  | "workflowEntry"
+  | "workflowStepId"
+  | "workflowNext"
+  | "conditionVariantId";
+
+const evolvableIdentifierPositions = [
+  "locatorKey",
+  "pageVariantId",
+  "workflowEntry",
+  "workflowStepId",
+  "workflowNext",
+  "conditionVariantId"
+] as const;
+
+const unsafeIdentifierValues = [
+  "approval-token-secret",
+  "workflow-13800138000",
+  "candidate-abcdefab-cdef-abcd-efab-cdefabcdefab",
+  "a".repeat(64),
+  "qwxhzgrpbjppcgvuu2vzyw1lvg9rzw5wywx1zq"
+] as const;
+
+const unsafeRoutePatterns = [
+  "/profile/13800138000",
+  "/apply/candidate@example.com",
+  "/apply/approval-token-secret",
+  "/apply/abcdefab-cdef-abcd-efab-cdefabcdefab",
+  `/apply/${"a".repeat(64)}`,
+  "/apply/eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturePart123456",
+  "/apply/QWxhZGRpbjpPcGVuU2VzYW1lVG9rZW5WYWx1ZQ",
+  "/api/v1/profile",
+  "/home/admin/resume.txt",
+  "/redirect/https://evil.example/collect"
+] as const;
+
+function contentWithIdentifier(position: EvolvableIdentifierPosition, value: string) {
+  switch (position) {
+    case "locatorKey":
+      return replaceFirstLocator({ key: value, by: "label", text: "姓名" });
+    case "pageVariantId":
+      return {
+        ...baiduCampusSkill,
+        pageVariants: [{ ...baiduCampusSkill.pageVariants[0], id: value }]
+      };
+    case "workflowEntry":
+      return {
+        ...baiduCampusSkill,
+        pageVariants: [{ ...baiduCampusSkill.pageVariants[0], workflowEntry: value }]
+      };
+    case "workflowStepId":
+      return {
+        ...baiduCampusSkill,
+        workflow: [{ ...baiduCampusSkill.workflow[0], id: value }, ...baiduCampusSkill.workflow.slice(1)]
+      };
+    case "workflowNext":
+      return {
+        ...baiduCampusSkill,
+        workflow: [{ ...baiduCampusSkill.workflow[0], next: value }, ...baiduCampusSkill.workflow.slice(1)]
+      };
+    case "conditionVariantId":
+      return {
+        ...baiduCampusSkill,
+        workflow: [{
+          ...baiduCampusSkill.workflow[0],
+          when: { kind: "page-variant", variantId: value }
+        }, ...baiduCampusSkill.workflow.slice(1)]
+      };
+  }
+}
+
+function patchWithIdentifier(position: EvolvableIdentifierPosition, value: string) {
+  if (position === "locatorKey") {
+    return {
+      parentContentHash: hash,
+      operations: [{
+        op: "add",
+        path: "/fields/-",
+        value: {
+          semantic: "basics.email",
+          controlTypes: ["text"],
+          locatorHints: [{ key: value, by: "label", text: "邮箱" }]
+        }
+      }]
+    };
+  }
+  if (position === "pageVariantId" || position === "workflowEntry") {
+    return {
+      parentContentHash: hash,
+      operations: [{
+        op: "add",
+        path: "/pageVariants/-",
+        value: {
+          id: position === "pageVariantId" ? value : "safe-page-variant",
+          match: {
+            routePatterns: ["/jobs/campus/apply/**"],
+            requiredTexts: ["教育经历"],
+            requiredFields: ["basics.name"]
+          },
+          workflowEntry: position === "workflowEntry" ? value : "observe-form"
+        }
+      }]
+    };
+  }
+  return {
+    parentContentHash: hash,
+    operations: [{
+      op: "add",
+      path: "/workflow/-",
+      value: {
+        id: position === "workflowStepId" ? value : "safe-audit-step",
+        ...(position === "conditionVariantId"
+          ? { when: { kind: "page-variant", variantId: value } }
+          : {}),
+        actions: [{ capability: "full_page_audit" }],
+        success: ["audit_clean"],
+        next: position === "workflowNext" ? value : "continue_or_wait"
+      }
+    }]
+  };
+}
 
 describe("ApplicationSkillContentSchema", () => {
   it("accepts a closed Baidu campus application skill", () => {
@@ -296,6 +419,51 @@ describe("ApplicationSkillContentSchema", () => {
 
   it("preserves legitimate short Chinese ATS labels", () => {
     expect(() => ApplicationSkillContentSchema.parse(baiduCampusSkill)).not.toThrow();
+  });
+
+  it.each(["JavaScript experience", "XPath proficiency", "Name: Required", "姓名：必填"])(
+    "preserves legitimate literal static UI text: %s",
+    (text) => {
+      for (const position of textBearingPositions) {
+        expect(
+          () => ApplicationSkillContentSchema.parse(contentWithStaticText(position, text)),
+          `${position} rejected ${text}`
+        ).not.toThrow();
+      }
+    }
+  );
+
+  it.each(evolvableIdentifierPositions)("rejects risky persisted content identifiers in %s", (position) => {
+    for (const value of unsafeIdentifierValues) {
+      expect(
+        () => ApplicationSkillContentSchema.parse(contentWithIdentifier(position, value)),
+        `${position} accepted ${value}`
+      ).toThrow();
+    }
+  });
+
+  it("rejects risky stable attribute values in content", () => {
+    for (const value of unsafeIdentifierValues) {
+      expect(() => ApplicationSkillContentSchema.parse(replaceFirstLocator({
+        key: "stable-attribute",
+        by: "stable_attribute",
+        attribute: "data-testid",
+        value
+      })), `stable attribute accepted ${value}`).toThrow();
+    }
+  });
+
+  it("rejects risky relative route patterns in content", () => {
+    for (const routePattern of unsafeRoutePatterns) {
+      const candidate = {
+        ...baiduCampusSkill,
+        pageVariants: [{
+          ...baiduCampusSkill.pageVariants[0],
+          match: { ...baiduCampusSkill.pageVariants[0].match, routePatterns: [routePattern] }
+        }]
+      };
+      expect(() => ApplicationSkillContentSchema.parse(candidate), `route accepted ${routePattern}`).toThrow();
+    }
   });
 
   it("rejects dynamic identifiers in restricted CSS attribute values", () => {
@@ -459,6 +627,55 @@ describe("application skill registry and runtime contracts", () => {
         () => SkillEvolutionPatchSchema.parse(patchWithStaticText(position, unsafeText)),
         `${position} patch accepted ${unsafeText}`
       ).toThrow();
+    }
+  });
+
+  it.each(evolvableIdentifierPositions)("rejects risky persisted typed patch identifiers in %s", (position) => {
+    for (const value of unsafeIdentifierValues) {
+      expect(
+        () => SkillEvolutionPatchSchema.parse(patchWithIdentifier(position, value)),
+        `${position} patch accepted ${value}`
+      ).toThrow();
+    }
+  });
+
+  it("rejects risky stable attributes and routes in typed patch values", () => {
+    for (const value of unsafeIdentifierValues) {
+      expect(() => SkillEvolutionPatchSchema.parse({
+        parentContentHash: hash,
+        operations: [{
+          op: "add",
+          path: "/fields/-",
+          value: {
+            semantic: "basics.email",
+            controlTypes: ["text"],
+            locatorHints: [{
+              key: "stable-attribute",
+              by: "stable_attribute",
+              attribute: "data-testid",
+              value
+            }]
+          }
+        }]
+      }), `stable attribute patch accepted ${value}`).toThrow();
+    }
+    for (const routePattern of unsafeRoutePatterns) {
+      expect(() => SkillEvolutionPatchSchema.parse({
+        parentContentHash: hash,
+        operations: [{
+          op: "add",
+          path: "/pageVariants/-",
+          value: {
+            id: "safe-page-variant",
+            match: {
+              routePatterns: [routePattern],
+              requiredTexts: ["教育经历"],
+              requiredFields: ["basics.name"]
+            },
+            workflowEntry: "observe-form"
+          }
+        }]
+      }), `route patch accepted ${routePattern}`).toThrow();
     }
   });
 

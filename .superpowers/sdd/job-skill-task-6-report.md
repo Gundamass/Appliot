@@ -46,7 +46,7 @@ Fixes:
 - `full_page_audit` is mandatory in both declared capabilities and workflow actions.
 - Capability/workflow replacement patches preserve that boundary; context-free indexed removals from those sections are forbidden.
 - Reusable `SafeStaticUiHintSchema` now protects label, role-name, placeholder, and required-text fields in both direct content and typed patch values.
-- High-signal email, mainland phone, explicit name assignment, URL/scheme, filesystem/API path, XPath, JavaScript/code, UUID/hash/JWT/base64-like or long opaque token, approval/token/secret channels are rejected.
+- High-signal email, mainland phone, URL/scheme, filesystem/API path, executable XPath/JavaScript syntax, UUID/hash/JWT/base64-like or long opaque token, approval/token/secret channels are rejected.
 - Restricted CSS attribute values are parsed and checked by the same stable-attribute validator, including long numeric IDs and embedded UUIDs.
 
 Reviewer GREEN verification:
@@ -58,3 +58,31 @@ Reviewer GREEN verification:
 - Root typecheck: exit 0.
 
 Static hint filtering intentionally does not claim perfect PII detection: a bare two-character human name cannot be distinguished reliably from a legitimate short ATS label. Task 8 must validate every hint against observed static page text and the registered site origin before a Skill can be activated.
+
+## Second reviewer fix cycle
+
+The second review found that evolvable identifiers, stable attributes, and relative route patterns could still retain risky literals, while the static UI filter rejected harmless literal labels too broadly.
+
+Second-review RED command:
+
+`rtk corepack pnpm --filter @resume/contracts exec vitest run src/application-skill.test.ts`
+
+Result: exit 1; 19 failed / 36 passed. Failures covered six persisted evolvable identifier positions in direct content and typed patches, stable attributes, profile-value/API/local/credential-bearing route patterns, and the legitimate-label retention set.
+
+Fixes:
+
+- A shared persisted-literal risk refinement now rejects credential markers, mainland phone numbers, email addresses, URL schemes, UUIDs, hashes, JWTs, base64-like values, and long opaque values wherever the channel grammar permits.
+- Every evolvable identifier/key, page-variant/workflow reference, stable attribute, relative route pattern, and static UI hint uses the appropriate shared refinement.
+- Relative route patterns and static hints additionally reject local filesystem and API paths where those grammars permit them.
+- Static hints reject only executable-shaped code/XPath literals such as `javascript:alert(...)`, `document.querySelector(...)`, `eval(...)`, and `//input[@...]`; literal labels `JavaScript experience`, `XPath proficiency`, `Name: Required`, and `姓名：必填` remain valid.
+- Runtime-generated task, record, attempt, allocation, and evolution-run IDs retain a separate grammar-only opaque identifier Schema so legitimate UUID identities are not mistaken for evolvable content.
+
+Second-review GREEN verification:
+
+- Focused Skill test: 1 file passed, 55/55 tests passed.
+- Required combined test: 2 files passed, 57/57 tests passed.
+- Full contracts regression: 17 files passed, 163/163 tests passed.
+- Contracts typecheck: exit 0.
+- Root typecheck: exit 0.
+
+Natural-language profile overlap cannot be decided safely from syntax alone. Task 8 remains responsible for proving that accepted static hints originate from the observed page at the registered origin before activation.

@@ -1,10 +1,13 @@
 import { z } from "zod";
 import { NodeRefSchema } from "./browser.js";
 
-const IdentifierSchema = z.string()
+const RuntimeIdentifierSchema = z.string()
   .min(1)
   .max(128)
   .regex(/^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u);
+const IdentifierSchema = RuntimeIdentifierSchema.superRefine((value, context) => {
+  addPersistedLiteralRiskIssue(value, context, "unsafe_persisted_identifier");
+});
 const SemanticVersionSchema = z.string()
   .max(64)
   .regex(/^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u);
@@ -156,24 +159,9 @@ export type ApplicationSkillCapability = z.infer<typeof ApplicationSkillCapabili
 
 const ControlTypeSchema = z.enum(["text", "textarea", "select", "radio", "checkbox", "date", "file"]);
 export const SafeStaticUiHintSchema = z.string().trim().min(1).max(120).superRefine((value, context) => {
-  const normalized = value.normalize("NFKC").toLocaleLowerCase();
-  const compactPhone = normalized.replace(/[\s()+-]/gu, "");
-  const forbidden = [
-    /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[a-z]{2,}/iu,
-    /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u,
-    /(?:https?|ftp|file|data|javascript):|www\./iu,
-    /(?:[a-z]:[\\/]|\\\\|(?:^|\s)\/(?:api|v\d+|home|users|etc|var|tmp)(?:\/|$))/iu,
-    /(?:^|\s)\/\/|xpath|\/html(?:\/|$)|\[@/iu,
-    /javascript|\bscript\b|document\s*(?:\.|\[)|window\s*(?:\.|\[)|\beval\s*\(/iu,
-    /[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/iu,
-    /(?:^|[^a-f0-9])[a-f0-9]{32,}(?:[^a-f0-9]|$)/iu,
-    /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:[^A-Za-z0-9_-]|$)/u,
-    /(?:^|[^A-Za-z0-9+/_=-])[A-Za-z0-9+/_=-]{32,}(?:[^A-Za-z0-9+/_=-]|$)/u,
-    /\b(?:approval|authorization|bearer|token|secret|api[_ -]?key)\b|批准令牌|审批令牌|密钥|秘钥|口令/iu,
-    /(?:姓名|name)\s*[:=：]\s*\S+/iu
-  ];
-  if (forbidden.some((pattern) => pattern.test(normalized))
-    || /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u.test(compactPhone)) {
+  if (addPersistedLiteralRiskIssue(value, context, "unsafe_static_ui_hint")) return;
+  const normalized = normalizeRiskText(value);
+  if (hasSensitivePath(normalized) || hasExecutableLiteralSyntax(normalized)) {
     context.addIssue({ code: z.ZodIssueCode.custom, message: "unsafe_static_ui_hint" });
   }
 });
@@ -184,7 +172,10 @@ const StableAttributeValueSchema = z.string()
   .max(80)
   .regex(/^[A-Za-z][A-Za-z0-9_.-]*$/u)
   .refine((value) => !/\d{6,}/u.test(value), "dynamic_attribute_value_not_allowed")
-  .refine((value) => !/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/iu.test(value), "dynamic_attribute_value_not_allowed");
+  .refine((value) => !/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/iu.test(value), "dynamic_attribute_value_not_allowed")
+  .superRefine((value, context) => {
+    addPersistedLiteralRiskIssue(value, context, "unsafe_stable_attribute_value");
+  });
 const RestrictedCssSchema = z.string()
   .min(1)
   .max(200)
@@ -236,11 +227,18 @@ export const ApplicationSkillFieldSchema = z.object({
 }).strict();
 export type ApplicationSkillField = z.infer<typeof ApplicationSkillFieldSchema>;
 
-const RelativeRoutePatternSchema = z.string().min(1).max(240).refine((value) =>
-  value.startsWith("/")
-    && !value.startsWith("//")
-    && !value.includes("://")
-    && !/[?#]/u.test(value), "relative_route_pattern_required");
+const RelativeRoutePatternSchema = z.string().min(1).max(240)
+  .refine((value) =>
+    value.startsWith("/")
+      && !value.startsWith("//")
+      && !value.includes("://")
+      && !/[\\?#]/u.test(value), "relative_route_pattern_required")
+  .superRefine((value, context) => {
+    if (addPersistedLiteralRiskIssue(value, context, "unsafe_relative_route_pattern")) return;
+    if (hasSensitivePath(normalizeRiskText(value))) {
+      context.addIssue({ code: z.ZodIssueCode.custom, message: "unsafe_relative_route_pattern" });
+    }
+  });
 
 const PageVariantMatchSchema = z.object({
   routePatterns: z.array(RelativeRoutePatternSchema).min(1).max(8),
@@ -360,7 +358,7 @@ const PageFingerprintRuleSchema = z.object({
 
 const SkillCreationProvenanceSchema = z.discriminatedUnion("kind", [
   z.object({ kind: z.literal("manual_seed"), actorId: IdentifierSchema }).strict(),
-  z.object({ kind: z.literal("evolution_agent"), actorId: IdentifierSchema, evolutionRunId: IdentifierSchema }).strict(),
+  z.object({ kind: z.literal("evolution_agent"), actorId: IdentifierSchema, evolutionRunId: RuntimeIdentifierSchema }).strict(),
   z.object({ kind: z.literal("system_migration"), actorId: IdentifierSchema }).strict()
 ]);
 
@@ -385,7 +383,7 @@ export const SkillBindingSchema = z.object({
   version: SemanticVersionSchema,
   site: SiteSchema,
   pageFingerprintHash: HashSchema,
-  allocationId: IdentifierSchema
+  allocationId: RuntimeIdentifierSchema
 }).strict();
 export type SkillBinding = z.infer<typeof SkillBindingSchema>;
 
@@ -440,9 +438,9 @@ const SkillFirstErrorSchema = z.object({
 }).strict();
 
 export const SkillExecutionRecordSchema = z.object({
-  recordId: IdentifierSchema,
-  taskId: IdentifierSchema,
-  attemptId: IdentifierSchema,
+  recordId: RuntimeIdentifierSchema,
+  taskId: RuntimeIdentifierSchema,
+  attemptId: RuntimeIdentifierSchema,
   binding: SkillBindingSchema,
   pageVariantId: IdentifierSchema,
   fieldOutcomes: z.array(SkillFieldOutcomeSchema).max(200),
@@ -465,8 +463,8 @@ export const SkillExecutionRecordSchema = z.object({
 export type SkillExecutionRecord = z.infer<typeof SkillExecutionRecordSchema>;
 
 export const SkillEvaluationSchema = z.object({
-  evaluationId: IdentifierSchema,
-  executionRecordId: IdentifierSchema,
+  evaluationId: RuntimeIdentifierSchema,
+  executionRecordId: RuntimeIdentifierSchema,
   evaluatorVersion: SemanticVersionSchema,
   source: z.enum(["replay", "synthetic", "online"]),
   safetyViolations: z.number().int().nonnegative(),
@@ -525,6 +523,38 @@ export type SkillEvolutionPatch = z.infer<typeof SkillEvolutionPatchSchema>;
 
 function workflowHasAudit(workflow: readonly z.infer<typeof ApplicationSkillWorkflowStepSchema>[]): boolean {
   return workflow.some((step) => step.actions.some((action) => action.capability === "full_page_audit"));
+}
+
+function normalizeRiskText(value: string): string {
+  return value.normalize("NFKC").toLocaleLowerCase();
+}
+
+function hasPersistedLiteralRisk(value: string): boolean {
+  const normalized = normalizeRiskText(value);
+  const compactPhone = normalized.replace(/[\s()+-]/gu, "");
+  return /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[a-z]{2,}/iu.test(normalized)
+    || /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u.test(compactPhone)
+    || /(?:https?|ftp|file|data|javascript):|www\./iu.test(normalized)
+    || /[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/iu.test(normalized)
+    || /(?:^|[^a-f0-9])[a-f0-9]{32,}(?:[^a-f0-9]|$)/iu.test(normalized)
+    || /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:[^A-Za-z0-9_-]|$)/u.test(value)
+    || /[A-Za-z0-9+_=]{32,}/u.test(value)
+    || /\b(?:approval|authorization|bearer|token|secret|api[_ -]?key)\b|批准令牌|审批令牌|密钥|秘钥|口令/iu.test(normalized);
+}
+
+function addPersistedLiteralRiskIssue(value: string, context: z.RefinementCtx, message: string): boolean {
+  if (!hasPersistedLiteralRisk(value)) return false;
+  context.addIssue({ code: z.ZodIssueCode.custom, message });
+  return true;
+}
+
+function hasSensitivePath(value: string): boolean {
+  return /[a-z]:[\\/]|\\\\|(?:^|[\s/])(?:api|v\d+|home|users|etc|var|tmp)(?:\/|$)/iu.test(value);
+}
+
+function hasExecutableLiteralSyntax(value: string): boolean {
+  return /(?:^|\s)\/\/[A-Za-z*]|\/html(?:\/|$)|\[@/u.test(value)
+    || /javascript\s*:|document\s*(?:\.|\[)|window\s*(?:\.|\[)|\beval\s*\(/iu.test(value);
 }
 
 function checkUnique(
