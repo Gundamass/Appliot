@@ -153,12 +153,15 @@ const APPLICATION_SKILL_SCHEMA = `
     SELECT RAISE(ABORT, 'skill_version_is_immutable');
   END;
 
-  CREATE TRIGGER IF NOT EXISTS skill_versions_status_transition_guard
+  DROP TRIGGER IF EXISTS skill_versions_status_transition_guard;
+
+  CREATE TRIGGER skill_versions_status_transition_guard
   BEFORE UPDATE OF status ON skill_versions
   WHEN NEW.status <> OLD.status AND NOT (
     (OLD.status = 'candidate' AND NEW.status = 'replay_qualified')
     OR (OLD.status = 'replay_qualified' AND NEW.status = 'challenger')
     OR (OLD.status = 'challenger' AND NEW.status = 'champion')
+    OR (OLD.status = 'challenger' AND NEW.status = 'retired')
     OR (OLD.status = 'champion' AND NEW.status = 'retired')
     OR (OLD.status = 'retired' AND NEW.status = 'champion')
     OR (OLD.status <> 'retired' AND OLD.status <> 'quarantined' AND NEW.status = 'quarantined')

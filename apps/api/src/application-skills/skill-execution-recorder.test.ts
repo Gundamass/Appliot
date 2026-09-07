@@ -140,6 +140,28 @@ describe("SkillExecutionRecorder", () => {
     await expect(new SkillExecutionRecorder(sink).record(inputFixture())).rejects.toBe(appendFailure);
   });
 
+  it("notifies lifecycle evaluation only after durable execution evidence", async () => {
+    const events: string[] = [];
+    const recorder = new SkillExecutionRecorder(
+      { append: async () => { events.push("append"); } },
+      { afterRecord: ({ auditCompleted }) => { events.push(`evaluate:${auditCompleted}`); } }
+    );
+    await recorder.record(inputFixture());
+    expect(events).toEqual(["append", "evaluate:false"]);
+  });
+
+  it("does not evaluate a duplicate execution record twice", async () => {
+    let evaluations = 0;
+    const recorder = new SkillExecutionRecorder(
+      { append: async () => false },
+      { afterRecord: () => { evaluations += 1; } }
+    );
+
+    await recorder.record(inputFixture());
+
+    expect(evaluations).toBe(0);
+  });
+
   it("projects replay outcomes without task, attempt, binding, or timestamp identifiers", async () => {
     const record = await new SkillExecutionRecorder(new MemorySink()).record(inputFixture());
 

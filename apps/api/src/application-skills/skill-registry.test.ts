@@ -175,6 +175,49 @@ describe("SkillRegistry", () => {
     });
   });
 
+  it("atomically retires an inconclusive Challenger and restores all traffic to the Champion", () => {
+    registry.createVersion(versionFixture("1.0.0", "champion"));
+    registry.bindPage(binding("1.0.0", "allocation-main"));
+    registry.setAllocation({
+      allocationId: "allocation-main",
+      ...key,
+      championVersion: "1.0.0",
+      championPercent: 100,
+      challengerPercent: 0,
+      updatedAt: "2026-09-07T08:00:00.000Z"
+    });
+    registry.createVersion(versionFixture("1.1.0", "candidate", "1.0.0"));
+    registry.bindPage(binding("1.1.0", "allocation-main"));
+    registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.1.0");
+    registry.activateChallenger({
+      allocationId: "allocation-main",
+      ...key,
+      championVersion: "1.0.0",
+      challengerVersion: "1.1.0",
+      challengerPermille: 100,
+      activatedAt: "2026-09-07T09:00:00.000Z"
+    });
+
+    const retirement = {
+      allocationId: "allocation-main",
+      ...key,
+      championVersion: "1.0.0",
+      challengerVersion: "1.1.0",
+      retiredAt: "2026-09-07T10:00:00.000Z"
+    };
+    expect(registry.retireChallenger(retirement)).toBe(true);
+    expect(registry.retireChallenger(retirement)).toBe(false);
+    expect(registry.getVersion(key.skillId, "1.1.0")?.status).toBe("retired");
+    const allocation = registry.getPageAllocation(key);
+    expect(allocation).toMatchObject({
+      championVersion: "1.0.0",
+      championPercent: 100,
+      challengerPercent: 0,
+      updatedAt: retirement.retiredAt
+    });
+    expect(allocation).not.toHaveProperty("challengerVersion");
+  });
+
   it("rejects a non-10-percent activation without changing lifecycle or allocation", () => {
     registry.createVersion(versionFixture("1.0.0", "champion"));
     registry.bindPage(binding("1.0.0", "allocation-main"));

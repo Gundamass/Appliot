@@ -90,7 +90,15 @@ export const ReplayExecutionOutcomeSchema = z.object({
 export type ReplayExecutionOutcome = z.infer<typeof ReplayExecutionOutcomeSchema>;
 
 export interface SkillExecutionRecordSinkPort {
-  append(record: SkillExecutionRecord): Promise<void>;
+  append(record: SkillExecutionRecord): Promise<void | boolean>;
+}
+
+export interface SkillExecutionRecordObserver {
+  afterRecord(input: {
+    readonly record: SkillExecutionRecord;
+    readonly requiredSemantics: readonly SkillExecutionRecordInput["observedSemantics"][number][];
+    readonly auditCompleted: boolean;
+  }): Promise<void> | void;
 }
 
 export class SkillExecutionRecorderInputError extends Error {
@@ -101,7 +109,10 @@ export class SkillExecutionRecorderInputError extends Error {
 }
 
 export class SkillExecutionRecorder {
-  public constructor(private readonly sink: SkillExecutionRecordSinkPort) {}
+  public constructor(
+    private readonly sink: SkillExecutionRecordSinkPort,
+    private readonly observer?: SkillExecutionRecordObserver
+  ) {}
 
   public async record(input: unknown): Promise<SkillExecutionRecord> {
     if (containsForbiddenMaterial(input)) {
@@ -143,7 +154,15 @@ export class SkillExecutionRecorder {
       completedAt: data.completedAt
     }));
 
-    await this.sink.append(record);
+    const firstWrite = await this.sink.append(record);
+    if (firstWrite !== false) {
+      await this.observer?.afterRecord({
+        record,
+        requiredSemantics: [...new Set(data.observedSemantics)],
+        auditCompleted: data.terminalResult === "completed_pre_submit"
+          || data.failures.some(({ stage }) => stage === "audit")
+      });
+    }
     return record;
   }
 }

@@ -10,6 +10,7 @@ import {
   type SkillExecutionRecord
 } from "@resume/contracts";
 import type { SqliteDatabase } from "../db/client.js";
+import type { PromotionEngineRegistry, PromotionEvaluationSample } from "./promotion-engine.js";
 
 type SkillStatus = ApplicationSkillVersion["status"];
 type SkillSite = ApplicationSkillVersion["site"];
@@ -144,7 +145,7 @@ const NEXT_STATUS: Partial<Record<SkillStatus, SkillStatus>> = {
   champion: "retired"
 };
 
-export class SkillRegistry {
+export class SkillRegistry implements PromotionEngineRegistry {
   public constructor(private readonly database: SqliteDatabase) {}
 
   public createVersion(input: ApplicationSkillVersion): { created: boolean; version: string } {
@@ -499,6 +500,50 @@ export class SkillRegistry {
     return activate.immediate();
   }
 
+  public retireChallenger(input: {
+    skillId: string;
+    site: SkillSite;
+    pageFingerprintHash: string;
+    allocationId: string;
+    championVersion: string;
+    challengerVersion: string;
+    retiredAt: string;
+  }): boolean {
+    validatePageKey(input);
+    validateRuntimeId(input.allocationId, "skill_allocation_id_invalid");
+    validateVersion(input.championVersion);
+    validateVersion(input.challengerVersion);
+    validateTimestamp(input.retiredAt, "skill_allocation_timestamp_invalid");
+    const retire = this.database.transaction(() => {
+      const champion = this.findBoundVersion(input, input.championVersion);
+      const challenger = this.findBoundVersion(input, input.challengerVersion);
+      if (champion?.status !== "champion" || champion.active_status !== "champion"
+        || challenger?.status !== "challenger" || challenger.active_status !== "challenger"
+        || champion.allocation_id !== input.allocationId || challenger.allocation_id !== input.allocationId) return false;
+      const allocation = this.getPageAllocation(input);
+      if (allocation?.allocationId !== input.allocationId
+        || allocation.championVersion !== input.championVersion
+        || allocation.challengerVersion !== input.challengerVersion) return false;
+      const updated = this.database.prepare(`
+        UPDATE skill_versions SET status = 'retired'
+        WHERE skill_id = ? AND version = ? AND status = 'challenger'
+      `).run(input.skillId, input.challengerVersion);
+      if (updated.changes !== 1) throw new Error("skill_challenger_retirement_conflict");
+      this.database.prepare(`
+        UPDATE skill_page_bindings SET active_status = NULL
+        WHERE skill_id = ? AND version = ? AND site = ? AND page_fingerprint_hash = ?
+      `).run(input.skillId, input.challengerVersion, input.site, input.pageFingerprintHash);
+      const allocated = this.database.prepare(`
+        UPDATE skill_traffic_allocations
+        SET challenger_version = NULL, champion_percent = 100, challenger_percent = 0, updated_at = ?
+        WHERE allocation_id = ? AND challenger_version = ?
+      `).run(input.retiredAt, input.allocationId, input.challengerVersion);
+      if (allocated.changes !== 1) throw new Error("skill_challenger_retirement_conflict");
+      return true;
+    });
+    return retire.immediate();
+  }
+
   public restoreChampion(key: SkillPageKey, stableVersion: string): boolean {
     validatePageKey(key);
     validateVersion(stableVersion);
@@ -563,10 +608,10 @@ export class SkillRegistry {
     return restore.immediate();
   }
 
-  public appendExecutionRecord(input: SkillExecutionRecord): void {
+  public appendExecutionRecord(input: SkillExecutionRecord): boolean {
     const record = SkillExecutionRecordSchema.parse(input);
     this.requireBinding(record.binding);
-    this.database.prepare(`
+    const inserted = this.database.prepare(`
       INSERT INTO skill_execution_records (
         record_id, skill_id, version, site, page_fingerprint_hash,
         payload_json, started_at, completed_at, created_at
@@ -583,10 +628,20 @@ export class SkillRegistry {
       record.completedAt,
       record.completedAt
     );
+    return inserted.changes === 1;
   }
 
-  public appendEvaluation(input: SkillEvaluation): void {
+  public appendEvaluation(input: SkillEvaluation): boolean {
     const evaluation = SkillEvaluationSchema.parse(input);
+    const existing = this.database.prepare(`
+      SELECT payload_json FROM skill_evaluations WHERE evaluation_id = ?
+    `).get(evaluation.evaluationId) as { payload_json: string } | undefined;
+    if (existing !== undefined) {
+      if (canonicalJson(parseJson(existing.payload_json)) !== canonicalJson(evaluation)) {
+        throw new Error("skill_evaluation_conflict");
+      }
+      return false;
+    }
     this.database.prepare(`
       INSERT INTO skill_evaluations (
         evaluation_id, execution_record_id, payload_json, evaluated_at, created_at
@@ -598,6 +653,39 @@ export class SkillRegistry {
       evaluation.evaluatedAt,
       evaluation.evaluatedAt
     );
+    return true;
+  }
+
+  public appendPromotionEvaluation(sample: PromotionEvaluationSample): boolean {
+    const record = SkillExecutionRecordSchema.parse(sample.record);
+    const evaluation = SkillEvaluationSchema.parse(sample.evaluation);
+    if (evaluation.executionRecordId !== record.recordId
+      || sample.requiredFieldCount !== record.counts.planned
+      || sample.newAuditMismatches !== record.counts.auditMismatches) {
+      throw new Error("skill_promotion_sample_invalid");
+    }
+    return this.appendEvaluation(evaluation);
+  }
+
+  public listPromotionEvaluations(allocationId: string): PromotionEvaluationSample[] {
+    validateRuntimeId(allocationId, "skill_allocation_id_invalid");
+    const rows = this.database.prepare(`
+      SELECT r.payload_json AS record_json, e.payload_json AS evaluation_json
+      FROM skill_execution_records r
+      JOIN skill_evaluations e ON e.execution_record_id = r.record_id
+      ORDER BY r.record_id ASC, e.evaluation_id ASC
+    `).all() as Array<{ record_json: string; evaluation_json: string }>;
+    return rows.flatMap((row) => {
+      const record = SkillExecutionRecordSchema.parse(parseJson(row.record_json));
+      if (record.binding.allocationId !== allocationId) return [];
+      return [{
+        record,
+        evaluation: SkillEvaluationSchema.parse(parseJson(row.evaluation_json)),
+        scenarioClass: record.pageVariantId,
+        requiredFieldCount: record.counts.planned,
+        newAuditMismatches: record.counts.auditMismatches
+      }];
+    });
   }
 
   public appendEvolutionRun(input: SkillEvolutionRunRecord): void {
