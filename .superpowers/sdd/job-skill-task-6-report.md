@@ -112,3 +112,34 @@ Third-review GREEN verification:
 - Full contracts regression: 17 files passed, 164/164 tests passed.
 - Contracts typecheck: exit 0.
 - Root typecheck: exit 0.
+
+## Fourth reviewer fix cycle
+
+The fourth review found that the segmented-opaque detector discarded four-character chunks and treated mixed case alone as suspicious. That allowed `akj3-m9qx-7vpt-2n4c-z8r5-w1ys` while rejecting readable camelCase application terminology.
+
+Fourth-review RED command:
+
+`rtk corepack pnpm --filter @resume/contracts exec vitest run src/application-skill.test.ts`
+
+Result: exit 1; 25 failed / 36 passed. Direct content and typed-patch failures reproduced the short segmented payload in all four static-text positions, six evolvable identifier positions, stable attributes, and relative routes. Compatibility failures reproduced rejection of `candidateName-workflowStep-educationEntry`; the exact `JavaScript`, `TypeScript`, and `NodeJS` labels remained valid.
+
+Fixes:
+
+- Segmented candidates now require a contiguous run of at least three alphanumeric chunks of at least four characters, with a combined length of at least 24 characters.
+- Every eligible contiguous window is evaluated, so a readable route prefix cannot dilute a later opaque payload.
+- A window is rejected only when all conservative random-payload signals agree: normalized Shannon entropy at least 4 bits/character, at least four digits, digit density at least 0.15, vowel ratio at most 0.20, and at least four adjacent letter/digit transitions.
+- Mixed case is no longer a rejection signal. Exact static labels `JavaScript`, `TypeScript`, and `NodeJS`, descriptive camelCase static/attribute/route values, and a vowel-rich segmented boundary fixture with digits remain valid in direct content and typed patches.
+- Restricted-CSS attribute carriers exercise the same opaque-value rejection and camelCase compatibility while retaining the mandatory final-fallback ordering.
+- All earlier audit-boundary, credential-separator, executable-shape, CSS dynamic-value, schema-closure, and runtime opaque-ID protections remain in place.
+
+Test-fixture correction: after adding explicit restricted-CSS compatibility coverage, one focused run reported 2 failed / 59 passed because the new fixture supplied CSS as the only locator. The fixture was corrected to use a stable label first and CSS last; no production relaxation was made.
+
+Fourth-review GREEN verification:
+
+- Focused Skill test: 1 file passed, 61/61 tests passed.
+- Required combined test: 2 files passed, 63/63 tests passed.
+- Full contracts regression: 17 files passed, 169/169 tests passed.
+- Contracts typecheck: exit 0.
+- Root typecheck: exit 0.
+
+Caveat: entropy screening is intentionally conservative and syntactic; it is not proof that a retained literal came from the target ATS page. Task 8 must still validate static-text origin, profile overlap, and registered-domain context before activating evolved Skill content.

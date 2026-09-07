@@ -204,7 +204,8 @@ const unsafeStaticTexts = [
   "approval-token-secret",
   "approval_token_secret",
   "bearer_token",
-  "AkJ3m9Qx-7VpT2n4C-Z8r5W1Ys"
+  "AkJ3m9Qx-7VpT2n4C-Z8r5W1Ys",
+  "akj3-m9qx-7vpt-2n4c-z8r5-w1ys"
 ] as const;
 
 const textBearingPositions = ["label", "role", "placeholder", "requiredText"] as const;
@@ -235,7 +236,8 @@ const unsafeIdentifierValues = [
   "a".repeat(64),
   "qwxhzgrpbjppcgvuu2vzyw1lvg9rzw5wywx1zq",
   "akj3m9qx-7vpt2n4c-z8r5w1ys",
-  "m9qx7vpt_2n4cz8r5_w1ys6kbd"
+  "m9qx7vpt_2n4cz8r5_w1ys6kbd",
+  "akj3-m9qx-7vpt-2n4c-z8r5-w1ys"
 ] as const;
 
 const unsafeRoutePatterns = [
@@ -250,6 +252,7 @@ const unsafeRoutePatterns = [
   "/apply/QWxhZGRpbjpPcGVuU2VzYW1lVG9rZW5WYWx1ZQ",
   "/payload/AkJ3m9Qx/7VpT2n4C/Z8r5W1Ys",
   "/payload/akj3m9qx-7vpt2n4c-z8r5w1ys",
+  "/payload/akj3-m9qx-7vpt-2n4c-z8r5-w1ys",
   "/api/v1/profile",
   "/home/admin/resume.txt",
   "/redirect/https://evil.example/collect"
@@ -437,7 +440,15 @@ describe("ApplicationSkillContentSchema", () => {
     expect(() => ApplicationSkillContentSchema.parse(baiduCampusSkill)).not.toThrow();
   });
 
-  it.each(["JavaScript experience", "XPath proficiency", "Name: Required", "姓名：必填"])(
+  it.each([
+    "JavaScript",
+    "TypeScript",
+    "NodeJS",
+    "JavaScript experience",
+    "XPath proficiency",
+    "Name: Required",
+    "姓名：必填"
+  ])(
     "preserves legitimate literal static UI text: %s",
     (text) => {
       for (const position of textBearingPositions) {
@@ -503,11 +514,62 @@ describe("ApplicationSkillContentSchema", () => {
     })).not.toThrow();
   });
 
+  it("preserves descriptive camelCase literals in static, attribute, and route contexts", () => {
+    const descriptiveValues = [
+      "candidateName-workflowStep-educationEntry",
+      "form1-step2-page3-section4-view5"
+    ] as const;
+    for (const descriptiveValue of descriptiveValues) {
+      for (const position of textBearingPositions) {
+        expect(
+          () => ApplicationSkillContentSchema.parse(contentWithStaticText(position, descriptiveValue)),
+          `${position} rejected descriptive text ${descriptiveValue}`
+        ).not.toThrow();
+      }
+      expect(() => ApplicationSkillContentSchema.parse(replaceFirstLocator({
+        key: "stable-attribute",
+        by: "stable_attribute",
+        attribute: "data-testid",
+        value: descriptiveValue
+      }))).not.toThrow();
+      expect(() => ApplicationSkillContentSchema.parse({
+        ...baiduCampusSkill,
+        fields: [{
+          ...baiduCampusSkill.fields[0],
+          locatorHints: [
+            { key: "name-label", by: "label", text: "姓名" },
+            {
+              key: "css-fallback",
+              by: "css",
+              selector: `input[data-testid="${descriptiveValue}"]`
+            }
+          ]
+        }, ...baiduCampusSkill.fields.slice(1)]
+      })).not.toThrow();
+    }
+    for (const routePattern of [
+      "/candidateApplication/workflowStep/educationEntry",
+      "/form1/step2/page3/section4/view5"
+    ]) {
+      expect(() => ApplicationSkillContentSchema.parse({
+        ...baiduCampusSkill,
+        pageVariants: [{
+          ...baiduCampusSkill.pageVariants[0],
+          match: {
+            ...baiduCampusSkill.pageVariants[0].match,
+            routePatterns: [routePattern]
+          }
+        }]
+      })).not.toThrow();
+    }
+  });
+
   it("rejects dynamic identifiers in restricted CSS attribute values", () => {
     for (const selector of [
       "input[data-testid=\"candidate-1723456789\"]",
       "input[data-testid=\"candidate-550e8400-e29b-41d4-a716-446655440000\"]",
-      "input[data-testid=\"candidate-abcdefab-cdef-abcd-efab-cdefabcdefab\"]"
+      "input[data-testid=\"candidate-abcdefab-cdef-abcd-efab-cdefabcdefab\"]",
+      "input[data-testid=\"akj3-m9qx-7vpt-2n4c-z8r5-w1ys\"]"
     ]) {
       const candidate = {
         ...baiduCampusSkill,
@@ -696,6 +758,22 @@ describe("application skill registry and runtime contracts", () => {
         }]
       }), `stable attribute patch accepted ${value}`).toThrow();
     }
+    expect(() => SkillEvolutionPatchSchema.parse({
+      parentContentHash: hash,
+      operations: [{
+        op: "add",
+        path: "/fields/-",
+        value: {
+          semantic: "basics.email",
+          controlTypes: ["text"],
+          locatorHints: [{
+            key: "css-fallback",
+            by: "css",
+            selector: "input[data-testid=\"akj3-m9qx-7vpt-2n4c-z8r5-w1ys\"]"
+          }]
+        }
+      }]
+    })).toThrow();
     for (const routePattern of unsafeRoutePatterns) {
       expect(() => SkillEvolutionPatchSchema.parse({
         parentContentHash: hash,
@@ -713,6 +791,78 @@ describe("application skill registry and runtime contracts", () => {
           }
         }]
       }), `route patch accepted ${routePattern}`).toThrow();
+    }
+  });
+
+  it("preserves descriptive camelCase literals in typed static, attribute, and route patches", () => {
+    const descriptiveValues = [
+      "candidateName-workflowStep-educationEntry",
+      "form1-step2-page3-section4-view5"
+    ] as const;
+    for (const descriptiveValue of descriptiveValues) {
+      for (const position of textBearingPositions) {
+        expect(
+          () => SkillEvolutionPatchSchema.parse(patchWithStaticText(position, descriptiveValue)),
+          `${position} patch rejected descriptive text ${descriptiveValue}`
+        ).not.toThrow();
+      }
+      expect(() => SkillEvolutionPatchSchema.parse({
+        parentContentHash: hash,
+        operations: [{
+          op: "add",
+          path: "/fields/-",
+          value: {
+            semantic: "basics.email",
+            controlTypes: ["text"],
+            locatorHints: [{
+              key: "stable-attribute",
+              by: "stable_attribute",
+              attribute: "data-testid",
+              value: descriptiveValue
+            }]
+          }
+        }]
+      })).not.toThrow();
+      expect(() => SkillEvolutionPatchSchema.parse({
+        parentContentHash: hash,
+        operations: [{
+          op: "add",
+          path: "/fields/-",
+          value: {
+            semantic: "basics.email",
+            controlTypes: ["text"],
+            locatorHints: [
+              { key: "email-label", by: "label", text: "邮箱" },
+              {
+                key: "css-fallback",
+                by: "css",
+                selector: `input[data-testid="${descriptiveValue}"]`
+              }
+            ]
+          }
+        }]
+      })).not.toThrow();
+    }
+    for (const routePattern of [
+      "/candidateApplication/workflowStep/educationEntry",
+      "/form1/step2/page3/section4/view5"
+    ]) {
+      expect(() => SkillEvolutionPatchSchema.parse({
+        parentContentHash: hash,
+        operations: [{
+          op: "add",
+          path: "/pageVariants/-",
+          value: {
+            id: "safe-page-variant",
+            match: {
+              routePatterns: [routePattern],
+              requiredTexts: ["教育经历"],
+              requiredFields: ["basics.name"]
+            },
+            workflowEntry: "observe-form"
+          }
+        }]
+      })).not.toThrow();
     }
   });
 

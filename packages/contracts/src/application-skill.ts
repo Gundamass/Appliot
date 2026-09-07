@@ -563,14 +563,63 @@ function hasExecutableLiteralSyntax(value: string): boolean {
 }
 
 function hasSegmentedOpaqueValue(value: string): boolean {
-  const chunks = value.split(/[-_/]/u).filter((chunk) => /^[A-Za-z0-9]{6,}$/u.test(chunk));
-  if (chunks.length < 3) return false;
-  const combined = chunks.join("");
-  if (combined.length < 24) return false;
-  const mixedCase = /[a-z]/u.test(combined) && /[A-Z]/u.test(combined);
-  const mixedAlphaNumericChunks = chunks.filter((chunk) => /[A-Za-z]/u.test(chunk) && /\d/u.test(chunk)).length;
-  const alphaNumericTransitions = combined.match(/(?:[A-Za-z]\d|\d[A-Za-z])/gu)?.length ?? 0;
-  return mixedCase || mixedAlphaNumericChunks >= 2 || alphaNumericTransitions >= 4;
+  const chunks = value.split(/[-_/]+/u);
+  let run: string[] = [];
+
+  for (const chunk of chunks) {
+    if (/^[A-Za-z0-9]{4,}$/u.test(chunk)) {
+      run.push(chunk);
+      continue;
+    }
+    if (hasOpaqueChunkWindow(run)) return true;
+    run = [];
+  }
+
+  return hasOpaqueChunkWindow(run);
+}
+
+function hasOpaqueChunkWindow(chunks: readonly string[]): boolean {
+  for (let start = 0; start <= chunks.length - 3; start += 1) {
+    let combined = "";
+    for (let end = start; end < chunks.length; end += 1) {
+      combined += chunks[end];
+      if (end - start + 1 < 3 || combined.length < 24) continue;
+
+      const normalized = combined.toLowerCase();
+      const digitCount = normalized.match(/\d/gu)?.length ?? 0;
+      const letterCount = normalized.match(/[a-z]/gu)?.length ?? 0;
+      const vowelCount = normalized.match(/[aeiou]/gu)?.length ?? 0;
+      const alphaNumericTransitions = normalized.match(/(?:[a-z]\d|\d[a-z])/gu)?.length ?? 0;
+      const digitDensity = digitCount / normalized.length;
+      const vowelRatio = letterCount === 0 ? 0 : vowelCount / letterCount;
+
+      // These combined thresholds target encoded/random payloads without treating
+      // camelCase or long descriptive routes as suspicious on casing alone.
+      if (
+        shannonEntropy(normalized) >= 4
+        && digitCount >= 4
+        && digitDensity >= 0.15
+        && vowelRatio <= 0.2
+        && alphaNumericTransitions >= 4
+      ) {
+        return true;
+      }
+    }
+  }
+  return false;
+}
+
+function shannonEntropy(value: string): number {
+  const frequencies = new Map<string, number>();
+  for (const character of value) {
+    frequencies.set(character, (frequencies.get(character) ?? 0) + 1);
+  }
+  let entropy = 0;
+  for (const count of frequencies.values()) {
+    const probability = count / value.length;
+    entropy -= probability * Math.log2(probability);
+  }
+  return entropy;
 }
 
 function checkUnique(
