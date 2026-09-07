@@ -8,6 +8,7 @@ import {
 import {
   SkillExecutionRecorder,
   SkillExecutionRecorderInputError,
+  projectReplayExecutionOutcome,
   type SkillExecutionRecordInput,
   type SkillExecutionRecordSinkPort
 } from "./skill-execution-recorder.js";
@@ -137,6 +138,37 @@ describe("SkillExecutionRecorder", () => {
     };
 
     await expect(new SkillExecutionRecorder(sink).record(inputFixture())).rejects.toBe(appendFailure);
+  });
+
+  it("projects replay outcomes without task, attempt, binding, or timestamp identifiers", async () => {
+    const record = await new SkillExecutionRecorder(new MemorySink()).record(inputFixture());
+
+    const outcome = projectReplayExecutionOutcome({
+      ...record,
+      fieldOutcomes: [{
+        ...record.fieldOutcomes[0]!,
+        nodeRef: {
+          documentId: "document-secret-reference",
+          nodeId: "node-secret-reference",
+          observedAt: 1
+        }
+      }, ...record.fieldOutcomes.slice(1)]
+    });
+
+    expect(outcome).toMatchObject({
+      terminalResult: "failed",
+      counts: record.counts,
+      fieldOutcomes: record.fieldOutcomes,
+      auditMismatchClasses: record.auditMismatchClasses
+    });
+    const serialized = JSON.stringify(outcome);
+    expect(serialized).not.toContain(record.taskId);
+    expect(serialized).not.toContain(record.attemptId);
+    expect(serialized).not.toContain(record.binding.allocationId);
+    expect(serialized).not.toContain(record.startedAt);
+    expect(serialized).not.toContain("document-secret-reference");
+    expect(serialized).not.toContain("node-secret-reference");
+    expect(Object.isFrozen(outcome)).toBe(true);
   });
 });
 

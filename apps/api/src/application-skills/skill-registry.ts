@@ -95,6 +95,27 @@ interface SkillTrafficAllocationRow {
   updated_at: string;
 }
 
+interface SkillReplaySampleRow {
+  sample_id: string;
+  site: SkillSite;
+  page_fingerprint_hash: string;
+  split: "train" | "holdout";
+  redacted_snapshot_json: string;
+  expected_actions_json: string;
+  created_at: string;
+}
+
+interface SkillEvolutionRunRow {
+  run_id: string;
+  trigger: string;
+  input_record_ids_json: string;
+  candidate_skill_id: string | null;
+  candidate_version: string | null;
+  final_status: SkillStatus;
+  payload_json: string;
+  created_at: string;
+}
+
 const SKILL_ID = /^[a-z0-9](?:[a-z0-9_-]*[a-z0-9])?$/u;
 const VERSION = /^(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)\.(?:0|[1-9]\d*)(?:-[0-9A-Za-z-]+(?:\.[0-9A-Za-z-]+)*)?$/u;
 const HASH = /^[a-f0-9]{64}$/u;
@@ -542,11 +563,50 @@ export class SkillRegistry {
     );
   }
 
+  public getEvolutionRun(runId: string): SkillEvolutionRunRecord | undefined {
+    validateRuntimeId(runId, "skill_evolution_run_id_invalid");
+    const row = this.database.prepare(`
+      SELECT run_id, trigger, input_record_ids_json, candidate_skill_id,
+        candidate_version, final_status, payload_json, created_at
+      FROM skill_evolution_runs
+      WHERE run_id = ?
+    `).get(runId) as SkillEvolutionRunRow | undefined;
+    if (row === undefined) return undefined;
+    return {
+      runId: row.run_id,
+      trigger: row.trigger,
+      inputRecordIds: parseJson<string[]>(row.input_record_ids_json),
+      ...(row.candidate_skill_id === null ? {} : {
+        candidateSkillId: row.candidate_skill_id,
+        candidateVersion: row.candidate_version!
+      }),
+      finalStatus: row.final_status,
+      payload: parseJson(row.payload_json),
+      createdAt: row.created_at
+    };
+  }
+
   public appendReplaySample(input: SkillReplaySampleRecord): void {
     validateRuntimeId(input.sampleId, "skill_replay_sample_id_invalid");
     validateSite(input.site);
     validateHash(input.pageFingerprintHash);
     validateTimestamp(input.createdAt, "skill_replay_sample_timestamp_invalid");
+    const normalized: SkillReplaySampleRecord = {
+      sampleId: input.sampleId,
+      site: input.site,
+      pageFingerprintHash: input.pageFingerprintHash,
+      split: input.split,
+      redactedSnapshot: input.redactedSnapshot,
+      expectedActions: input.expectedActions,
+      createdAt: input.createdAt
+    };
+    const existing = this.getReplaySample(input.sampleId);
+    if (existing !== undefined) {
+      if (canonicalJson(existing) !== canonicalJson(normalized)) {
+        throw new Error("skill_replay_sample_conflict");
+      }
+      return;
+    }
     this.database.prepare(`
       INSERT INTO skill_replay_samples (
         sample_id, site, page_fingerprint_hash, split,
@@ -561,6 +621,37 @@ export class SkillRegistry {
       canonicalJson(input.expectedActions),
       input.createdAt
     );
+  }
+
+  public getReplaySample(sampleId: string): SkillReplaySampleRecord | undefined {
+    validateRuntimeId(sampleId, "skill_replay_sample_id_invalid");
+    const row = this.database.prepare(`
+      SELECT sample_id, site, page_fingerprint_hash, split,
+        redacted_snapshot_json, expected_actions_json, created_at
+      FROM skill_replay_samples
+      WHERE sample_id = ?
+    `).get(sampleId) as SkillReplaySampleRow | undefined;
+    return row === undefined ? undefined : replaySampleFromRow(row);
+  }
+
+  public listReplaySamplesThrough(cutoffAt: string): SkillReplaySampleRecord[] {
+    validateTimestamp(cutoffAt, "skill_replay_cutoff_timestamp_invalid");
+    return (this.database.prepare(`
+      SELECT sample_id, site, page_fingerprint_hash, split,
+        redacted_snapshot_json, expected_actions_json, created_at
+      FROM skill_replay_samples
+      WHERE created_at <= ?
+      ORDER BY created_at ASC, sample_id ASC
+    `).all(cutoffAt) as SkillReplaySampleRow[]).map(replaySampleFromRow);
+  }
+
+  public listReplaySamples(): SkillReplaySampleRecord[] {
+    return (this.database.prepare(`
+      SELECT sample_id, site, page_fingerprint_hash, split,
+        redacted_snapshot_json, expected_actions_json, created_at
+      FROM skill_replay_samples
+      ORDER BY created_at ASC, sample_id ASC
+    `).all() as SkillReplaySampleRow[]).map(replaySampleFromRow);
   }
 
   public appendReplayRunSample(input: SkillReplayRunSampleRecord): void {
@@ -653,6 +744,22 @@ function versionFromRow(row: SkillVersionRow): ApplicationSkillVersion {
     createdBy: JSON.parse(row.created_by_json),
     createdAt: row.created_at
   });
+}
+
+function replaySampleFromRow(row: SkillReplaySampleRow): SkillReplaySampleRecord {
+  return {
+    sampleId: row.sample_id,
+    site: row.site,
+    pageFingerprintHash: row.page_fingerprint_hash,
+    split: row.split,
+    redactedSnapshot: parseJson(row.redacted_snapshot_json),
+    expectedActions: parseJson(row.expected_actions_json),
+    createdAt: row.created_at
+  };
+}
+
+function parseJson<T = unknown>(value: string): T {
+  return JSON.parse(value) as T;
 }
 
 function activeStatus(status: SkillStatus): "challenger" | "champion" | null {

@@ -340,7 +340,16 @@ describe("SkillRegistry", () => {
     registry.appendEvaluation(evaluation);
     registry.appendEvolutionRun(evolution);
     registry.appendReplaySample(sample);
+    registry.appendReplaySample(sample);
     registry.appendReplayRunSample(replayResult);
+
+    expect(registry.getReplaySample(sample.sampleId)).toEqual(sample);
+    expect(registry.listReplaySamplesThrough("2026-09-07T08:03:00.000Z")).toEqual([sample]);
+    expect(() => registry.appendReplaySample({
+      ...sample,
+      expectedActions: [{ capability: "readback", semantic: "basics.email" }]
+    })).toThrow("skill_replay_sample_conflict");
+    expect(registry.getEvolutionRun(evolution.runId)).toEqual(evolution);
 
     const appendOnlyTables = [
       ["skill_execution_records", "record_id", execution.recordId],

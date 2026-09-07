@@ -71,6 +71,24 @@ const SkillExecutionRecordInputSchema = z.object({
 
 export type SkillExecutionRecordInput = z.infer<typeof SkillExecutionRecordInputSchema>;
 
+const ReplayFieldOutcomeSchema = z.object({
+  semantic: ApplicationFieldSemanticSchema,
+  outcome: z.enum(["resolved", "filled", "verified", "skipped", "missing", "failed"]),
+  errorClass: FieldErrorClassSchema.optional()
+}).strict();
+
+export const ReplayExecutionOutcomeSchema = z.object({
+  fieldOutcomes: z.array(ReplayFieldOutcomeSchema).max(200),
+  counts: SkillExecutionRecordSchema.shape.counts,
+  auditMismatchClasses: SkillExecutionRecordSchema.shape.auditMismatchClasses,
+  firstError: SkillExecutionRecordSchema.shape.firstError,
+  retries: SkillExecutionRecordSchema.shape.retries,
+  recoveries: SkillExecutionRecordSchema.shape.recoveries,
+  durationMs: SkillExecutionRecordSchema.shape.durationMs,
+  terminalResult: SkillExecutionRecordSchema.shape.terminalResult
+}).strict();
+export type ReplayExecutionOutcome = z.infer<typeof ReplayExecutionOutcomeSchema>;
+
 export interface SkillExecutionRecordSinkPort {
   append(record: SkillExecutionRecord): Promise<void>;
 }
@@ -128,6 +146,24 @@ export class SkillExecutionRecorder {
     await this.sink.append(record);
     return record;
   }
+}
+
+export function projectReplayExecutionOutcome(record: SkillExecutionRecord): ReplayExecutionOutcome {
+  const parsed = SkillExecutionRecordSchema.parse(record);
+  return deepFreeze(ReplayExecutionOutcomeSchema.parse({
+    fieldOutcomes: parsed.fieldOutcomes.map(({ semantic, outcome, errorClass }) => ({
+      semantic,
+      outcome,
+      ...(errorClass === undefined ? {} : { errorClass })
+    })),
+    counts: parsed.counts,
+    auditMismatchClasses: parsed.auditMismatchClasses,
+    ...(parsed.firstError === undefined ? {} : { firstError: parsed.firstError }),
+    retries: parsed.retries,
+    recoveries: parsed.recoveries,
+    durationMs: parsed.durationMs,
+    terminalResult: parsed.terminalResult
+  }));
 }
 
 function fieldOutcomes(data: SkillExecutionRecordInput): SkillExecutionRecord["fieldOutcomes"] {
