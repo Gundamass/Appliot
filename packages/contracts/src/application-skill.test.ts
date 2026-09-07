@@ -599,6 +599,42 @@ describe("ApplicationSkillContentSchema", () => {
     }
   );
 
+  it.each(["Turkey", "Keyboard", "Secretary", "Monkey"])(
+    "accepts ordinary descriptive word %s across evolvable carriers",
+    (word) => {
+      expect(() => ApplicationSkillContentSchema.parse(contentWithStaticText("label", word))).not.toThrow();
+      expect(() => ApplicationSkillContentSchema.parse(
+        contentWithIdentifier("locatorKey", word.toLowerCase())
+      )).not.toThrow();
+      expect(() => ApplicationSkillContentSchema.parse({
+        ...baiduCampusSkill,
+        pageVariants: [{
+          ...baiduCampusSkill.pageVariants[0],
+          match: {
+            ...baiduCampusSkill.pageVariants[0].match,
+            routePatterns: [`/candidate/${word.toLowerCase()}/application`]
+          }
+        }]
+      })).not.toThrow();
+      expect(() => SkillEvolutionPatchSchema.parse(
+        patchWithStaticText("label", word)
+      )).not.toThrow();
+    }
+  );
+
+  it("accepts a descriptive deep application route", () => {
+    expect(() => ApplicationSkillContentSchema.parse({
+      ...baiduCampusSkill,
+      pageVariants: [{
+        ...baiduCampusSkill.pageVariants[0],
+        match: {
+          ...baiduCampusSkill.pageVariants[0].match,
+          routePatterns: ["/job/app/form/edu/work/cert/lang/review"]
+        }
+      }]
+    })).not.toThrow();
+  });
+
   it("rejects dynamic identifiers in restricted CSS attribute values", () => {
     for (const selector of [
       "input[data-testid=\"candidate-1723456789\"]",

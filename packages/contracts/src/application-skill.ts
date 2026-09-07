@@ -534,6 +534,7 @@ function hasPersistedLiteralRisk(value: string): boolean {
   const compactPhone = normalized.replace(/[\s()+-]/gu, "");
   const credentialWords = normalized.replace(/[_/\-\s]+/gu, " ");
   const compactCredential = normalized.replace(/[^a-z0-9]+/gu, "");
+  const credentialCandidates = normalized.split(/[^a-z0-9]+/gu).filter(Boolean);
   return /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[a-z]{2,}/iu.test(normalized)
     || /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u.test(compactPhone)
     || /(?:https?|ftp|file|data|javascript):|www\./iu.test(normalized)
@@ -542,9 +543,16 @@ function hasPersistedLiteralRisk(value: string): boolean {
     || /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:[^A-Za-z0-9_-]|$)/u.test(value)
     || /[A-Za-z0-9+_=]{32,}/u.test(value)
     || /(?:^|[^a-z0-9])(?:approval|authorization|bearer|token|secret|api\s*key)(?:$|[^a-z0-9])/iu.test(credentialWords)
-    || /(?:access|refresh|auth|approval|authorization|bearer|client|credential|private|api)?(?:token|secret|key)$|^(?:token|secret|key)(?:access|refresh|auth|approval|authorization|bearer|client|credential|private|api)?/u.test(compactCredential)
+    || isCompactCredentialName(compactCredential)
+    || credentialCandidates.some(isCompactCredentialName)
     || /批准令牌|审批令牌|密钥|秘钥|口令/u.test(normalized)
+    || /(?:^|[^A-Za-z0-9_-])(?:[A-Za-z0-9_-]{4}-){8,}[A-Za-z0-9_-]{1,4}(?:$|[^A-Za-z0-9_-])/u.test(value)
     || hasSegmentedOpaqueValue(value);
+}
+
+function isCompactCredentialName(value: string): boolean {
+  if (!/(?:token|secret|key)/u.test(value)) return false;
+  return /^(?:(?:access|refresh|auth|approval|authorization|bearer|client|credential|private|api|token|secret|key)){2,}$/u.test(value);
 }
 
 function addPersistedLiteralRiskIssue(value: string, context: z.RefinementCtx, message: string): boolean {
@@ -565,11 +573,20 @@ function hasExecutableLiteralSyntax(value: string): boolean {
 }
 
 function hasSegmentedOpaqueValue(value: string): boolean {
-  const chunks = value.split(/[-_/]+/u);
+  return hasSegmentedOpaqueValueUsing(value, /[-/]+/u, /^[A-Za-z0-9_]+$/u)
+    || hasSegmentedOpaqueValueUsing(value, /[_/]+/u, /^[A-Za-z0-9-]+$/u);
+}
+
+function hasSegmentedOpaqueValueUsing(
+  value: string,
+  separators: RegExp,
+  allowedChunk: RegExp
+): boolean {
+  const chunks = value.split(separators);
   let run: string[] = [];
 
   for (const chunk of chunks) {
-    if (/^[A-Za-z0-9]+$/u.test(chunk)) {
+    if (allowedChunk.test(chunk)) {
       run.push(chunk);
       continue;
     }
@@ -611,10 +628,7 @@ function hasOpaqueChunkWindow(chunks: readonly string[]): boolean {
         (segmentCount >= 4 && normalizedEntropy >= 3.75)
         || (originalEntropy >= 4.15 && uppercaseCount >= 3 && lowercaseCount >= 3)
       );
-      const denseBase64UrlEncoding = segmentCount >= 8
-        && combined.length / segmentCount <= 5
-        && originalEntropy >= 3.9;
-      if (randomAlphaNumeric || segmentedEncoding || denseBase64UrlEncoding) {
+      if (randomAlphaNumeric || segmentedEncoding) {
         return true;
       }
     }
