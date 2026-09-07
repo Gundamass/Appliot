@@ -74,7 +74,8 @@ export type SyntheticSkillRuntimeScenario =
   | "stale-node"
   | "ambiguous-fingerprint"
   | "unexpected-navigation"
-  | "post-fill-mutation";
+  | "post-fill-mutation"
+  | "evolution-label-change";
 
 export interface SyntheticSkillRuntimeState {
   site: SyntheticSkillRuntimeSite | "";
@@ -368,6 +369,7 @@ function parseSkillRuntimeScenario(value: unknown): SyntheticSkillRuntimeScenari
     || value === "ambiguous-fingerprint"
     || value === "unexpected-navigation"
     || value === "post-fill-mutation"
+    || value === "evolution-label-change"
   ) return value;
   throw new Error("unknown_skill_runtime_scenario");
 }
@@ -456,6 +458,10 @@ function skillRuntimeFields(
   scenario: SyntheticSkillRuntimeScenario,
   values: Readonly<Record<string, string>>
 ): string {
+  if (site === "baidu" && scenario === "evolution-label-change") {
+    return `<label for="skill-evolved-name">Preferred identity</label>
+      <input id="skill-evolved-name" name="preferredIdentity" placeholder="Preferred identity" required>`;
+  }
   const renamed = scenario === "renamed-label";
   let fields: Array<[string, string]> = site === "moka"
     ? [

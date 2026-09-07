@@ -158,7 +158,8 @@ describe("synthetic ATS application scenarios", () => {
       "stale-node",
       "ambiguous-fingerprint",
       "unexpected-navigation",
-      "post-fill-mutation"
+      "post-fill-mutation",
+      "evolution-label-change"
     ] as const;
 
     for (const site of sites) {
@@ -197,6 +198,11 @@ describe("synthetic ATS application scenarios", () => {
       `${server.baseUrl}/skill-runtime?taskId=mutation&site=moka&scenario=post-fill-mutation`
     ).then((response) => response.text());
     expect(mutation).toContain("skill-runtime-post-fill-mutated");
+    const evolvedLabel = await fetch(
+      `${server.baseUrl}/skill-runtime?taskId=evolution-label&site=baidu&scenario=evolution-label-change`
+    ).then((response) => response.text());
+    expect(evolvedLabel).toContain('placeholder="Preferred identity"');
+    expect(evolvedLabel).not.toContain('data-semantic="basics.name"');
   });
 
   it("records Skill runtime field readback without accepting a final submission", async () => {
