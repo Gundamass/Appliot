@@ -38,4 +38,36 @@ describe("agent runtime contracts", () => {
       cookie: "should-not-persist"
     }).success).toBe(false);
   });
+
+  it("round-trips only safe application Skill binding metadata", () => {
+    const checkpoint = RuntimeCheckpointSchema.parse({
+      version: "1.1.0",
+      runId: "run-1",
+      executionEpoch: 1,
+      status: "running",
+      memoryRefs: [],
+      evidenceRefs: [],
+      completedActionIds: [],
+      budget: { steps: 0, toolCalls: 0, retries: 0, replans: 0, tokens: 0, elapsedMs: 0 },
+      stateHash: "a".repeat(64),
+      createdAt: "2026-09-07T00:00:00.000Z",
+      applicationSkillBinding: {
+        skillId: "baidu-campus-application",
+        version: "1.0.0",
+        site: "baidu",
+        pageFingerprintHash: "b".repeat(64),
+        allocationId: "allocation-baidu-campus"
+      }
+    });
+
+    expect(checkpoint.applicationSkillBinding).toEqual({
+      skillId: "baidu-campus-application",
+      version: "1.0.0",
+      site: "baidu",
+      pageFingerprintHash: "b".repeat(64),
+      allocationId: "allocation-baidu-campus"
+    });
+    expect(JSON.stringify(checkpoint)).not.toContain("locator");
+    expect(JSON.stringify(checkpoint)).not.toContain("currentValue");
+  });
 });

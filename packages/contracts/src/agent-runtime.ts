@@ -1,5 +1,6 @@
 import { z } from "zod";
 import { JsonValueSchema, type JsonValue } from "./profile.js";
+import { SkillBindingSchema } from "./application-skill.js";
 
 const HashSchema = z.string().regex(/^[a-f0-9]{64}$/iu);
 
@@ -135,6 +136,8 @@ export const RuntimeCheckpointSchema = z.object({
   phase: z.enum(["intent", "plan", "dispatch", "wait", "inspect", "human_gate", "complete", "blocked", "fail", "cancelled"]).optional(),
   memoryRefs: z.array(MemoryRefSchema).max(200),
   evidenceRefs: z.array(EvidenceRefSchema).max(500),
+  /** Immutable identifiers for the declarative application Skill selected for this run. */
+  applicationSkillBinding: SkillBindingSchema.optional(),
   pendingInterrupt: RuntimeHumanInterruptSchema.optional(),
   budget: BudgetStateSchema,
   budgetLimits: BudgetLimitsSchema.optional(),
