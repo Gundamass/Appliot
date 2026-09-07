@@ -39,6 +39,28 @@ const APPLICATION_SKILL_SCHEMA = `
   ON skill_page_bindings(site, page_fingerprint_hash, active_status)
   WHERE active_status IN ('challenger', 'champion');
 
+  CREATE TRIGGER IF NOT EXISTS skill_page_bindings_version_scope_insert
+  BEFORE INSERT ON skill_page_bindings
+  WHEN EXISTS (
+    SELECT 1 FROM skill_page_bindings
+    WHERE skill_id = NEW.skill_id AND version = NEW.version
+      AND (site <> NEW.site OR page_fingerprint_hash <> NEW.page_fingerprint_hash)
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'skill_version_page_binding_conflict');
+  END;
+
+  CREATE TRIGGER IF NOT EXISTS skill_page_bindings_allocation_scope_insert
+  BEFORE INSERT ON skill_page_bindings
+  WHEN EXISTS (
+    SELECT 1 FROM skill_page_bindings
+    WHERE allocation_id = NEW.allocation_id
+      AND (site <> NEW.site OR page_fingerprint_hash <> NEW.page_fingerprint_hash)
+  )
+  BEGIN
+    SELECT RAISE(ABORT, 'skill_allocation_scope_mismatch');
+  END;
+
   CREATE TABLE IF NOT EXISTS skill_traffic_allocations (
     allocation_id TEXT PRIMARY KEY,
     skill_id TEXT NOT NULL,

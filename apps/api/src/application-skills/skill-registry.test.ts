@@ -154,6 +154,72 @@ describe("SkillRegistry", () => {
       .toThrowError("skill_binding_allocation_mismatch");
   });
 
+  it("does not allow one version lifecycle to span multiple page fingerprints", () => {
+    registry.createVersion(versionFixture("1.0.0", "champion"));
+    registry.bindPage(binding("1.0.0", "allocation-main"));
+
+    expect(() => registry.bindPage({
+      ...binding("1.0.0", "allocation-other-page"),
+      pageFingerprintHash: "c".repeat(64)
+    })).toThrowError("skill_version_page_binding_conflict");
+    expect(() => database.prepare(`
+      INSERT INTO skill_page_bindings (
+        skill_id, version, site, page_fingerprint_hash, allocation_id, active_status, bound_at
+      ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+    `).run(
+      key.skillId, "1.0.0", key.site, "c".repeat(64), "allocation-other-page",
+      "2026-09-07T08:00:00.000Z"
+    )).toThrowError("skill_version_page_binding_conflict");
+  });
+
+  it("does not allow one allocation identity to span multiple page fingerprints", () => {
+    registry.createVersion(versionFixture("1.0.0", "champion"));
+    registry.bindPage(binding("1.0.0", "allocation-main"));
+    registry.createVersion(versionFixture("1.1.0", "candidate", "1.0.0"));
+
+    expect(() => registry.bindPage({
+      ...binding("1.1.0", "allocation-main"),
+      pageFingerprintHash: "c".repeat(64)
+    })).toThrowError("skill_allocation_scope_mismatch");
+    expect(() => database.prepare(`
+      INSERT INTO skill_page_bindings (
+        skill_id, version, site, page_fingerprint_hash, allocation_id, active_status, bound_at
+      ) VALUES (?, ?, ?, ?, ?, NULL, ?)
+    `).run(
+      key.skillId, "1.1.0", key.site, "c".repeat(64), "allocation-main",
+      "2026-09-07T08:00:00.000Z"
+    )).toThrowError("skill_allocation_scope_mismatch");
+  });
+
+  it("withdraws challenger traffic when a hard failure quarantines it", () => {
+    registry.createVersion(versionFixture("1.0.0", "champion"));
+    registry.bindPage(binding("1.0.0", "allocation-main"));
+    registry.createVersion(versionFixture("1.1.0", "candidate", "1.0.0"));
+    registry.bindPage(binding("1.1.0", "allocation-main"));
+    registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.1.0");
+    registry.compareAndSetStatus(key, "replay_qualified", "challenger", "1.1.0");
+    registry.setAllocation({
+      allocationId: "allocation-main",
+      ...key,
+      championVersion: "1.0.0",
+      challengerVersion: "1.1.0",
+      championPercent: 90,
+      challengerPercent: 10,
+      updatedAt: "2026-09-07T08:00:00.000Z"
+    });
+
+    expect(registry.compareAndSetStatus(key, "challenger", "quarantined", "1.1.0")).toBe(true);
+    expect(database.prepare(`
+      SELECT champion_version, challenger_version, champion_percent, challenger_percent
+      FROM skill_traffic_allocations WHERE allocation_id = 'allocation-main'
+    `).get()).toEqual({
+      champion_version: "1.0.0",
+      challenger_version: null,
+      champion_percent: 100,
+      challenger_percent: 0
+    });
+  });
+
   it("atomically restores the previous stable version and gives it all traffic", () => {
     registry.createVersion(versionFixture("1.0.0", "champion"));
     registry.bindPage(binding("1.0.0", "allocation-main"));

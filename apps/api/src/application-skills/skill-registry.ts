@@ -184,6 +184,36 @@ export class SkillRegistry {
       return;
     }
 
+    const versionScope = this.database.prepare(`
+      SELECT site, page_fingerprint_hash FROM skill_page_bindings
+      WHERE skill_id = ? AND version = ?
+      LIMIT 1
+    `).get(binding.skillId, binding.version) as {
+      site: SkillSite;
+      page_fingerprint_hash: string;
+    } | undefined;
+    if (versionScope !== undefined && (
+      versionScope.site !== binding.site
+      || versionScope.page_fingerprint_hash !== binding.pageFingerprintHash
+    )) {
+      throw new Error("skill_version_page_binding_conflict");
+    }
+
+    const allocationScope = this.database.prepare(`
+      SELECT site, page_fingerprint_hash FROM skill_page_bindings
+      WHERE allocation_id = ?
+      LIMIT 1
+    `).get(binding.allocationId) as {
+      site: SkillSite;
+      page_fingerprint_hash: string;
+    } | undefined;
+    if (allocationScope !== undefined && (
+      allocationScope.site !== binding.site
+      || allocationScope.page_fingerprint_hash !== binding.pageFingerprintHash
+    )) {
+      throw new Error("skill_allocation_scope_mismatch");
+    }
+
     const pageAllocation = this.database.prepare(`
       SELECT allocation_id FROM skill_page_bindings
       WHERE site = ? AND page_fingerprint_hash = ?
@@ -296,6 +326,23 @@ export class SkillRegistry {
         UPDATE skill_page_bindings SET active_status = ?
         WHERE skill_id = ? AND version = ? AND site = ? AND page_fingerprint_hash = ?
       `).run(activeStatus(next), key.skillId, version, key.site, key.pageFingerprintHash);
+
+      if (next === "quarantined" && expected === "challenger") {
+        this.database.prepare(`
+          UPDATE skill_traffic_allocations
+          SET challenger_version = NULL, challenger_percent = 0,
+              champion_percent = 100, updated_at = ?
+          WHERE skill_id = ? AND site = ? AND page_fingerprint_hash = ?
+            AND challenger_version = ?
+        `).run(new Date().toISOString(), key.skillId, key.site, key.pageFingerprintHash, version);
+      }
+      if (next === "quarantined" && expected === "champion") {
+        this.database.prepare(`
+          DELETE FROM skill_traffic_allocations
+          WHERE skill_id = ? AND site = ? AND page_fingerprint_hash = ?
+            AND champion_version = ?
+        `).run(key.skillId, key.site, key.pageFingerprintHash, version);
+      }
 
       if (next === "champion") {
         this.database.prepare(`
