@@ -45,3 +45,5 @@ rtk corepack pnpm build
 ```
 
 结果：API 127 个文件、1115/1115；Synthetic ATS 7/7；Skill Runtime、离线演化与自动演化 Playwright 合计 13/13；根 TypeScript typecheck 与生产构建通过。构建只输出既有 Web chunk 大小提示，无失败。
+
+最终关闭矩阵加入岗位推荐会话 E2E 后为 16/16；其余计数保持不变。自动演化用例继续验证候选定位提示实际包含 `placeholder = Preferred identity`，并在晋升和硬回滚两段均保持提交计数为 0。

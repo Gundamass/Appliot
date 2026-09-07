@@ -42,9 +42,10 @@ Playwright 成功用例附带 `matched-moka`、`matched-dji`、`matched-baidu` �
 
 - Skill 解释器、选择器与安全计划构建聚焦测试：39/39 通过。
 - contracts 全量：17 个文件，193/193 通过。
-- API 全量：119 个文件，1049/1049 通过。
+- API 最终全量：127 个文件，1115/1115 通过。
 - 合成 ATS：7/7 通过。
 - browser-worker 全量：13 个文件，134/134 通过。
 - Skill Runtime 浏览器回归：11/11 通过。
 - API、browser-worker、synthetic ATS TypeScript 检查全部通过。
 - 根工作区构建通过；仅保留既有的 Web 单 chunk 超过 500 kB 警告（518.41 kB），不影响本次功能与安全门禁。
+- 最终四规格浏览器矩阵（岗位推荐、Skill Runtime、离线演化、自动演化）16/16 通过；其中 Runtime 场景仍为 11/11，全部提交计数为 0。

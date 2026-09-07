@@ -41,3 +41,5 @@ rtk corepack pnpm build
 `evolution-report-evolution-opportunity-offline-e2e`。测试断言候选状态为
 `replay_qualified`、流量仍为 100% Champion / 0% candidate、七类 Synthetic ATS 页面
 的 `submissionCount` 均为 0，且模型载荷中不存在 `holdout-offline-*`。
+
+2026-09-07 最终关闭回归再次通过：API 127 文件 / 1115 测试、Synthetic ATS 7/7、包含本规格在内的四规格 Playwright 16/16、生产构建通过。隐藏留出隔离、资格前零流量和零提交断言未发生回归。

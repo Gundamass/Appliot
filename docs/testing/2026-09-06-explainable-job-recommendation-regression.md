@@ -51,6 +51,10 @@ The reviewer follow-up first added an HTTP-status expectation to the old direct 
 | `rtk corepack pnpm typecheck` | exit 0 |
 | `rtk corepack pnpm build` | exit 0; 11 of 12 workspace projects in scope |
 
+## Final-plan rerun (2026-09-07)
+
+The closing matrix reran the current workspace after the Skill evolution work landed: contracts 17 files / 193 tests, job-matching 7 / 87, API 127 / 1115, Web 45 / 261, Synthetic ATS 1 / 7, and the four-spec browser matrix 16 / 16. The production build passed with only the existing 518.41 kB Web chunk warning. The conversation browser case again verified six sorted percentage cards, inline Chinese explanations, selection persistence, and zero application or submit side effects.
+
 The first full API run was executed concurrently with the other package gates and had one timing-sensitive failure in the unrelated scheduled-embedding concurrency test: 955 passed and 1 failed with `runtime_checkpoint_interrupt_unexpected`. That exact test then passed in isolation (1 passed, 47 skipped), and the complete API suite passed when rerun alone (956/956). No code was changed for that transient failure.
 
 Existing warnings retained in successful runs:
