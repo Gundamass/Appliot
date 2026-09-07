@@ -298,6 +298,7 @@ test("HTTP select_result leaves the production-capable application graph and Syn
         runExtraction: async () => undefined
       },
       matcher: { match: async () => undefined },
+      prepareApplicationTask: (input) => applicationService.start(input),
       submissionCount: () => ats.state(selectionTaskId).submissionCount
     });
     const conversationJobMatches = createConversationJobMatchService({
