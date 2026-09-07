@@ -44,6 +44,23 @@ describe("SkillInterpreter", () => {
     }, skillFixture())).toEqual({ kind: "unmatched", reason: "fingerprint" });
   });
 
+  it("does not match without required landmarks or with an empty broad signature", () => {
+    const interpreter = new SkillInterpreter();
+    expect(interpreter.matchPage({
+      ...observationFixture(),
+      landmarks: []
+    }, skillFixture())).toEqual({ kind: "unmatched", reason: "fingerprint" });
+
+    const broad = skillFixture();
+    broad.content.pageVariants[0]!.match = {
+      routePatterns: ["/**"],
+      requiredTexts: [],
+      requiredFields: []
+    };
+    expect(interpreter.matchPage(observationFixture(), broad))
+      .toEqual({ kind: "unmatched", reason: "fingerprint" });
+  });
+
   it("keeps the structural fingerprint stable across values and challenges", () => {
     const interpreter = new SkillInterpreter();
     const skill = skillFixture();
@@ -124,6 +141,26 @@ describe("SkillInterpreter", () => {
       { kind: "recover", action: "refresh-node-ref" }
     ]);
     directives.forEach((directive) => expect(SkillDirectiveSchema.safeParse(directive).success).toBe(true));
+  });
+
+  it("preserves requested semantic order across separate workflow actions", () => {
+    const interpreter = new SkillInterpreter();
+    const skill = skillFixture();
+    skill.content.workflow[0]!.actions = [
+      { capability: "fill_empty_fields", semantics: ["basics.name"] },
+      { capability: "fill_empty_fields", semantics: ["basics.email"] },
+      { capability: "readback", semantics: ["basics.name"] },
+      { capability: "readback", semantics: ["basics.email"] },
+      { capability: "full_page_audit" }
+    ];
+    const match = interpreter.matchPage(observationFixture(), skill);
+
+    expect(interpreter.compileDirectives(match, ["basics.email", "basics.name"]).slice(0, 4)).toEqual([
+      { kind: "resolve-field", semantic: "basics.email", locatorKeys: ["candidate-email"] },
+      { kind: "resolve-field", semantic: "basics.name", locatorKeys: ["candidate-name", "candidate-name-css"] },
+      { kind: "verify-field", semantic: "basics.email" },
+      { kind: "verify-field", semantic: "basics.name" }
+    ]);
   });
 
   it("evaluates finite all, any, and not conditions against normalized observations", () => {

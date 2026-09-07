@@ -97,8 +97,8 @@ export class SkillInterpreter {
 
     const requested = uniqueRequestedFields(requestedFields);
     const directives: SkillDirective[] = [];
-    const resolved = new Set<ApplicationFieldSemantic>();
-    const verified = new Set<ApplicationFieldSemantic>();
+    const resolvable = new Set<ApplicationFieldSemantic>();
+    const verifiable = new Set<ApplicationFieldSemantic>();
     const observed = new Set(context.observation.fields.map((field) => field.semantic));
     const fields = new Map(context.skill.content.fields.map((field) => [field.semantic, field]));
     const workflow = new Map(context.skill.content.workflow.map((step) => [step.id, step]));
@@ -120,26 +120,33 @@ export class SkillInterpreter {
           ) {
             const semantics = action.capability === "upload_approved_file" ? [action.semantic] : action.semantics;
             for (const semantic of requested) {
-              if (!semantics.includes(semantic) || resolved.has(semantic) || !observed.has(semantic)) continue;
+              if (!semantics.includes(semantic) || !observed.has(semantic)) continue;
               const field = fields.get(semantic);
               if (field === undefined) continue;
-              pushDirective(directives, {
-                kind: "resolve-field",
-                semantic,
-                locatorKeys: [...new Set(field.locatorHints.map((hint) => hint.key))]
-              });
-              resolved.add(semantic);
+              resolvable.add(semantic);
             }
           } else if (action.capability === "readback") {
             for (const semantic of requested) {
-              if (!action.semantics.includes(semantic) || verified.has(semantic) || !observed.has(semantic)) continue;
-              pushDirective(directives, { kind: "verify-field", semantic });
-              verified.add(semantic);
+              if (!action.semantics.includes(semantic) || !observed.has(semantic)) continue;
+              verifiable.add(semantic);
             }
           }
         }
       }
       stepId = step.next === "continue_or_wait" ? undefined : step.next;
+    }
+
+    for (const semantic of requested) {
+      if (!resolvable.has(semantic)) continue;
+      const field = fields.get(semantic)!;
+      pushDirective(directives, {
+        kind: "resolve-field",
+        semantic,
+        locatorKeys: [...new Set(field.locatorHints.map((hint) => hint.key))]
+      });
+    }
+    for (const semantic of requested) {
+      if (verifiable.has(semantic)) pushDirective(directives, { kind: "verify-field", semantic });
     }
 
     const recoveryLimit = Math.min(context.skill.content.recovery.maxRetries, 3);
@@ -216,6 +223,8 @@ function variantScore(
     observation.landmarks.some((landmark) => landmark.includes(normalizeText(required))));
   const semantics = new Set(observation.fields.map((field) => field.semantic));
   const semanticScore = ratio(signature.requiredFields, (required) => semantics.has(required));
+  if (signature.requiredTexts.length === 0 && signature.requiredFields.length === 0) return 0;
+  if (signature.requiredTexts.length > 0 && landmarkScore < 1) return 0;
   if (signature.requiredFields.length > 0 && semanticScore < 1) return 0;
   return routeScore * 0.5 + landmarkScore * 0.25 + semanticScore * 0.25;
 }
