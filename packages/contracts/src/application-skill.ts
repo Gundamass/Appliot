@@ -155,27 +155,58 @@ export const ApplicationSkillCapabilitySchema = z.enum([
 export type ApplicationSkillCapability = z.infer<typeof ApplicationSkillCapabilitySchema>;
 
 const ControlTypeSchema = z.enum(["text", "textarea", "select", "radio", "checkbox", "date", "file"]);
-const HintTextSchema = z.string().trim().min(1).max(120);
+export const SafeStaticUiHintSchema = z.string().trim().min(1).max(120).superRefine((value, context) => {
+  const normalized = value.normalize("NFKC").toLocaleLowerCase();
+  const compactPhone = normalized.replace(/[\s()+-]/gu, "");
+  const forbidden = [
+    /[\p{L}\p{N}._%+-]+@[\p{L}\p{N}.-]+\.[a-z]{2,}/iu,
+    /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u,
+    /(?:https?|ftp|file|data|javascript):|www\./iu,
+    /(?:[a-z]:[\\/]|\\\\|(?:^|\s)\/(?:api|v\d+|home|users|etc|var|tmp)(?:\/|$))/iu,
+    /(?:^|\s)\/\/|xpath|\/html(?:\/|$)|\[@/iu,
+    /javascript|\bscript\b|document\s*(?:\.|\[)|window\s*(?:\.|\[)|\beval\s*\(/iu,
+    /[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/iu,
+    /(?:^|[^a-f0-9])[a-f0-9]{32,}(?:[^a-f0-9]|$)/iu,
+    /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:[^A-Za-z0-9_-]|$)/u,
+    /(?:^|[^A-Za-z0-9+/_=-])[A-Za-z0-9+/_=-]{32,}(?:[^A-Za-z0-9+/_=-]|$)/u,
+    /\b(?:approval|authorization|bearer|token|secret|api[_ -]?key)\b|批准令牌|审批令牌|密钥|秘钥|口令/iu,
+    /(?:姓名|name)\s*[:=：]\s*\S+/iu
+  ];
+  if (forbidden.some((pattern) => pattern.test(normalized))
+    || /(?:^|\D)1[3-9]\d{9}(?:\D|$)/u.test(compactPhone)) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "unsafe_static_ui_hint" });
+  }
+});
+export type SafeStaticUiHint = z.infer<typeof SafeStaticUiHintSchema>;
+
 const StableAttributeValueSchema = z.string()
   .min(1)
   .max(80)
   .regex(/^[A-Za-z][A-Za-z0-9_.-]*$/u)
   .refine((value) => !/\d{6,}/u.test(value), "dynamic_attribute_value_not_allowed")
-  .refine((value) => !/^[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}$/iu.test(value), "dynamic_attribute_value_not_allowed");
+  .refine((value) => !/[a-f0-9]{8}(?:-[a-f0-9]{4}){3}-[a-f0-9]{12}/iu.test(value), "dynamic_attribute_value_not_allowed");
 const RestrictedCssSchema = z.string()
   .min(1)
   .max(200)
-  .regex(/^(?:[a-z][a-z0-9-]*)?(?:\[(?:data-testid|data-field|data-name|name|aria-label)="[A-Za-z][A-Za-z0-9_.-]{0,79}"\])+$/u);
+  .regex(/^(?:[a-z][a-z0-9-]*)?(?:\[(?:data-testid|data-field|data-name|name|aria-label)="[A-Za-z][A-Za-z0-9_.-]{0,79}"\])+$/u)
+  .superRefine((selector, context) => {
+    const values = [...selector.matchAll(/="([^"]+)"/gu)].map((match) => match[1]);
+    values.forEach((value, index) => {
+      if (!StableAttributeValueSchema.safeParse(value).success) {
+        context.addIssue({ code: z.ZodIssueCode.custom, path: [index], message: "dynamic_css_attribute_not_allowed" });
+      }
+    });
+  });
 
 const LocatorHintSchema = z.discriminatedUnion("by", [
-  z.object({ key: IdentifierSchema, by: z.literal("label"), text: HintTextSchema }).strict(),
+  z.object({ key: IdentifierSchema, by: z.literal("label"), text: SafeStaticUiHintSchema }).strict(),
   z.object({
     key: IdentifierSchema,
     by: z.literal("role"),
     role: z.enum(["textbox", "combobox", "radio", "checkbox", "button"]),
-    name: HintTextSchema.optional()
+    name: SafeStaticUiHintSchema.optional()
   }).strict(),
-  z.object({ key: IdentifierSchema, by: z.literal("placeholder"), text: HintTextSchema }).strict(),
+  z.object({ key: IdentifierSchema, by: z.literal("placeholder"), text: SafeStaticUiHintSchema }).strict(),
   z.object({
     key: IdentifierSchema,
     by: z.literal("stable_attribute"),
@@ -213,7 +244,7 @@ const RelativeRoutePatternSchema = z.string().min(1).max(240).refine((value) =>
 
 const PageVariantMatchSchema = z.object({
   routePatterns: z.array(RelativeRoutePatternSchema).min(1).max(8),
-  requiredTexts: z.array(HintTextSchema).max(12),
+  requiredTexts: z.array(SafeStaticUiHintSchema).max(12),
   requiredFields: z.array(ApplicationFieldSemanticSchema).max(40)
 }).strict();
 
@@ -294,6 +325,20 @@ export const ApplicationSkillContentSchema = z.object({
   checkUnique(content.workflow.map((step) => step.id), context, ["workflow"], "duplicate_workflow_step");
 
   const declared = new Set(content.capabilities);
+  if (!declared.has("full_page_audit")) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["capabilities"],
+      message: "full_page_audit_capability_required"
+    });
+  }
+  if (!workflowHasAudit(content.workflow)) {
+    context.addIssue({
+      code: z.ZodIssueCode.custom,
+      path: ["workflow"],
+      message: "full_page_audit_action_required"
+    });
+  }
   content.workflow.forEach((step, stepIndex) => {
     step.actions.forEach((action, actionIndex) => {
       if (!declared.has(action.capability)) {
@@ -444,17 +489,26 @@ const AddPatchOperationSchema = z.discriminatedUnion("path", [
   z.object({ path: z.literal("/workflow/-"), op: z.literal("add"), value: ApplicationSkillWorkflowStepSchema }).strict()
 ]);
 
+const AuditPreservingCapabilitiesSchema = z.array(ApplicationSkillCapabilitySchema)
+  .min(1)
+  .max(6)
+  .refine((capabilities) => capabilities.includes("full_page_audit"), "full_page_audit_capability_required");
+const AuditPreservingWorkflowSchema = z.array(ApplicationSkillWorkflowStepSchema)
+  .min(1)
+  .max(50)
+  .refine(workflowHasAudit, "full_page_audit_action_required");
+
 const ReplacePatchOperationSchema = z.discriminatedUnion("path", [
-  z.object({ path: z.literal("/capabilities"), op: z.literal("replace"), value: z.array(ApplicationSkillCapabilitySchema).min(1).max(6) }).strict(),
+  z.object({ path: z.literal("/capabilities"), op: z.literal("replace"), value: AuditPreservingCapabilitiesSchema }).strict(),
   z.object({ path: z.literal("/pageVariants"), op: z.literal("replace"), value: z.array(ApplicationSkillPageVariantSchema).min(1).max(20) }).strict(),
   z.object({ path: z.literal("/fields"), op: z.literal("replace"), value: z.array(ApplicationSkillFieldSchema).min(1).max(100) }).strict(),
-  z.object({ path: z.literal("/workflow"), op: z.literal("replace"), value: z.array(ApplicationSkillWorkflowStepSchema).min(1).max(50) }).strict(),
+  z.object({ path: z.literal("/workflow"), op: z.literal("replace"), value: AuditPreservingWorkflowSchema }).strict(),
   z.object({ path: z.literal("/recovery"), op: z.literal("replace"), value: ApplicationSkillRecoverySchema }).strict()
 ]);
 
 const RemovePatchOperationSchema = z.object({
   op: z.literal("remove"),
-  path: z.string().regex(/^\/(?:capabilities|pageVariants|fields|workflow)\/(?:0|[1-9]\d*)$/u)
+  path: z.string().regex(/^\/(?:pageVariants|fields)\/(?:0|[1-9]\d*)$/u)
 }).strict();
 
 const SkillPatchOperationSchema = z.union([
@@ -468,6 +522,10 @@ export const SkillEvolutionPatchSchema = z.object({
   operations: z.array(SkillPatchOperationSchema).min(1).max(64)
 }).strict();
 export type SkillEvolutionPatch = z.infer<typeof SkillEvolutionPatchSchema>;
+
+function workflowHasAudit(workflow: readonly z.infer<typeof ApplicationSkillWorkflowStepSchema>[]): boolean {
+  return workflow.some((step) => step.actions.some((action) => action.capability === "full_page_audit"));
+}
 
 function checkUnique(
   values: readonly string[],

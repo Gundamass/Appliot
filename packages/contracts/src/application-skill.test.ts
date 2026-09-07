@@ -127,6 +127,81 @@ function replaceFirstLocator(locator: unknown) {
   };
 }
 
+type TextBearingPosition = "label" | "role" | "placeholder" | "requiredText";
+
+function locatorFor(position: Exclude<TextBearingPosition, "requiredText">, value: string) {
+  switch (position) {
+    case "label": return { key: "unsafe-label", by: "label", text: value };
+    case "role": return { key: "unsafe-role", by: "role", role: "textbox", name: value };
+    case "placeholder": return { key: "unsafe-placeholder", by: "placeholder", text: value };
+  }
+}
+
+function contentWithStaticText(position: TextBearingPosition, value: string) {
+  if (position === "requiredText") {
+    return {
+      ...baiduCampusSkill,
+      pageVariants: [{
+        ...baiduCampusSkill.pageVariants[0],
+        match: { ...baiduCampusSkill.pageVariants[0].match, requiredTexts: [value] }
+      }]
+    };
+  }
+  return replaceFirstLocator(locatorFor(position, value));
+}
+
+function patchWithStaticText(position: TextBearingPosition, value: string) {
+  if (position === "requiredText") {
+    return {
+      parentContentHash: hash,
+      operations: [{
+        op: "add",
+        path: "/pageVariants/-",
+        value: {
+          id: "unsafe-page-variant",
+          match: {
+            routePatterns: ["/jobs/campus/apply/**"],
+            requiredTexts: [value],
+            requiredFields: ["basics.name"]
+          },
+          workflowEntry: "observe-form"
+        }
+      }]
+    };
+  }
+  return {
+    parentContentHash: hash,
+    operations: [{
+      op: "add",
+      path: "/fields/-",
+      value: {
+        semantic: "basics.email",
+        controlTypes: ["text"],
+        locatorHints: [locatorFor(position, value)]
+      }
+    }]
+  };
+}
+
+const unsafeStaticTexts = [
+  "姓名：张三",
+  "candidate@example.com",
+  "13800138000",
+  "https://evil.example/collect",
+  "C:\\Users\\admin\\resume.txt",
+  "/api/v1/profile",
+  "//input[@name='phone']",
+  "javascript:alert(1)",
+  "document.querySelector('input')",
+  "550e8400-e29b-41d4-a716-446655440000",
+  "a".repeat(64),
+  "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.signaturePart123456",
+  "QWxhZGRpbjpPcGVuU2VzYW1lVG9rZW5WYWx1ZQ==",
+  "approval-token-secret"
+] as const;
+
+const textBearingPositions = ["label", "role", "placeholder", "requiredText"] as const;
+
 describe("ApplicationSkillContentSchema", () => {
   it("accepts a closed Baidu campus application skill", () => {
     const parsed = ApplicationSkillContentSchema.parse(baiduCampusSkill);
@@ -186,6 +261,61 @@ describe("ApplicationSkillContentSchema", () => {
     expect(ApplicationFieldSemanticSchema.parse("education[].hasLaboratory")).toBe("education[].hasLaboratory");
     expect(ApplicationFieldSemanticSchema.parse("work[].startDate.month")).toBe("work[].startDate.month");
     expect(ApplicationFieldSemanticSchema.parse("awards[].date.day")).toBe("awards[].date.day");
+  });
+
+  it("requires both the full-page audit capability and a workflow audit action", () => {
+    const observeOnly = {
+      ...baiduCampusSkill,
+      capabilities: ["observe"],
+      workflow: [{
+        id: "observe-form",
+        actions: [{ capability: "observe" }],
+        success: ["page_observed"],
+        next: "continue_or_wait"
+      }]
+    };
+    const auditCapabilityWithoutAction = {
+      ...baiduCampusSkill,
+      workflow: baiduCampusSkill.workflow.map((step) => ({
+        ...step,
+        actions: step.actions.filter((action) => action.capability !== "full_page_audit")
+      }))
+    };
+    expect(() => ApplicationSkillContentSchema.parse(observeOnly)).toThrow();
+    expect(() => ApplicationSkillContentSchema.parse(auditCapabilityWithoutAction)).toThrow();
+  });
+
+  it.each(textBearingPositions)("rejects unsafe static text in content %s hints", (position) => {
+    for (const unsafeText of unsafeStaticTexts) {
+      expect(
+        () => ApplicationSkillContentSchema.parse(contentWithStaticText(position, unsafeText)),
+        `${position} accepted ${unsafeText}`
+      ).toThrow();
+    }
+  });
+
+  it("preserves legitimate short Chinese ATS labels", () => {
+    expect(() => ApplicationSkillContentSchema.parse(baiduCampusSkill)).not.toThrow();
+  });
+
+  it("rejects dynamic identifiers in restricted CSS attribute values", () => {
+    for (const selector of [
+      "input[data-testid=\"candidate-1723456789\"]",
+      "input[data-testid=\"candidate-550e8400-e29b-41d4-a716-446655440000\"]",
+      "input[data-testid=\"candidate-abcdefab-cdef-abcd-efab-cdefabcdefab\"]"
+    ]) {
+      const candidate = {
+        ...baiduCampusSkill,
+        fields: [{
+          ...baiduCampusSkill.fields[0],
+          locatorHints: [
+            { key: "name-label", by: "label", text: "姓名" },
+            { key: "unsafe-css", by: "css", selector }
+          ]
+        }, ...baiduCampusSkill.fields.slice(1)]
+      };
+      expect(() => ApplicationSkillContentSchema.parse(candidate), `accepted ${selector}`).toThrow();
+    }
   });
 });
 
@@ -293,6 +423,43 @@ describe("application skill registry and runtime contracts", () => {
       parentContentHash: hash,
       operations: [{ op: "add", path: "/workflow/-", value: { action: "script", source: "alert(1)" } }]
     })).toThrow();
+  });
+
+  it("rejects patches that can remove the mandatory audit boundary", () => {
+    expect(() => SkillEvolutionPatchSchema.parse({
+      parentContentHash: hash,
+      operations: [{ op: "replace", path: "/capabilities", value: ["observe"] }]
+    })).toThrow();
+    expect(() => SkillEvolutionPatchSchema.parse({
+      parentContentHash: hash,
+      operations: [{
+        op: "replace",
+        path: "/workflow",
+        value: [{
+          id: "observe-form",
+          actions: [{ capability: "observe" }],
+          success: ["page_observed"],
+          next: "continue_or_wait"
+        }]
+      }]
+    })).toThrow();
+    expect(() => SkillEvolutionPatchSchema.parse({
+      parentContentHash: hash,
+      operations: [{ op: "remove", path: "/capabilities/0" }]
+    })).toThrow();
+    expect(() => SkillEvolutionPatchSchema.parse({
+      parentContentHash: hash,
+      operations: [{ op: "remove", path: "/workflow/0" }]
+    })).toThrow();
+  });
+
+  it.each(textBearingPositions)("rejects unsafe static text in typed patch %s values", (position) => {
+    for (const unsafeText of unsafeStaticTexts) {
+      expect(
+        () => SkillEvolutionPatchSchema.parse(patchWithStaticText(position, unsafeText)),
+        `${position} patch accepted ${unsafeText}`
+      ).toThrow();
+    }
   });
 
   it("exports inferred content and record types", () => {
