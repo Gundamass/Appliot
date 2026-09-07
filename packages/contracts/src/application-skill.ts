@@ -542,7 +542,7 @@ function hasPersistedLiteralRisk(value: string): boolean {
     || /(?:^|[^A-Za-z0-9_-])[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}(?:[^A-Za-z0-9_-]|$)/u.test(value)
     || /[A-Za-z0-9+_=]{32,}/u.test(value)
     || /(?:^|[^a-z0-9])(?:approval|authorization|bearer|token|secret|api\s*key)(?:$|[^a-z0-9])/iu.test(credentialWords)
-    || /(?:approvaltoken|authorizationtoken|bearertoken|tokensecret|clientsecret|apikey)/u.test(compactCredential)
+    || /(?:access|refresh|auth|approval|authorization|bearer|client|credential|private|api)?(?:token|secret|key)$|^(?:token|secret|key)(?:access|refresh|auth|approval|authorization|bearer|client|credential|private|api)?/u.test(compactCredential)
     || /批准令牌|审批令牌|密钥|秘钥|口令/u.test(normalized)
     || hasSegmentedOpaqueValue(value);
 }
@@ -569,7 +569,7 @@ function hasSegmentedOpaqueValue(value: string): boolean {
   let run: string[] = [];
 
   for (const chunk of chunks) {
-    if (/^[A-Za-z0-9]{4,}$/u.test(chunk)) {
+    if (/^[A-Za-z0-9]+$/u.test(chunk)) {
       run.push(chunk);
       continue;
     }
@@ -611,7 +611,10 @@ function hasOpaqueChunkWindow(chunks: readonly string[]): boolean {
         (segmentCount >= 4 && normalizedEntropy >= 3.75)
         || (originalEntropy >= 4.15 && uppercaseCount >= 3 && lowercaseCount >= 3)
       );
-      if (randomAlphaNumeric || segmentedEncoding) {
+      const denseBase64UrlEncoding = segmentCount >= 8
+        && combined.length / segmentCount <= 5
+        && originalEntropy >= 3.9;
+      if (randomAlphaNumeric || segmentedEncoding || denseBase64UrlEncoding) {
         return true;
       }
     }

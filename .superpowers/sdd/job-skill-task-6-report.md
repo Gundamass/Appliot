@@ -152,3 +152,12 @@ The next review added two concrete bypass classes: concatenated credential marke
 - Full contracts regression: 169/169 passed.
 - Contracts typecheck: passed.
 - Root typecheck: passed.
+
+## Corpus-based encoding follow-up
+
+The final adversarial review measured the prior heuristic against segmented SHA-256 Base64URL values and found unacceptable false negatives, plus uncovered concatenated credential families such as `accessToken`, `refreshToken`, and `privateKey`. A deterministic 256-sample digest corpus and six credential-family cases were added first; RED reported 7 failing test cases. The classifier now has an explicit dense short-block Base64URL branch using case-preserving entropy, and credential matching covers common compact prefix/suffix families without rejecting tokenization-like prose.
+
+- Focused Skill test: 68/68 passed, including all 256 digest samples in static and identifier carriers.
+- Full contracts regression: 176/176 passed.
+- Contracts typecheck: passed.
+- Root typecheck: passed.

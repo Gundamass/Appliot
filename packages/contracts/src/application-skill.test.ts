@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it } from "vitest";
 import {
   ApplicationFieldSemanticSchema,
@@ -569,6 +570,34 @@ describe("ApplicationSkillContentSchema", () => {
       })).not.toThrow();
     }
   });
+
+  it("rejects a deterministic corpus of segmented SHA-256 Base64URL payloads", () => {
+    for (let index = 0; index < 256; index += 1) {
+      const encoded = createHash("sha256")
+        .update(`skill-literal-${index}`)
+        .digest("base64url")
+        .match(/.{1,4}/gu)!
+        .join("-");
+      expect(
+        () => ApplicationSkillContentSchema.parse(contentWithStaticText("label", encoded)),
+        `static text accepted digest sample ${index}`
+      ).toThrow();
+      expect(
+        () => ApplicationSkillContentSchema.parse(contentWithIdentifier("locatorKey", encoded.toLowerCase())),
+        `identifier accepted digest sample ${index}`
+      ).toThrow();
+    }
+  });
+
+  it.each(["accessToken", "refreshToken", "secretToken", "privateKey", "authToken", "credentialSecret"])(
+    "rejects concatenated credential family %s",
+    (credential) => {
+      expect(() => ApplicationSkillContentSchema.parse(contentWithStaticText("label", credential))).toThrow();
+      expect(() => ApplicationSkillContentSchema.parse(
+        contentWithIdentifier("locatorKey", credential.toLowerCase())
+      )).toThrow();
+    }
+  );
 
   it("rejects dynamic identifiers in restricted CSS attribute values", () => {
     for (const selector of [
