@@ -69,14 +69,15 @@ describe("bootstrapApplicationSkills", () => {
       const dji = registry.getVersion("dji-application", "1.0.0")!;
       const baidu = registry.getVersion("baidu-application", "1.0.0")!;
       expect(moka.content.pageVariants[0]!.match.routePatterns).toEqual([
-        "/social-recruitment",
-        "/campus_apply"
+        "/social-recruitment/**",
+        "/campus_apply/**"
       ]);
       expect(dji.content.pageVariants[0]!.match.routePatterns).toEqual([
-        "/campus-recruitment/dji"
+        "/campus-recruitment/dji/**",
+        "/m/campus-recruitment/dji/**"
       ]);
       expect(baidu.content.pageVariants[0]!.match.routePatterns).toEqual([
-        "/jobs/detail/GRADUATE"
+        "/jobs/detail/GRADUATE/**/apply"
       ]);
       expect(dji.content.fields.map((field) => field.locatorHints[0])).toEqual(expect.arrayContaining([
         { key: "candidate-name", by: "label", text: "姓名" },
@@ -84,6 +85,29 @@ describe("bootstrapApplicationSkills", () => {
         { key: "education-institution", by: "label", text: "毕业院校" }
       ]));
       expect(new Set([moka.contentHash, dji.contentHash, baidu.contentHash]).size).toBe(3);
+    } finally {
+      database.close();
+    }
+  });
+
+  it("refuses to persist a bootstrap seed that fails semantic validation", () => {
+    const database = new Database(":memory:");
+    database.pragma("foreign_keys = ON");
+    migrateApplicationSkillSchema(database);
+    const registry = new SkillRegistry(database);
+
+    try {
+      bootstrapApplicationSkills(registry);
+      const invalid = structuredClone(registry.getVersion("moka-application", "1.0.0")!);
+      invalid.skillId = "invalid-bootstrap-skill";
+      invalid.version = "1.0.1";
+      invalid.content.workflow[0]!.actions = invalid.content.workflow[0]!.actions.filter(
+        (action) => action.capability !== "readback"
+      );
+
+      expect(() => bootstrapApplicationSkills(registry, [invalid]))
+        .toThrowError("bootstrap_skill_invalid:MISSING_READBACK");
+      expect(database.prepare("SELECT COUNT(*) AS count FROM skill_versions").get()).toEqual({ count: 3 });
     } finally {
       database.close();
     }

@@ -96,6 +96,20 @@ describe("validateSkillCandidate", () => {
     });
   });
 
+  it("rejects workflow semantics that have no declared field locator", () => {
+    const candidate = versionFixture("1.1.0", "1.0.0");
+    candidate.content.workflow[0]!.actions = [
+      { capability: "fill_empty_fields", semantics: ["basics.email"] },
+      { capability: "readback", semantics: ["basics.email"] },
+      { capability: "full_page_audit" }
+    ];
+
+    expect(validateSkillCandidate(candidate, versionFixture("1.0.0")).issues).toContainEqual({
+      code: "MISSING_FIELD_DEFINITION",
+      path: "/content/workflow/0/actions/0/semantics/0"
+    });
+  });
+
   it("requires readback after every fill in the same workflow step", () => {
     const candidate = versionFixture("1.1.0", "1.0.0");
     candidate.content.workflow[0]!.actions = [
@@ -107,6 +121,26 @@ describe("validateSkillCandidate", () => {
       code: "MISSING_READBACK",
       path: "/content/workflow/0/actions/0"
     });
+  });
+
+  it("accepts readback in the next reachable workflow step", () => {
+    const candidate = versionFixture("1.1.0", "1.0.0");
+    candidate.content.workflow = [{
+      id: "fill-basics",
+      actions: [{ capability: "fill_empty_fields", semantics: ["basics.name"] }],
+      success: ["fields_resolved"],
+      next: "verify-basics"
+    }, {
+      id: "verify-basics",
+      actions: [
+        { capability: "readback", semantics: ["basics.name"] },
+        { capability: "full_page_audit" }
+      ],
+      success: ["writes_read_back", "audit_clean"],
+      next: "continue_or_wait"
+    }];
+
+    expect(validateSkillCandidate(candidate, versionFixture("1.0.0"))).toEqual({ valid: true, issues: [] });
   });
 
   it("rejects parent site/domain changes and domains outside the registered site origins", () => {

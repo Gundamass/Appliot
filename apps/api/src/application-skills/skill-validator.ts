@@ -12,6 +12,7 @@ export type SkillValidationIssueCode =
   | "UNREACHABLE_VARIANT"
   | "UNREACHABLE_WORKFLOW"
   | "UNREFERENCED_LOCATOR_KEY"
+  | "MISSING_FIELD_DEFINITION"
   | "MISSING_READBACK"
   | "ORIGIN_MISMATCH";
 
@@ -144,20 +145,32 @@ function validateWorkflowGraph(candidate: ApplicationSkillVersion, issues: Skill
 }
 
 function validateLocatorReferences(candidate: ApplicationSkillVersion, issues: SkillValidationIssue[]): void {
+  const declared = new Set(candidate.content.fields.map((field) => field.semantic));
   const referenced = new Set<ApplicationFieldSemantic>();
-  candidate.content.pageVariants.forEach((variant) => {
-    variant.match.requiredFields.forEach((semantic) => referenced.add(semantic));
-  });
-  candidate.content.workflow.forEach((step) => {
-    step.actions.forEach((action) => {
+  candidate.content.workflow.forEach((step, stepIndex) => {
+    step.actions.forEach((action, actionIndex) => {
       if (action.capability === "upload_approved_file") {
         referenced.add(action.semantic);
+        if (!declared.has(action.semantic)) {
+          issues.push({
+            code: "MISSING_FIELD_DEFINITION",
+            path: `/content/workflow/${stepIndex}/actions/${actionIndex}/semantic`
+          });
+        }
       } else if (
         action.capability === "fill_empty_fields"
         || action.capability === "select_option"
         || action.capability === "readback"
       ) {
-        action.semantics.forEach((semantic) => referenced.add(semantic));
+        action.semantics.forEach((semantic, semanticIndex) => {
+          referenced.add(semantic);
+          if (!declared.has(semantic)) {
+            issues.push({
+              code: "MISSING_FIELD_DEFINITION",
+              path: `/content/workflow/${stepIndex}/actions/${actionIndex}/semantics/${semanticIndex}`
+            });
+          }
+        });
       }
     });
   });
@@ -173,19 +186,42 @@ function validateLocatorReferences(candidate: ApplicationSkillVersion, issues: S
 }
 
 function validateReadback(candidate: ApplicationSkillVersion, issues: SkillValidationIssue[]): void {
+  const workflow = candidate.content.workflow;
+  const indices = new Map(workflow.map((step, index) => [step.id, index]));
   candidate.content.workflow.forEach((step, stepIndex) => {
     step.actions.forEach((action, actionIndex) => {
       const written = writtenSemantics(action);
       if (written.length === 0) return;
-      const readBack = new Set<ApplicationFieldSemantic>();
-      step.actions.slice(actionIndex + 1).forEach((later) => {
-        if (later.capability === "readback") later.semantics.forEach((semantic) => readBack.add(semantic));
-      });
-      if (written.some((semantic) => !readBack.has(semantic))) {
+      if (written.some((semantic) => !hasReadbackAfter(workflow, indices, stepIndex, actionIndex, semantic))) {
         issues.push({ code: "MISSING_READBACK", path: `/content/workflow/${stepIndex}/actions/${actionIndex}` });
       }
     });
   });
+}
+
+function hasReadbackAfter(
+  workflow: ApplicationSkillVersion["content"]["workflow"],
+  indices: ReadonlyMap<string, number>,
+  initialStepIndex: number,
+  initialActionIndex: number,
+  semantic: ApplicationFieldSemantic
+): boolean {
+  let stepIndex: number | undefined = initialStepIndex;
+  let actionIndex = initialActionIndex + 1;
+  const visited = new Set<number>();
+
+  while (stepIndex !== undefined && !visited.has(stepIndex)) {
+    visited.add(stepIndex);
+    const step = workflow[stepIndex]!;
+    for (const action of step.actions.slice(actionIndex)) {
+      if (action.capability === "readback" && action.semantics.includes(semantic)) return true;
+      if (writtenSemantics(action).includes(semantic)) return false;
+    }
+    if (step.next === "continue_or_wait") return false;
+    stepIndex = indices.get(step.next);
+    actionIndex = 0;
+  }
+  return false;
 }
 
 function writtenSemantics(

@@ -1,13 +1,23 @@
 import { createHash } from "node:crypto";
 import type { ApplicationFieldSemantic, ApplicationSkillContent, ApplicationSkillVersion } from "@resume/contracts";
 import { canonicalSkillContentHash, type SkillRegistry } from "./skill-registry.js";
+import { validateSkillCandidate } from "./skill-validator.js";
 
 type BootstrapRegistry = Pick<SkillRegistry, "createVersion">;
 
 const CREATED_AT = "2026-09-06T00:00:00.000Z";
 
-export function bootstrapApplicationSkills(registry: BootstrapRegistry): void {
-  for (const skill of bootstrapSkills()) registry.createVersion(skill);
+export function bootstrapApplicationSkills(
+  registry: BootstrapRegistry,
+  skills: readonly ApplicationSkillVersion[] = bootstrapSkills()
+): void {
+  for (const skill of skills) {
+    const validation = validateSkillCandidate(skill);
+    if (!validation.valid) {
+      throw new Error(`bootstrap_skill_invalid:${validation.issues.map((issue) => issue.code).join(",")}`);
+    }
+    registry.createVersion(skill);
+  }
 }
 
 function bootstrapSkills(): ApplicationSkillVersion[] {
@@ -16,7 +26,7 @@ function bootstrapSkills(): ApplicationSkillVersion[] {
       skillId: "moka-application",
       site: "moka",
       allowedDomains: ["app.mokahr.com"],
-      routes: ["/social-recruitment", "/campus_apply"],
+      routes: ["/social-recruitment/**", "/campus_apply/**"],
       requiredTexts: ["申请职位", "个人信息"],
       fields: [
         field("basics.name", "candidate-name", "姓名"),
@@ -29,7 +39,7 @@ function bootstrapSkills(): ApplicationSkillVersion[] {
       skillId: "dji-application",
       site: "dji",
       allowedDomains: ["apply.careers.dji.com", "app.mokahr.com"],
-      routes: ["/campus-recruitment/dji"],
+      routes: ["/campus-recruitment/dji/**", "/m/campus-recruitment/dji/**"],
       requiredTexts: ["申请职位", "个人信息"],
       fields: [
         field("basics.name", "candidate-name", "姓名"),
@@ -42,7 +52,7 @@ function bootstrapSkills(): ApplicationSkillVersion[] {
       skillId: "baidu-application",
       site: "baidu",
       allowedDomains: ["talent.baidu.com"],
-      routes: ["/jobs/detail/GRADUATE"],
+      routes: ["/jobs/detail/GRADUATE/**/apply"],
       requiredTexts: ["申请职位"],
       fields: [field("basics.name", "candidate-name", "姓名")],
       fill: false
