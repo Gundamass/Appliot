@@ -67,10 +67,14 @@ export type SyntheticSkillRuntimeScenario =
   | "stable"
   | "renamed-label"
   | "duplicate-label"
+  | "reordered-controls"
+  | "delayed-options"
+  | "hidden-honeypot"
   | "delayed-render"
   | "stale-node"
   | "ambiguous-fingerprint"
-  | "unexpected-navigation";
+  | "unexpected-navigation"
+  | "post-fill-mutation";
 
 export interface SyntheticSkillRuntimeState {
   site: SyntheticSkillRuntimeSite | "";
@@ -356,10 +360,14 @@ function parseSkillRuntimeScenario(value: unknown): SyntheticSkillRuntimeScenari
     value === "stable"
     || value === "renamed-label"
     || value === "duplicate-label"
+    || value === "reordered-controls"
+    || value === "delayed-options"
+    || value === "hidden-honeypot"
     || value === "delayed-render"
     || value === "stale-node"
     || value === "ambiguous-fingerprint"
     || value === "unexpected-navigation"
+    || value === "post-fill-mutation"
   ) return value;
   throw new Error("unknown_skill_runtime_scenario");
 }
@@ -406,6 +414,13 @@ function skillRuntimePage(
         writeCounts[semantic] = (writeCounts[semantic] || 0) + 1;
         if (scenario === 'unexpected-navigation') {
           void sync().finally(() => { location.href = '/skill-runtime-unexpected?taskId=' + taskId; });
+        } else if (scenario === 'post-fill-mutation') {
+          void sync().then(() => setTimeout(() => {
+            field.value = 'POST_FILL_MUTATION';
+            values[semantic] = field.value;
+            document.dispatchEvent(new CustomEvent('skill-runtime-post-fill-mutated'));
+            void sync();
+          }, 80));
         } else {
           void sync();
         }
@@ -414,6 +429,14 @@ function skillRuntimePage(
         field.addEventListener('input', onValue);
       });
       bind();
+      if (scenario === 'delayed-options') {
+        setTimeout(() => {
+          const select = root.querySelector('[data-delayed-options]');
+          if (!select) return;
+          select.innerHTML = '<option value="">请选择</option><option value="beijing">北京</option>';
+          document.dispatchEvent(new CustomEvent('skill-runtime-options-ready'));
+        }, 250);
+      }
       window.skillRuntimeFixture = {
         flush() { return syncPromise; },
         triggerStaleNode() {
@@ -434,7 +457,7 @@ function skillRuntimeFields(
   values: Readonly<Record<string, string>>
 ): string {
   const renamed = scenario === "renamed-label";
-  const fields: Array<[string, string]> = site === "moka"
+  let fields: Array<[string, string]> = site === "moka"
     ? [
         ["basics.name", renamed ? "Full legal name" : "姓名"],
         ["basics.email", renamed ? "Primary email" : "邮箱"],
@@ -448,9 +471,17 @@ function skillRuntimeFields(
         ]
       : [["basics.name", renamed ? "Full legal name" : "姓名"]];
   if (scenario === "duplicate-label") fields.push(["basics.name", renamed ? "Full legal name" : "姓名"]);
-  return fields.map(([semantic, label], index) => `
+  if (scenario === "reordered-controls") fields = [...fields].reverse();
+  const controls = fields.map(([semantic, label], index) => `
     <label for="skill-field-${index}">${label}</label>
     <input id="skill-field-${index}" name="${semantic}" data-semantic="${semantic}" value="${escapeHtml(values[semantic] ?? "")}" required>`).join("");
+  const delayedOptions = scenario === "delayed-options"
+    ? `<label for="skill-delayed-city">期望城市</label><select id="skill-delayed-city" name="basics.city" data-semantic="basics.city" data-delayed-options="true"></select>`
+    : "";
+  const honeypot = scenario === "hidden-honeypot"
+    ? `<input type="hidden" name="website" data-semantic="basics.name" data-honeypot="true" value="">`
+    : "";
+  return `${controls}${delayedOptions}${honeypot}`;
 }
 
 function challengeKindForScenario(scenario: string): SyntheticChallengeState["kind"] {

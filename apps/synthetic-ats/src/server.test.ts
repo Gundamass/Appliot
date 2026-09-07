@@ -151,10 +151,14 @@ describe("synthetic ATS application scenarios", () => {
       "stable",
       "renamed-label",
       "duplicate-label",
+      "reordered-controls",
+      "delayed-options",
+      "hidden-honeypot",
       "delayed-render",
       "stale-node",
       "ambiguous-fingerprint",
-      "unexpected-navigation"
+      "unexpected-navigation",
+      "post-fill-mutation"
     ] as const;
 
     for (const site of sites) {
@@ -174,6 +178,25 @@ describe("synthetic ATS application scenarios", () => {
         });
       }
     }
+
+    const reordered = await fetch(
+      `${server.baseUrl}/skill-runtime?taskId=reordered&site=moka&scenario=reordered-controls`
+    ).then((response) => response.text());
+    expect(reordered.indexOf('data-semantic="basics.phone"')).toBeLessThan(
+      reordered.indexOf('data-semantic="basics.name"')
+    );
+    const delayedOptions = await fetch(
+      `${server.baseUrl}/skill-runtime?taskId=options&site=moka&scenario=delayed-options`
+    ).then((response) => response.text());
+    expect(delayedOptions).toContain("skill-runtime-options-ready");
+    const honeypot = await fetch(
+      `${server.baseUrl}/skill-runtime?taskId=honeypot&site=moka&scenario=hidden-honeypot`
+    ).then((response) => response.text());
+    expect(honeypot).toContain('data-honeypot="true"');
+    const mutation = await fetch(
+      `${server.baseUrl}/skill-runtime?taskId=mutation&site=moka&scenario=post-fill-mutation`
+    ).then((response) => response.text());
+    expect(mutation).toContain("skill-runtime-post-fill-mutated");
   });
 
   it("records Skill runtime field readback without accepting a final submission", async () => {
