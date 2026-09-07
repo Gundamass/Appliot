@@ -29,6 +29,14 @@ export interface SkillTrafficAllocationInput extends SkillPageKey {
   readonly updatedAt: string;
 }
 
+export interface SkillChallengerActivationInput extends SkillPageKey {
+  readonly allocationId: string;
+  readonly championVersion: string;
+  readonly challengerVersion: string;
+  readonly challengerPermille: number;
+  readonly activatedAt: string;
+}
+
 export interface SkillEvolutionRunRecord {
   readonly runId: string;
   readonly trigger: string;
@@ -365,6 +373,7 @@ export class SkillRegistry {
     validateVersion(version);
     validateStatus(expected);
     validateStatus(next);
+    if (expected === "replay_qualified" && next === "challenger") return false;
     const hardFailureTransition = next === "quarantined"
       && expected !== "retired"
       && expected !== "quarantined";
@@ -430,6 +439,64 @@ export class SkillRegistry {
     });
 
     return transition.immediate();
+  }
+
+  public activateChallenger(input: SkillChallengerActivationInput): boolean {
+    validatePageKey(input);
+    validateRuntimeId(input.allocationId, "skill_allocation_id_invalid");
+    validateVersion(input.championVersion);
+    validateVersion(input.challengerVersion);
+    validateTimestamp(input.activatedAt, "skill_allocation_timestamp_invalid");
+    if (input.challengerPermille !== 100) throw new Error("skill_challenger_allocation_invalid");
+
+    const activate = this.database.transaction(() => {
+      const champion = this.findBoundVersion(input, input.championVersion);
+      const challenger = this.findBoundVersion(input, input.challengerVersion);
+      if (champion?.status !== "champion"
+        || champion.active_status !== "champion"
+        || champion.allocation_id !== input.allocationId
+        || challenger?.status !== "replay_qualified"
+        || challenger.allocation_id !== input.allocationId) return false;
+      const allocation = this.database.prepare(`
+        SELECT champion_version, challenger_version, champion_percent, challenger_percent
+        FROM skill_traffic_allocations
+        WHERE allocation_id = ? AND skill_id = ? AND site = ? AND page_fingerprint_hash = ?
+      `).get(
+        input.allocationId,
+        input.skillId,
+        input.site,
+        input.pageFingerprintHash
+      ) as {
+        champion_version: string;
+        challenger_version: string | null;
+        champion_percent: number;
+        challenger_percent: number;
+      } | undefined;
+      if (allocation === undefined
+        || allocation.champion_version !== input.championVersion
+        || allocation.challenger_version !== null
+        || allocation.champion_percent !== 100
+        || allocation.challenger_percent !== 0) return false;
+
+      const promoted = this.database.prepare(`
+        UPDATE skill_versions SET status = 'challenger'
+        WHERE skill_id = ? AND version = ? AND status = 'replay_qualified'
+      `).run(input.skillId, input.challengerVersion);
+      if (promoted.changes !== 1) throw new Error("skill_challenger_activation_conflict");
+      this.database.prepare(`
+        UPDATE skill_page_bindings SET active_status = 'challenger'
+        WHERE skill_id = ? AND version = ? AND site = ? AND page_fingerprint_hash = ?
+      `).run(input.skillId, input.challengerVersion, input.site, input.pageFingerprintHash);
+      const allocated = this.database.prepare(`
+        UPDATE skill_traffic_allocations
+        SET challenger_version = ?, champion_percent = 90, challenger_percent = 10, updated_at = ?
+        WHERE allocation_id = ? AND champion_version = ?
+          AND challenger_version IS NULL AND champion_percent = 100 AND challenger_percent = 0
+      `).run(input.challengerVersion, input.activatedAt, input.allocationId, input.championVersion);
+      if (allocated.changes !== 1) throw new Error("skill_challenger_activation_conflict");
+      return true;
+    });
+    return activate.immediate();
   }
 
   public restoreChampion(key: SkillPageKey, stableVersion: string): boolean {

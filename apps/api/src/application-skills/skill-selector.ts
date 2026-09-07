@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import {
   ApplicationFieldSemanticSchema,
   ApplicationSkillVersionSchema,
@@ -11,6 +12,7 @@ import { SkillInterpreter, type NormalizedSkillPageObservation } from "./skill-i
 
 export interface SkillSelectorInput {
   readonly taskId: string;
+  readonly taskCreatedAt?: string;
   readonly site: SkillBinding["site"];
   readonly pageFingerprintHash: string;
 }
@@ -24,6 +26,7 @@ export interface SkillPageAllocation {
   readonly challengerVersion?: string;
   readonly championPercent: number;
   readonly challengerPercent: number;
+  readonly updatedAt: string;
 }
 
 export interface SkillRegistrySelectionPort {
@@ -115,9 +118,20 @@ export class SkillSelector {
     );
     if (champion === undefined) return observeOnly("safe_version_unavailable");
 
+    let selected = champion;
+    if (shouldSelectChallenger(input, allocation) && allocation.challengerVersion !== undefined) {
+      const challenger = await this.safeVersion(
+        allocation.skillId,
+        allocation.challengerVersion,
+        allocation.site,
+        "challenger"
+      );
+      if (challenger !== undefined) selected = challenger;
+    }
+
     const bindingResult = SkillBindingSchema.safeParse({
       skillId: allocation.skillId,
-      version: champion.version,
+      version: selected.version,
       site: allocation.site,
       pageFingerprintHash: allocation.pageFingerprintHash,
       allocationId: allocation.allocationId
@@ -242,14 +256,9 @@ export function createApplicationSkillRuntime(options: {
         pageFingerprintHash: match.fingerprintHash
       });
       if (selected.kind !== "selected") return selected;
-      if (!sameBinding(selected.binding, candidate)) return observeOnly("safe_version_unavailable");
-      return {
-        kind: "selected",
-        binding: selected.binding,
-        pageVariantId: match.pageVariantId,
-        allocation: "champion",
-        directives
-      };
+      if (!samePageAllocation(selected.binding, candidate)) return observeOnly("safe_version_unavailable");
+      const selectedVersion = await options.registry.getVersion(selected.binding.skillId, selected.binding.version);
+      return compileSelection(interpreter, observation, selectedVersion, selected.binding);
     }
   };
 }
@@ -258,7 +267,8 @@ function validInput(input: SkillSelectorInput): boolean {
   return RUNTIME_IDENTIFIER.test(input.taskId)
     && input.taskId.length <= 128
     && SITES.has(input.site)
-    && HASH.test(input.pageFingerprintHash);
+    && HASH.test(input.pageFingerprintHash)
+    && (input.taskCreatedAt === undefined || !Number.isNaN(Date.parse(input.taskCreatedAt)));
 }
 
 function validAllocation(allocation: SkillPageAllocation, input: SkillSelectorInput): boolean {
@@ -276,10 +286,22 @@ function validAllocation(allocation: SkillPageAllocation, input: SkillSelectorIn
     || allocation.championPercent > 100
     || allocation.challengerPercent > 100
     || allocation.championPercent + allocation.challengerPercent !== 100
+    || Number.isNaN(Date.parse(allocation.updatedAt))
   ) {
     return false;
   }
   return allocation.challengerPercent === 0 || allocation.challengerVersion !== undefined;
+}
+
+function shouldSelectChallenger(input: SkillSelectorInput, allocation: SkillPageAllocation): boolean {
+  if (allocation.challengerVersion === undefined || allocation.challengerPercent === 0) return false;
+  if (input.taskCreatedAt !== undefined
+    && Date.parse(input.taskCreatedAt) < Date.parse(allocation.updatedAt)) return false;
+  const allocationSalt = allocation.allocationId;
+  const digest = createHash("sha256")
+    .update(`${input.site}${input.pageFingerprintHash}${input.taskId}${allocationSalt}`, "utf8")
+    .digest();
+  return digest.readUInt32BE(0) % 1_000 < allocation.challengerPercent * 10;
 }
 
 function selectionFromStoredBinding(stored: unknown, input: SkillSelectorInput): SkillSelection {
@@ -306,6 +328,13 @@ function compileSelection(
   version: unknown,
   binding: SkillBinding
 ): Awaited<ReturnType<ApplicationSkillRuntime["resolve"]>> {
+  const parsedVersion = ApplicationSkillVersionSchema.safeParse(version);
+  if (!parsedVersion.success
+    || parsedVersion.data.skillId !== binding.skillId
+    || parsedVersion.data.version !== binding.version
+    || (parsedVersion.data.status !== "champion" && parsedVersion.data.status !== "challenger")) {
+    return observeOnly("safe_version_unavailable");
+  }
   const match = interpreter.matchPage(observation, version);
   if (match.kind !== "matched") return observeOnly("page_unmatched");
   const directives = interpreter.compileDirectives(match, observedSemantics(observation));
@@ -316,7 +345,7 @@ function compileSelection(
     kind: "selected",
     binding,
     pageVariantId: match.pageVariantId,
-    allocation: "champion",
+    allocation: parsedVersion.data.status,
     directives
   };
 }
@@ -378,6 +407,13 @@ function hasValue(value: unknown): boolean {
 function sameBinding(left: SkillBinding, right: SkillBinding): boolean {
   return left.skillId === right.skillId
     && left.version === right.version
+    && left.site === right.site
+    && left.pageFingerprintHash === right.pageFingerprintHash
+    && left.allocationId === right.allocationId;
+}
+
+function samePageAllocation(left: SkillBinding, right: SkillBinding): boolean {
+  return left.skillId === right.skillId
     && left.site === right.site
     && left.pageFingerprintHash === right.pageFingerprintHash
     && left.allocationId === right.allocationId;

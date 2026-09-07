@@ -112,23 +112,94 @@ describe("SkillRegistry", () => {
 
     expect(registry.compareAndSetStatus(key, "candidate", "challenger", "1.1.0")).toBe(false);
     expect(registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.1.0")).toBe(true);
-    expect(registry.compareAndSetStatus(key, "replay_qualified", "challenger", "1.1.0")).toBe(true);
-    expect(registry.compareAndSetStatus(key, "challenger", "quarantined", "1.1.0")).toBe(true);
+    expect(registry.compareAndSetStatus(key, "replay_qualified", "challenger", "1.1.0")).toBe(false);
+    expect(registry.compareAndSetStatus(key, "replay_qualified", "quarantined", "1.1.0")).toBe(true);
     expect(registry.getVersion(key.skillId, "1.1.0")?.status).toBe("quarantined");
     expect(registry.compareAndSetStatus(key, "quarantined", "quarantined", "1.1.0")).toBe(false);
     expect(registry.compareAndSetStatus(key, "quarantined", "candidate", "1.1.0")).toBe(false);
   });
 
   it("allows exactly one winner across repeated compare-and-set promotion attempts", () => {
-    registry.createVersion(versionFixture("1.1.0", "candidate"));
+    registry.createVersion(versionFixture("1.0.0", "champion"));
+    registry.bindPage(binding("1.0.0", "allocation-main"));
+    registry.setAllocation({
+      allocationId: "allocation-main", ...key, championVersion: "1.0.0",
+      championPercent: 100, challengerPercent: 0, updatedAt: "2026-09-07T08:00:00.000Z"
+    });
+    registry.createVersion(versionFixture("1.1.0", "candidate", "1.0.0"));
     registry.bindPage(binding("1.1.0", "allocation-main"));
     expect(registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.1.0")).toBe(true);
-    expect(registry.compareAndSetStatus(key, "replay_qualified", "challenger", "1.1.0")).toBe(true);
+    expect(registry.activateChallenger({
+      allocationId: "allocation-main", ...key, championVersion: "1.0.0", challengerVersion: "1.1.0",
+      challengerPermille: 100, activatedAt: "2026-09-07T09:00:00.000Z"
+    })).toBe(true);
 
     expect([
       registry.compareAndSetStatus(key, "challenger", "champion", "1.1.0"),
       registry.compareAndSetStatus(key, "challenger", "champion", "1.1.0")
     ].filter(Boolean)).toHaveLength(1);
+  });
+
+  it("atomically activates exactly one replay-qualified Challenger at 10 percent", () => {
+    registry.createVersion(versionFixture("1.0.0", "champion"));
+    registry.bindPage(binding("1.0.0", "allocation-main"));
+    registry.setAllocation({
+      allocationId: "allocation-main",
+      ...key,
+      championVersion: "1.0.0",
+      championPercent: 100,
+      challengerPercent: 0,
+      updatedAt: "2026-09-07T08:00:00.000Z"
+    });
+    registry.createVersion(versionFixture("1.1.0", "candidate", "1.0.0"));
+    registry.bindPage(binding("1.1.0", "allocation-main"));
+    registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.1.0");
+
+    const activation = {
+      ...key,
+      allocationId: "allocation-main",
+      championVersion: "1.0.0",
+      challengerVersion: "1.1.0",
+      challengerPermille: 100,
+      activatedAt: "2026-09-07T09:00:00.000Z"
+    };
+    expect(registry.activateChallenger(activation)).toBe(true);
+    expect(registry.activateChallenger(activation)).toBe(false);
+    expect(registry.getVersion(key.skillId, "1.1.0")?.status).toBe("challenger");
+    expect(registry.getPageAllocation(key)).toMatchObject({
+      championVersion: "1.0.0",
+      challengerVersion: "1.1.0",
+      championPercent: 90,
+      challengerPercent: 10,
+      updatedAt: activation.activatedAt
+    });
+  });
+
+  it("rejects a non-10-percent activation without changing lifecycle or allocation", () => {
+    registry.createVersion(versionFixture("1.0.0", "champion"));
+    registry.bindPage(binding("1.0.0", "allocation-main"));
+    registry.setAllocation({
+      allocationId: "allocation-main",
+      ...key,
+      championVersion: "1.0.0",
+      championPercent: 100,
+      challengerPercent: 0,
+      updatedAt: "2026-09-07T08:00:00.000Z"
+    });
+    registry.createVersion(versionFixture("1.1.0", "candidate", "1.0.0"));
+    registry.bindPage(binding("1.1.0", "allocation-main"));
+    registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.1.0");
+
+    expect(() => registry.activateChallenger({
+      ...key,
+      allocationId: "allocation-main",
+      championVersion: "1.0.0",
+      challengerVersion: "1.1.0",
+      challengerPermille: 200,
+      activatedAt: "2026-09-07T09:00:00.000Z"
+    })).toThrowError("skill_challenger_allocation_invalid");
+    expect(registry.getVersion(key.skillId, "1.1.0")?.status).toBe("replay_qualified");
+    expect(registry.getPageAllocation(key)).toMatchObject({ championPercent: 100, challengerPercent: 0 });
   });
 
   it("keeps only one active champion and challenger per page fingerprint", () => {
@@ -140,9 +211,19 @@ describe("SkillRegistry", () => {
     registry.bindPage(binding("1.2.0", "allocation-main"));
 
     expect(registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.1.0")).toBe(true);
-    expect(registry.compareAndSetStatus(key, "replay_qualified", "challenger", "1.1.0")).toBe(true);
+    registry.setAllocation({
+      allocationId: "allocation-main", ...key, championVersion: "1.0.0",
+      championPercent: 100, challengerPercent: 0, updatedAt: "2026-09-07T08:00:00.000Z"
+    });
+    expect(registry.activateChallenger({
+      allocationId: "allocation-main", ...key, championVersion: "1.0.0", challengerVersion: "1.1.0",
+      challengerPermille: 100, activatedAt: "2026-09-07T09:00:00.000Z"
+    })).toBe(true);
     expect(registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.2.0")).toBe(true);
-    expect(() => registry.compareAndSetStatus(key, "replay_qualified", "challenger", "1.2.0")).toThrow();
+    expect(registry.activateChallenger({
+      allocationId: "allocation-main", ...key, championVersion: "1.0.0", challengerVersion: "1.2.0",
+      challengerPermille: 100, activatedAt: "2026-09-07T10:00:00.000Z"
+    })).toBe(false);
   });
 
   it("keeps one stable allocation identity for every page fingerprint", () => {
@@ -197,15 +278,17 @@ describe("SkillRegistry", () => {
     registry.createVersion(versionFixture("1.1.0", "candidate", "1.0.0"));
     registry.bindPage(binding("1.1.0", "allocation-main"));
     registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.1.0");
-    registry.compareAndSetStatus(key, "replay_qualified", "challenger", "1.1.0");
     registry.setAllocation({
       allocationId: "allocation-main",
       ...key,
       championVersion: "1.0.0",
-      challengerVersion: "1.1.0",
-      championPercent: 90,
-      challengerPercent: 10,
+      championPercent: 100,
+      challengerPercent: 0,
       updatedAt: "2026-09-07T08:00:00.000Z"
+    });
+    registry.activateChallenger({
+      allocationId: "allocation-main", ...key, championVersion: "1.0.0", challengerVersion: "1.1.0",
+      challengerPermille: 100, activatedAt: "2026-09-07T09:00:00.000Z"
     });
 
     expect(registry.compareAndSetStatus(key, "challenger", "quarantined", "1.1.0")).toBe(true);
@@ -226,15 +309,17 @@ describe("SkillRegistry", () => {
     registry.createVersion(versionFixture("1.1.0", "candidate", "1.0.0"));
     registry.bindPage(binding("1.1.0", "allocation-main"));
     registry.compareAndSetStatus(key, "candidate", "replay_qualified", "1.1.0");
-    registry.compareAndSetStatus(key, "replay_qualified", "challenger", "1.1.0");
     registry.setAllocation({
       allocationId: "allocation-main",
       ...key,
       championVersion: "1.0.0",
-      challengerVersion: "1.1.0",
-      championPercent: 90,
-      challengerPercent: 10,
+      championPercent: 100,
+      challengerPercent: 0,
       updatedAt: "2026-09-07T08:00:00.000Z"
+    });
+    registry.activateChallenger({
+      allocationId: "allocation-main", ...key, championVersion: "1.0.0", challengerVersion: "1.1.0",
+      challengerPermille: 100, activatedAt: "2026-09-07T09:00:00.000Z"
     });
     expect(registry.compareAndSetStatus(key, "challenger", "champion", "1.1.0")).toBe(true);
 

@@ -1,3 +1,4 @@
+import { createHash } from "node:crypto";
 import { describe, expect, it, vi } from "vitest";
 import {
   ApplicationSkillVersionSchema,
@@ -17,19 +18,42 @@ import {
 const PAGE_HASH = "c".repeat(64);
 
 describe("SkillSelector", () => {
-  it("selects only the Champion before controlled live allocation is enabled", async () => {
-    const allocation = allocationFixture({ championPercent: 50, challengerPercent: 50 });
+  it("assigns roughly ten percent of fixed task IDs to the Challenger deterministically", async () => {
+    const allocation = allocationFixture({ championPercent: 90, challengerPercent: 10 });
     const registry = new FakeRegistry(allocation, [
       skillFixture("1.0.0", "champion"),
       skillFixture("1.1.0", "challenger")
     ]);
+    let challengers = 0;
+    for (let index = 0; index < 10_000; index += 1) {
+      const input = { taskId: `task-distribution-${index}`, site: "baidu" as const, pageFingerprintHash: PAGE_HASH };
+      const first = await new SkillSelector(registry, new MemoryBindingStore()).selectForTask(input);
+      const afterRestart = await new SkillSelector(registry, new MemoryBindingStore()).selectForTask(input);
+      expect(afterRestart).toEqual(first);
+      const expectedBucket = createHash("sha256")
+        .update(`baidu${PAGE_HASH}${input.taskId}${allocation.allocationId}`, "utf8")
+        .digest().readUInt32BE(0) % 1_000;
+      expect(first).toMatchObject({
+        kind: "selected",
+        binding: { version: expectedBucket < 100 ? "1.1.0" : "1.0.0" }
+      });
+      if (first.kind === "selected" && first.binding.version === "1.1.0") challengers += 1;
+    }
+    expect(challengers).toBeGreaterThanOrEqual(900);
+    expect(challengers).toBeLessThanOrEqual(1_100);
+  });
 
+  it("keeps a task created before Challenger activation on the Champion", async () => {
+    const registry = new FakeRegistry(allocationFixture({ championPercent: 90, challengerPercent: 10 }), [
+      skillFixture("1.0.0", "champion"),
+      skillFixture("1.1.0", "challenger")
+    ]);
     const selection = await new SkillSelector(registry, new MemoryBindingStore()).selectForTask({
-      taskId: "task-before-live-allocation",
+      taskId: "task-created-before-activation",
+      taskCreatedAt: "2026-09-07T07:59:59.000Z",
       site: "baidu",
       pageFingerprintHash: PAGE_HASH
     });
-
     expect(selection).toMatchObject({ kind: "selected", binding: { version: "1.0.0" } });
   });
 
@@ -337,6 +361,7 @@ function allocationFixture(percentages: {
     pageFingerprintHash: PAGE_HASH,
     championVersion: "1.0.0",
     challengerVersion: "1.1.0",
+    updatedAt: "2026-09-07T08:00:00.000Z",
     ...percentages
   };
 }
