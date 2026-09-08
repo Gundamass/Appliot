@@ -398,6 +398,153 @@ test("legacy job-match URL returns to the owning conversation instead of renderi
   await expect(page.getByText("岗位匹配工作台", { exact: true })).toHaveCount(0);
 });
 
+test("pasted application URL creates a loadable filling task", async ({ page }) => {
+  const conversationId = "conversation-direct-application";
+  const taskId = "31f69b45-8888-5c29-9496-7e9e43c3c9f8";
+  const applicationUrl = "https://jobs.example.com/apply/123";
+  const session = {
+    id: conversationId,
+    title: "填写申请页面",
+    createdAt: "2026-09-08T00:00:00.000Z",
+    updatedAt: "2026-09-08T00:00:00.000Z"
+  };
+  const context = { version: 0, recentPostingIds: [] };
+  const confirmation = {
+    confirmationId: "confirmation-direct-application",
+    action: "start_application",
+    target: { kind: "application_url", url: applicationUrl }
+  };
+  const applicationTask = {
+    id: taskId,
+    applicationUrl,
+    state: "observing_page",
+    commands: ["cancel", "open_browser"],
+    recoveryCommands: [],
+    questions: [],
+    taskAnswers: []
+  };
+
+  await page.route("**/api/conversations", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([session])
+    });
+  });
+  await page.route(`**/api/conversations/${conversationId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({ session, messages: [], context })
+    });
+  });
+  await page.route(`**/api/conversations/${conversationId}/messages`, async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      text: `这个页面帮我填写 ${applicationUrl} 好吗`
+    });
+    const cards = [{ type: "confirmation", ...confirmation }];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        message: {
+          id: "assistant-direct-application-1",
+          sessionId: conversationId,
+          sequence: 2,
+          role: "assistant",
+          text: "开始填写前请确认。",
+          cards,
+          createdAt: "2026-09-08T00:00:01.000Z"
+        },
+        cards,
+        context: { ...context, version: 1 },
+        confirmationId: confirmation.confirmationId,
+        pendingConfirmation: confirmation
+      })
+    });
+  });
+  await page.route(`**/api/conversations/${conversationId}/confirm`, async (route) => {
+    expect(route.request().postDataJSON()).toEqual({
+      confirmationId: confirmation.confirmationId,
+      approved: true
+    });
+    const cards = [{
+      type: "application_task",
+      taskId,
+      title: "jobs.example.com 填写",
+      state: "observing_page",
+      applicationUrl
+    }];
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        message: {
+          id: "assistant-direct-application-2",
+          sessionId: conversationId,
+          sequence: 4,
+          role: "assistant",
+          text: "已创建受控填写任务，可以打开任务工作台继续处理。",
+          cards,
+          createdAt: "2026-09-08T00:00:02.000Z"
+        },
+        cards,
+        context: { ...context, version: 2, activeApplicationTaskId: taskId },
+        consumedConfirmationId: confirmation.confirmationId
+      })
+    });
+  });
+  await page.route(`**/api/conversations/${conversationId}/events`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+  });
+  await page.route("**/api/applications", async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([applicationTask])
+    });
+  });
+  await page.route(`**/api/applications/${taskId}`, async (route) => {
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify(applicationTask)
+    });
+  });
+  await page.route(`**/api/applications/${taskId}/events`, async (route) => {
+    await route.fulfill({ status: 200, contentType: "text/event-stream", body: "" });
+  });
+
+  await page.goto(`${webBaseUrl}/?conversation=${conversationId}`);
+  const composer = page.getByRole("textbox", { name: "输入消息" });
+  await composer.fill("这个页面帮我填写 ");
+  await composer.evaluate((element, url) => {
+    const clipboardData = new DataTransfer();
+    clipboardData.setData("text/plain", url);
+    element.dispatchEvent(new ClipboardEvent("paste", {
+      bubbles: true,
+      cancelable: true,
+      clipboardData
+    }));
+  }, applicationUrl);
+  await expect(composer).toHaveValue(`这个页面帮我填写 ${applicationUrl} `);
+  await composer.pressSequentially("好吗");
+  await page.getByRole("button", { name: "发送" }).click();
+
+  await expect(page.getByRole("button", { name: "确认开始填写" })).toBeVisible();
+  await page.getByRole("button", { name: "确认开始填写" }).click();
+  const taskLink = page.getByRole("button", { name: "打开投递任务" });
+  await expect(taskLink).toBeVisible();
+  await taskLink.click();
+
+  await expect(page).toHaveURL(`${webBaseUrl}/applications/${taskId}`);
+  expect(taskId).toMatch(
+    /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+  );
+  await expect(page.getByRole("heading", { name: "实时任务控制" })).toBeVisible();
+  await expect(page.getByText("任务加载失败，请重试")).toHaveCount(0);
+});
+
 async function mockInlineConversation(
   page: Page,
   capturedActions: ConversationJobMatchAction[] = [],

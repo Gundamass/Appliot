@@ -551,7 +551,7 @@ describe("conversation graph", () => {
 
   it("uses DeepSeek semantics for varied application wording and binds the original URL", async () => {
     const dependencies = fakeDependencies();
-    const generateStructured = vi.fn(async () => ({
+    const generateStructured = vi.fn(async (_input: unknown) => ({
       kind: "start_application",
       requiresConfirmation: true
     }));
