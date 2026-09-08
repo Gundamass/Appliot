@@ -3,7 +3,11 @@ import { MemorySaver } from "@langchain/langgraph-checkpoint";
 import type { ConversationContext, ConversationTurnResponse, RecruitmentSiteSearchResult, VerifiedRecruitmentSite } from "@resume/contracts";
 import type { JobMatchAggregate, JobMatchRepository } from "../job-matching/job-match-repository.js";
 import { createConversationToolRegistry } from "./conversation-tools.js";
-import { createConversationGraph, type ConversationGraphDependencies } from "./conversation-graph.js";
+import {
+  createConversationGraph,
+  UrlIntentRouteSchema,
+  type ConversationGraphDependencies
+} from "./conversation-graph.js";
 import { createConversationProcessEventBus } from "./conversation-events.js";
 
 const baseContext: ConversationContext = {
@@ -317,7 +321,13 @@ describe("conversation graph", () => {
       url: "https://jobs.baidu.com/",
       domain: "jobs.baidu.com"
     }));
-    const graph = createConversationGraph({ ...base, searchRecruitmentSites, validatePublicHttpsUrl });
+    const modelProvider = {
+      generateStructured: vi.fn(async () => ({
+        kind: "discover_recruitment_site",
+        requiresConfirmation: false
+      }))
+    };
+    const graph = createConversationGraph({ ...base, searchRecruitmentSites, validatePublicHttpsUrl, modelProvider });
     const discovered = (await graph.invoke({
       conversationId: "conversation-recruitment-manual-link",
       turnSequence: 1,
@@ -362,6 +372,12 @@ describe("conversation graph", () => {
       ...base,
       searchRecruitmentSites,
       validatePublicHttpsUrl,
+      modelProvider: {
+        generateStructured: vi.fn(async () => ({
+          kind: "start_application",
+          requiresConfirmation: true
+        }))
+      },
       jobMatchService: {
         create: createJobMatchSession,
         select: vi.fn(),
@@ -549,7 +565,12 @@ describe("conversation graph", () => {
     expect(generateStructured).toHaveBeenCalledTimes(1);
   });
 
-  it("uses DeepSeek semantics for varied application wording and binds the original URL", async () => {
+  it.each([
+    ["填写 https://jobs.example.com/apply/123", "填写 [URL]"],
+    ["投递https://jobs.example.com/apply/123", "投递[URL]"],
+    ["用这个页面申请 https://jobs.example.com/apply/123", "用这个页面申请 [URL]"],
+    ["https://jobs.example.com/apply/123 帮我处理", "[URL] 帮我处理"]
+  ])("routes URL wording through the fixed schema: %s", async (text, modelText) => {
     const dependencies = fakeDependencies();
     const generateStructured = vi.fn(async (_input: unknown) => ({
       kind: "start_application",
@@ -563,12 +584,13 @@ describe("conversation graph", () => {
 
     const response = await runConversationTurn(
       dependencies,
-      "用这个页面帮我处理 https://jobs.example.com/apply/123 好吗",
+      text,
       { version: 0, recentPostingIds: [] }
     );
 
     expect(generateStructured).toHaveBeenCalledWith(expect.objectContaining({
-      user: "用这个页面帮我处理 [URL] 好吗"
+      user: modelText,
+      schema: UrlIntentRouteSchema
     }));
     expect(JSON.stringify(generateStructured.mock.calls[0]![0])).not
       .toContain("https://jobs.example.com/apply/123");
@@ -584,6 +606,113 @@ describe("conversation graph", () => {
       kind: "application_url",
       url: "https://jobs.example.com/apply/123"
     });
+  });
+
+  it("recovers the real encoded Chinese suffix before fixed-schema classification", async () => {
+    const raw = "投递https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440%E8%BF%99%E4%B8%AA%E9%A1%B5%E9%9D%A2%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97";
+    const cleanUrl = "https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440";
+    const dependencies = fakeDependencies();
+    const generateStructured = vi.fn(async (_input: unknown) => ({
+      kind: "start_application",
+      requiresConfirmation: true
+    }));
+    dependencies.modelProvider = { generateStructured };
+    dependencies.validatePublicHttpsUrl = vi.fn(async (url: string) => ({
+      url,
+      domain: "wondersharecampus.zhiye.com"
+    }));
+
+    const response = await runConversationTurn(dependencies, raw, {
+      version: 0,
+      recentPostingIds: []
+    });
+
+    expect(generateStructured).toHaveBeenCalledWith(expect.objectContaining({
+      user: "投递[URL]这个页面可以投递吗",
+      schema: UrlIntentRouteSchema
+    }));
+    expect(response.message.intent).toMatchObject({
+      kind: "start_application",
+      target: { kind: "application_url", url: cleanUrl },
+      requiresConfirmation: true
+    });
+  });
+
+  it("rejects URL-route output containing model-generated target data", async () => {
+    const dependencies = fakeDependencies();
+    dependencies.modelProvider = {
+      generateStructured: vi.fn(async () => ({
+        kind: "start_application",
+        target: { kind: "application_url", url: "https://attacker.example/apply" },
+        requiresConfirmation: true
+      }))
+    };
+
+    const response = await runConversationTurn(
+      dependencies,
+      "帮我处理 https://jobs.example.com/apply/123",
+      { version: 0, recentPostingIds: [] }
+    );
+
+    expect(response.message.intent?.kind).toBe("unknown");
+    expect(response.pendingConfirmation).toBeUndefined();
+  });
+
+  it("does not expose multiple URLs to the model or create a task", async () => {
+    const dependencies = fakeDependencies();
+    const generateStructured = vi.fn(async () => ({
+      kind: "start_application",
+      requiresConfirmation: true
+    }));
+    dependencies.modelProvider = { generateStructured };
+
+    const response = await runConversationTurn(
+      dependencies,
+      "帮我处理 https://jobs.example.com/apply/1 和 https://jobs.example.com/apply/2",
+      { version: 0, recentPostingIds: [] }
+    );
+
+    expect(generateStructured).not.toHaveBeenCalled();
+    expect(response.message.intent?.kind).toBe("unknown");
+    expect(response.pendingConfirmation).toBeUndefined();
+  });
+
+  it("does not expose mixed HTTPS and HTTP URLs to the model", async () => {
+    const dependencies = fakeDependencies();
+    const generateStructured = vi.fn(async () => ({
+      kind: "start_application",
+      requiresConfirmation: true
+    }));
+    dependencies.modelProvider = { generateStructured };
+
+    const response = await runConversationTurn(
+      dependencies,
+      "填写 https://jobs.example.com/apply/1 和 http://jobs.example.com/apply/2",
+      { version: 0, recentPostingIds: [] }
+    );
+
+    expect(generateStructured).not.toHaveBeenCalled();
+    expect(response.message.intent?.kind).toBe("unknown");
+    expect(response.pendingConfirmation).toBeUndefined();
+  });
+
+  it("does not expose adjacent mixed-scheme URLs to the model", async () => {
+    const dependencies = fakeDependencies();
+    const generateStructured = vi.fn(async () => ({
+      kind: "start_application",
+      requiresConfirmation: true
+    }));
+    dependencies.modelProvider = { generateStructured };
+
+    const response = await runConversationTurn(
+      dependencies,
+      "填写 https://jobs.example.com/apply/1,http://jobs.example.com/apply/2",
+      { version: 0, recentPostingIds: [] }
+    );
+
+    expect(generateStructured).not.toHaveBeenCalled();
+    expect(response.message.intent?.kind).toBe("unknown");
+    expect(response.pendingConfirmation).toBeUndefined();
   });
 
   it("does not create an application target when DeepSeek is unavailable", async () => {

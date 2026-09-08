@@ -168,19 +168,20 @@ describe("conversation routes", () => {
     const graph = fakeGraph();
     const service = createConversationService({ repository, graph });
     const app = await buildApp(service, database);
+    const rawText = "投递https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440%E8%BF%99%E4%B8%AA%E9%A1%B5%E9%9D%A2%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97";
 
     const session = (await app.inject({ method: "POST", url: "/api/conversations" })).json() as ConversationSession;
     const first = await app.inject({
       method: "POST",
       url: `/api/conversations/${session.id}/messages`,
       headers: { "idempotency-key": "request-1" },
-      payload: { text: "show my applications" }
+      payload: { text: rawText }
     });
     const replay = await app.inject({
       method: "POST",
       url: `/api/conversations/${session.id}/messages`,
       headers: { "idempotency-key": "request-1" },
-      payload: { text: "show my applications" }
+      payload: { text: rawText }
     });
     const view = await app.inject({ method: "GET", url: `/api/conversations/${session.id}` });
 
@@ -189,6 +190,8 @@ describe("conversation routes", () => {
     expect(replay.json()).toEqual(first.json());
     expect(graph.invoke).toHaveBeenCalledOnce();
     expect(view.json().messages).toHaveLength(2);
+    expect(view.json().messages[0].text).toBe(rawText);
+    expect(graph.invoke).toHaveBeenCalledWith(expect.objectContaining({ text: rawText }), expect.anything());
   });
 
   it("restores a pending confirmation after the service is rebuilt and consumes it once", async () => {

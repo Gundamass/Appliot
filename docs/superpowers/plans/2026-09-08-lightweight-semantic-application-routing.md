@@ -735,7 +735,7 @@ rtk git commit -m "test: cover loadable conversation application tasks"
 - Produces: `UrlIntentRouteSchema`，只允许 `start_application`、`request_job_recommendations`、`discover_recruitment_site`、`list_application_tasks`、`unknown`。
 - Consumes: 单个 HTTPS URL、`StructuredModelProvider`、现有 `ConversationIntentSchema` 与确认流程。
 
-- [ ] **Step 1: 写入 URL 边界失败测试**
+- [x] **Step 1: 写入 URL 边界失败测试**
 
 创建 `conversation-url-input.test.ts`，使用本次真实原始输入断言：
 
@@ -751,13 +751,13 @@ expect(extractConversationUrlInput(raw)).toEqual({
 
 同时加入保留集：`keyword=%E9%AB%98%E7%BA%A7%E5%89%8D%E7%AB%AF%E5%B7%A5%E7%A8%8B%E5%B8%88` 必须完整保留；显式空格后的中文必须保留在 `modelText`；多 URL 返回 `undefined`。
 
-- [ ] **Step 2: 运行边界测试并确认 RED**
+- [x] **Step 2: 运行边界测试并确认 RED**
 
 Run: `rtk corepack pnpm exec vitest run src/conversations/conversation-url-input.test.ts`（工作目录 `apps/api`）
 
 Expected: FAIL，模块尚不存在。
 
-- [ ] **Step 3: 实现独立 URL 输入投影**
+- [x] **Step 3: 实现独立 URL 输入投影**
 
 在 `conversation-url-input.ts` 实现 `ConversationUrlInput` 与 `extractConversationUrlInput`：
 
@@ -772,27 +772,27 @@ export interface ConversationUrlInput {
 export function extractConversationUrlInput(rawText: string): ConversationUrlInput | undefined;
 ```
 
-URL 扫描只接受 RFC 3986 ASCII URL 字符；编码后缀恢复仅在最后一个查询参数名匹配 `/(?:id|uuid|token|code|key)$/iu`、参数值存在 ASCII 标识符前缀且尾部是可解码的连续 UTF-8 百分号字节时成立。恢复出的后缀至少包含两个 CJK 字符，否则保持原 URL。函数不得修改 `rawText`。
+URL 扫描只接受 RFC 3986 ASCII URL 字符并同时计数 HTTP/HTTPS；只有恰好一个 HTTPS 链接才允许进入模型。编码后缀恢复适用于 ASCII 路径段，或最后一个查询参数名匹配 `/(?:id|uuid|token|code|key)$/iu` 且参数值存在 ASCII 标识符前缀的情况。尾部必须是可解码的连续 UTF-8 百分号字节，恢复出的后缀至少包含四个汉字并具有明确中文句式特征，否则保持原 URL。函数不得修改 `rawText`。
 
-- [ ] **Step 4: 验证 URL 边界 GREEN**
+- [x] **Step 4: 验证 URL 边界 GREEN**
 
 Run: `rtk corepack pnpm exec vitest run src/conversations/conversation-url-input.test.ts`（工作目录 `apps/api`）
 
 Expected: PASS，真实输入被修复且中文搜索参数保留。
 
-- [ ] **Step 5: 写入固定路由 Schema 失败测试**
+- [x] **Step 5: 写入固定路由 Schema 失败测试**
 
 在 `conversation-graph.test.ts` 添加参数化边界集，四条文本分别为“填写 [URL]”“投递[URL]”“用这个页面申请 [URL]”“[URL] 帮我处理”，模型均返回 `{ kind: "start_application", requiresConfirmation: true }`。断言每次调用都使用 `UrlIntentRouteSchema`、模型输入不含真实 URL，返回目标由后端绑定。
 
 加入保留集：模型返回岗位推荐或招聘入口时不得绑定申请 URL；裸 URL 不调用模型；多 URL、模型异常和非法输出不创建任务。真实失败输入必须调用模型且使用净化 URL。
 
-- [ ] **Step 6: 运行图测试并确认 RED**
+- [x] **Step 6: 运行图测试并确认 RED**
 
 Run: `rtk corepack pnpm exec vitest run src/conversations/conversation-graph.test.ts`（工作目录 `apps/api`）
 
 Expected: FAIL；当前 `hasExplicitFillingIntent` 绕过模型，且编码中文仍包含在 URL 中。
 
-- [ ] **Step 7: 接入固定 URL 路由 Schema**
+- [x] **Step 7: 接入固定 URL 路由 Schema**
 
 在 `conversation-graph.ts` 导入 `extractConversationUrlInput`，定义并只向模型暴露：
 
@@ -811,11 +811,11 @@ const UrlIntentRouteSchema = z.object({
 
 确认输入、裸 URL 和多 URL 的安全分支保持确定性。其余单 URL 文本统一调用一次模型；删除 `hasExplicitFillingIntent` 对 URL 请求的短路。模型结果先经 `UrlIntentRouteSchema` 校验，再映射到 `ConversationIntentSchema`；仅 `start_application` 绑定 `urlInput.url` 并强制确认。
 
-- [ ] **Step 8: 验证原始消息持久化**
+- [x] **Step 8: 验证原始消息持久化**
 
 在 `conversation-routes.test.ts` 使用真实原始输入完成发送，断言 `GET /api/conversations/:id` 返回的用户消息 `text` 与原字符串逐字相等，模型仅收到恢复后的 `modelText`。
 
-- [ ] **Step 9: 运行 API 聚焦回归并提交**
+- [x] **Step 9: 运行 API 聚焦回归并提交**
 
 Run:
 
@@ -828,7 +828,7 @@ Expected: 全部 PASS，类型检查退出码为 0。
 
 Commit: `fix: route URL requests through bounded DeepSeek schema`
 
-- [ ] **Step 10: 扩展浏览器回归并执行真实联调**
+- [x] **Step 10: 扩展浏览器回归并执行真实联调**
 
 将真实失败输入加入 `conversation-job-match-flow.spec.ts`，断言发送后出现“确认开始填写”，确认后生成 UUID，列表和详情均为 200，工作台可打开。启动真实服务时显式加载仓库根目录 `.env.local`，健康状态必须显示 DeepSeek 已配置；TraceSink 的分类原因为 `model_structured`，且没有岗位匹配创建或未经确认的浏览器执行。
 

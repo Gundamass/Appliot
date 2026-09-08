@@ -398,10 +398,11 @@ test("legacy job-match URL returns to the owning conversation instead of renderi
   await expect(page.getByText("岗位匹配工作台", { exact: true })).toHaveCount(0);
 });
 
-test("pasted application URL creates a loadable filling task", async ({ page }) => {
+test("encoded application URL prose creates a loadable filling task", async ({ page }) => {
   const conversationId = "conversation-direct-application";
   const taskId = "31f69b45-8888-5c29-9496-7e9e43c3c9f8";
-  const applicationUrl = "https://jobs.example.com/apply/123";
+  const applicationUrl = "https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440";
+  const rawText = "投递https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440%E8%BF%99%E4%B8%AA%E9%A1%B5%E9%9D%A2%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97";
   const session = {
     id: conversationId,
     title: "填写申请页面",
@@ -440,7 +441,7 @@ test("pasted application URL creates a loadable filling task", async ({ page }) 
   });
   await page.route(`**/api/conversations/${conversationId}/messages`, async (route) => {
     expect(route.request().postDataJSON()).toEqual({
-      text: `这个页面帮我填写 ${applicationUrl} 好吗`
+      text: rawText
     });
     const cards = [{ type: "confirmation", ...confirmation }];
     await route.fulfill({
@@ -471,7 +472,7 @@ test("pasted application URL creates a loadable filling task", async ({ page }) 
     const cards = [{
       type: "application_task",
       taskId,
-      title: "jobs.example.com 填写",
+      title: "wondersharecampus.zhiye.com 填写",
       state: "observing_page",
       applicationUrl
     }];
@@ -517,18 +518,7 @@ test("pasted application URL creates a loadable filling task", async ({ page }) 
 
   await page.goto(`${webBaseUrl}/?conversation=${conversationId}`);
   const composer = page.getByRole("textbox", { name: "输入消息" });
-  await composer.fill("这个页面帮我填写 ");
-  await composer.evaluate((element, url) => {
-    const clipboardData = new DataTransfer();
-    clipboardData.setData("text/plain", url);
-    element.dispatchEvent(new ClipboardEvent("paste", {
-      bubbles: true,
-      cancelable: true,
-      clipboardData
-    }));
-  }, applicationUrl);
-  await expect(composer).toHaveValue(`这个页面帮我填写 ${applicationUrl} `);
-  await composer.pressSequentially("好吗");
+  await composer.fill(rawText);
   await page.getByRole("button", { name: "发送" }).click();
 
   await expect(page.getByRole("button", { name: "确认开始填写" })).toBeVisible();

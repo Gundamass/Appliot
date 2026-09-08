@@ -34,11 +34,35 @@ import {
 import type { ConversationProcessEventBus, ConversationProcessEventInput } from "./conversation-events.js";
 import { createConversationProcessTrace } from "./conversation-process-trace.js";
 import { summarizeToolResult, summarizeToolStart } from "./conversation-process-summaries.js";
+import {
+  countConversationWebUrls,
+  extractConversationUrlInput,
+  type ConversationUrlInput
+} from "./conversation-url-input.js";
 import { z } from "zod";
 import { validatePublicHttpsUrl } from "../recruitment-search/public-https-url.js";
 
 const ConversationIdSchema = z.string().min(1).max(256);
 const ConfirmationIdSchema = z.string().min(1).max(256);
+export const UrlIntentRouteSchema = z.object({
+  kind: z.enum([
+    "start_application",
+    "request_job_recommendations",
+    "discover_recruitment_site",
+    "list_application_tasks",
+    "unknown"
+  ]),
+  requiresConfirmation: z.boolean()
+}).strict();
+const GENERAL_INTENT_SYSTEM_PROMPT = "你是受限的求职工作台意图分类器。只能返回允许的 ConversationIntent JSON，不得生成工具名、URL、浏览器命令或数据库 ID。";
+const URL_INTENT_SYSTEM_PROMPT = [
+  "你是受限的求职工作台 URL 意图路由器。",
+  "只能选择固定 kind：start_application、request_job_recommendations、discover_recruitment_site、list_application_tasks、unknown。",
+  "[URL] 表示后端已经安全提取的网址；不得返回、复制或猜测网址。",
+  "用户希望填写、投递、申请或处理具体页面时选择 start_application。",
+  "用户希望用招聘入口推荐岗位时选择 request_job_recommendations；希望把网址作为公司招聘入口时选择 discover_recruitment_site。",
+  "意思不明确时选择 unknown。不得生成 target、任务 ID、工具名、浏览器命令或新模块。只返回 JSON。"
+].join("");
 const HttpsUrlSchema = z.string().url().max(2_048).refine((value) => {
   try {
     return new URL(value).protocol === "https:";
@@ -299,68 +323,57 @@ async function classifyIntent(
   }
 
   const fallback = deterministicIntent(state.text!);
-  const manualUrl = extractSingleHttpsUrl(state.text!);
-  if (manualUrl !== undefined && hasExplicitFillingIntent(state.text!)) {
-    const intent = ConversationIntentSchema.parse({
-      kind: "start_application",
-      target: { kind: "application_url", url: manualUrl },
-      requiresConfirmation: true
-    });
+  const urlInput = extractConversationUrlInput(state.text!);
+  const webUrlCount = countConversationWebUrls(state.text!);
+  if (urlInput === undefined && webUrlCount > 0) {
+    const intent = unknownIntent();
     return finish({
       intent,
-      traceIds: trace(dependencies, nodeEvent(state, "classify_intent", intent.kind, "direct_application_url"), state.traceIds)
+      assistantText: webUrlCount > 1
+        ? "一次只能处理一个网址，请只保留要使用的申请或招聘页面链接。"
+        : "请提供一个完整的 HTTPS 申请或招聘页面链接。",
+      traceIds: trace(
+        dependencies,
+        nodeEvent(state, "classify_intent", "unknown", webUrlCount > 1 ? "multiple_urls_not_supported" : "https_url_required"),
+        state.traceIds
+      )
     });
   }
-  if (manualUrl !== undefined && isBareUrlMessage(state.text!, manualUrl)) {
+  if (urlInput !== undefined && isBareUrlInput(urlInput)) {
     return finish({
       intent: unknownIntent(),
       assistantText: "你想填写这个申请页面，还是用它进行岗位推荐？请在网址前补充“填写”或“岗位推荐”。",
       traceIds: trace(dependencies, nodeEvent(state, "classify_intent", "unknown", "application_url_purpose_required"), state.traceIds)
     });
   }
-  if (manualUrl !== undefined && state.context.lastRecruitmentRequest !== undefined && hasRecruitmentUrlIntent(state.text!)) {
-    const last = state.context.lastRecruitmentRequest;
-    const intent = ConversationIntentSchema.parse({
-      kind: "discover_recruitment_site",
-      target: { kind: "recruitment_site", company: last.companyName, recruitmentType: last.recruitmentType },
-      requiresConfirmation: false
-    });
-    return finish({
-      intent,
-      traceIds: trace(dependencies, nodeEvent(state, "classify_intent", intent.kind, "manual_recruitment_url"), state.traceIds)
-    });
-  }
-  if (fallback.kind !== "unknown") {
+  if (urlInput === undefined && fallback.kind !== "unknown") {
     return finish({ intent: fallback, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", fallback.kind, "deterministic_intent"), state.traceIds) });
   }
   if (dependencies.modelProvider === undefined) {
-    return finish({ intent: fallback, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", fallback.kind, "deterministic_fallback"), state.traceIds) });
+    const intent = urlInput === undefined ? fallback : unknownIntent();
+    return finish({ intent, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", intent.kind, "deterministic_fallback"), state.traceIds) });
   }
 
   try {
+    const schema = urlInput === undefined ? ConversationIntentSchema : UrlIntentRouteSchema;
     const raw = await dependencies.modelProvider.generateStructured({
-      system: [
-        "你是受限的求职工作台意图分类器。",
-        "只能从 ConversationIntentSchema 已允许的固定 kind 中选择。",
-        "[URL] 表示后端已经安全提取的网址；不要返回、复制或猜测网址。",
-        "用户希望填写、申请或处理具体页面时选择 start_application，target 可以省略。",
-        "用户希望发现招聘入口或推荐岗位时选择对应的 recruitment/job recommendation kind。",
-        "意思不明确时返回 unknown。",
-        "不得生成工具名、浏览器命令或数据库 ID。只返回 JSON。"
-      ].join(""),
-      user: modelVisibleText(state.text!, manualUrl),
-      schema: ConversationIntentSchema,
+      system: urlInput === undefined ? GENERAL_INTENT_SYSTEM_PROMPT : URL_INTENT_SYSTEM_PROMPT,
+      user: urlInput?.modelText ?? state.text!,
+      schema,
       jsonExample: { kind: "start_application", requiresConfirmation: true }
     });
-    const parsed = ConversationIntentSchema.safeParse(raw);
+    const parsed = schema.safeParse(raw);
     if (!parsed.success) {
       const intent = unknownIntent();
       return finish({ intent, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", "unknown", "model_output_invalid"), state.traceIds) });
     }
-    const intent = normalizeIntent(bindExtractedApplicationUrl(parsed.data, manualUrl));
+    const intent = urlInput === undefined
+      ? normalizeIntent(ConversationIntentSchema.parse(parsed.data))
+      : mapUrlRouteToIntent(UrlIntentRouteSchema.parse(parsed.data), urlInput, state.context);
     return finish({ intent, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", intent.kind, "model_structured"), state.traceIds) });
   } catch {
-    return finish({ intent: fallback, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", fallback.kind, "model_unavailable_fallback"), state.traceIds) });
+    const intent = urlInput === undefined ? fallback : unknownIntent();
+    return finish({ intent, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", intent.kind, "model_unavailable_fallback"), state.traceIds) });
   }
 }
 
@@ -740,7 +753,7 @@ async function prepareRecruitmentDiscovery(
     };
   }
   const request: RecruitmentSearchRequest = { companyName: company, recruitmentType };
-  const manualUrl = extractSingleHttpsUrl(state.text ?? "");
+  const manualUrl = extractConversationUrlInput(state.text ?? "")?.url;
   if (manualUrl !== undefined && state.context.lastRecruitmentRequest !== undefined) {
     return prepareManualRecruitmentLink(
       dependencies,
@@ -1358,13 +1371,6 @@ function extractRecruitmentRequest(text: string): { company: string; recruitment
   return { company, recruitmentType: "unknown" };
 }
 
-function extractSingleHttpsUrl(text: string): string | undefined {
-  const matches = [...text.matchAll(/https:\/\/[^\s<>"']+/giu)]
-    .map((match) => match[0]?.replace(/[),.;!?，。；！？]+$/u, ""))
-    .filter((value): value is string => value !== undefined);
-  return matches.length === 1 ? matches[0] : undefined;
-}
-
 function normalizeSelectedUrl(rawUrl: string): string | undefined {
   try {
     const url = new URL(rawUrl);
@@ -1408,20 +1414,35 @@ function normalizeIntent(intent: ConversationIntent): ConversationIntent {
   return { ...intent, requiresConfirmation: false };
 }
 
-function modelVisibleText(text: string, manualUrl: string | undefined): string {
-  return manualUrl === undefined ? text : text.replace(manualUrl, "[URL]");
-}
-
-function bindExtractedApplicationUrl(
-  intent: ConversationIntent,
-  manualUrl: string | undefined
+function mapUrlRouteToIntent(
+  route: z.infer<typeof UrlIntentRouteSchema>,
+  urlInput: ConversationUrlInput,
+  context: ConversationContext
 ): ConversationIntent {
-  if (manualUrl === undefined || intent.kind !== "start_application") return intent;
-  return ConversationIntentSchema.parse({
-    ...intent,
-    target: { kind: "application_url", url: manualUrl },
-    requiresConfirmation: true
-  });
+  if (route.kind === "start_application") {
+    return ConversationIntentSchema.parse({
+      kind: route.kind,
+      target: { kind: "application_url", url: urlInput.url },
+      requiresConfirmation: true
+    });
+  }
+  if (route.kind === "discover_recruitment_site") {
+    const request = context.lastRecruitmentRequest;
+    if (request === undefined) return unknownIntent();
+    return ConversationIntentSchema.parse({
+      kind: route.kind,
+      target: {
+        kind: "recruitment_site",
+        company: request.companyName,
+        recruitmentType: request.recruitmentType
+      },
+      requiresConfirmation: false
+    });
+  }
+  return normalizeIntent(ConversationIntentSchema.parse({
+    kind: route.kind,
+    requiresConfirmation: route.requiresConfirmation
+  }));
 }
 
 function unknownIntent(): ConversationIntent {
@@ -1462,16 +1483,8 @@ function toolContext(state: GraphState): ConversationToolContext {
   };
 }
 
-function hasExplicitFillingIntent(text: string): boolean {
-  return /填写|填表|填写申请|申请表|开始识别并填写/u.test(text);
-}
-
-function hasRecruitmentUrlIntent(text: string): boolean {
-  return /招聘|岗位推荐|职位推荐|招聘入口|官方入口|招聘官网/u.test(text);
-}
-
-function isBareUrlMessage(text: string, url: string): boolean {
-  return text.trim().replace(/[),.;!?，。；！？]+$/u, "") === url;
+function isBareUrlInput(input: ConversationUrlInput): boolean {
+  return input.modelText.trim().replace(/[),.;!?，。；！？]+$/u, "") === "[URL]";
 }
 
 function processTraceFor(
