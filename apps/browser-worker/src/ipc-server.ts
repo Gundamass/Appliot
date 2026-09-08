@@ -94,7 +94,7 @@ export function createIpcServer(session: BrowserSessionManager, channel: IpcChan
       return workerError("HANDSHAKE_REQUIRED", "浏览器 Worker 尚未完成握手");
     }
     if (request.type === "open") {
-      return session.open(request.taskId, request.url);
+      return session.open(request.taskId, request.url, request.navigationPolicy);
     }
     if (request.type === "capture_snapshot") {
       return { type: "snapshot", snapshot: await session.observe(request.taskId) };

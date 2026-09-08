@@ -29,13 +29,13 @@ test("候选人工作区在桌面和手机端保持可读且聚焦缺失字段",
     { width: 390, height: 844, name: "mobile" }
   ]) {
     await page.setViewportSize(viewport);
-    await page.goto(`${baseUrl}/`);
+    await page.goto(`${baseUrl}/?view=profile`);
 
-    await expect(page.getByRole("heading", { name: "候选人档案", exact: true })).toBeVisible();
-    await expect(page.getByRole("navigation", { name: "候选人工作台" }).getByRole("button")).toHaveText([
-      "候选人档案",
-      "新建投递",
-      "投递审核"
+    await expect(page.getByRole("heading", { name: "我的简历", exact: true })).toBeVisible();
+    await expect(page.getByRole("navigation", { name: "候选人工作台" }).locator(".workspace-conversation-home, :scope > button")).toHaveText([
+      "对话首页",
+      "投递进度",
+      "我的简历"
     ]);
     await expect(page.getByRole("button", { name: "简历解析", exact: true })).toHaveCount(1);
     const accessibilityHeading = page.getByRole("heading", { name: "简历资料", exact: true });

@@ -137,6 +137,7 @@ function mapJobMatchError(error: unknown): { statusCode: number; error: string; 
 const CONFLICT_CODES = new Set([
   "job_match_version_conflict",
   "job_match_mutation_not_allowed",
+  "job_match_expectation_conflict",
   "job_filter_confirmation_not_allowed",
   "job_filter_readback_mismatch",
   "job_extraction_not_allowed",

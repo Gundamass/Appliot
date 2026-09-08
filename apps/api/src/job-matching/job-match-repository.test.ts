@@ -127,6 +127,49 @@ describe("job match repository", () => {
     database.close();
   });
 
+  it("reuses the immutable expectation snapshot when confirmation keeps the same revision", () => {
+    const { database, repository } = setup();
+    repository.create({
+      id: "session-1",
+      initialUrl: "https://jobs.example.test/jobs",
+      state: "awaiting_filter_confirmation",
+      entryKind: "job_list",
+      source: "moka",
+      adapterVersion: "moka-job-v1",
+      profileRevision: 7,
+      expectation,
+      createdAt: "2026-08-16T00:00:00.000Z"
+    });
+
+    expect(repository.confirmExpectation("session-1", 0, expectation)).toMatchObject({
+      version: 1,
+      state: "extracting_jobs",
+      expectationRevision: expectation.revision
+    });
+    expect(repository.get("session-1", { required: true }).expectation).toEqual(expectation);
+    database.close();
+  });
+
+  it("rejects a different expectation payload that reuses an immutable revision", () => {
+    const { database, repository } = setup();
+    repository.create({
+      id: "session-1",
+      initialUrl: "https://jobs.example.test/jobs",
+      state: "awaiting_filter_confirmation",
+      profileRevision: 7,
+      expectation,
+      createdAt: "2026-08-16T00:00:00.000Z"
+    });
+
+    expect(() => repository.confirmExpectation("session-1", 0, {
+      ...expectation,
+      confirmedAt: "2026-08-16T00:01:00.000Z"
+    })).toThrow("job_match_expectation_conflict");
+    expect(repository.get("session-1", { required: true }).version).toBe(0);
+    expect(repository.get("session-1", { required: true }).expectation).toEqual(expectation);
+    database.close();
+  });
+
   it("uses optimistic concurrency without overwriting a newer session", () => {
     const { database, repository } = setup();
     repository.create({
@@ -239,6 +282,64 @@ describe("job match repository", () => {
 
     expect(repository.markResultsStale("session-1")).toBe(1);
     expect(createJobMatchRepository(database).get("session-1", { required: true }).results[0]?.stale).toBe(true);
+    database.close();
+  });
+
+  it("round-trips current score breakdowns and legacy results without one", () => {
+    const { database, repository } = setup();
+    const legacyPosting = posting();
+    const currentPosting: JobPosting = {
+      ...posting("posting-2", "sha256:posting-2"),
+      sourceJobId: "job-1002",
+      canonicalUrl: "https://jobs.example.test/jobs/1002"
+    };
+    repository.create({
+      id: "session-1",
+      initialUrl: "https://jobs.example.test/jobs",
+      state: "matching_jobs",
+      profileRevision: 7,
+      expectation,
+      createdAt: "2026-08-16T00:00:00.000Z"
+    });
+    repository.saveExtractionPage({
+      sessionId: "session-1",
+      idempotencyKey: "page-with-current-and-legacy-results",
+      postings: [legacyPosting, currentPosting],
+      cursor: { value: "done", pagesRead: 1, elapsedMs: 500, newJobs: 2, consecutiveNoNewPages: 0 },
+      event: { type: "extraction_page_saved", payload: { page: 1 } },
+      createdAt: "2026-08-16T00:01:00.000Z"
+    });
+    const legacyResult = result(legacyPosting);
+    const currentResult: JobMatchResult = {
+      ...result(currentPosting),
+      id: "result-2",
+      fitScore: 82,
+      scoreBreakdown: {
+        total: 82,
+        dimensions: [{
+          dimension: "skill",
+          label: "技能",
+          earned: 82,
+          available: 100,
+          satisfied: 1,
+          unknown: 0,
+          conflict: 0
+        }]
+      }
+    };
+
+    repository.saveResults(
+      "session-1",
+      [currentResult, legacyResult],
+      "2026-08-16T00:02:00.000Z"
+    );
+
+    const reloaded = createJobMatchRepository(database).get("session-1", { required: true }).results;
+    expect(reloaded).toHaveLength(2);
+    expect(reloaded.find((candidate) => candidate.id === currentResult.id)).toEqual(currentResult);
+    const reloadedLegacy = reloaded.find((candidate) => candidate.id === legacyResult.id);
+    expect(reloadedLegacy).toEqual(legacyResult);
+    expect(reloadedLegacy).not.toHaveProperty("scoreBreakdown");
     database.close();
   });
 });

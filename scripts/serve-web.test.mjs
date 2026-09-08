@@ -43,6 +43,7 @@ async function fixture() {
   await writeFile(join(root, "outside.txt"), "outside");
 
   const apiRequests = [];
+  const streamingResponses = [];
   const api = createHttpServer(async (request, response) => {
     const chunks = [];
     for await (const chunk of request) chunks.push(chunk);
@@ -51,6 +52,15 @@ async function fixture() {
     if (request.url === "/api/rejected") {
       response.writeHead(422, { "content-type": "application/json", "x-api-result": "rejected" });
       response.end(JSON.stringify({ error: "invalid" }));
+      return;
+    }
+    if (request.url === "/api/events") {
+      streamingResponses.push(response);
+      response.writeHead(200, {
+        "cache-control": "no-cache",
+        "content-type": "text/event-stream; charset=utf-8"
+      });
+      response.flushHeaders();
       return;
     }
     response.writeHead(200, { "content-type": "application/json", "x-api-result": "ok" });
@@ -67,6 +77,7 @@ async function fixture() {
     web,
     webOrigin,
     async dispose() {
+      for (const response of streamingResponses) response.end();
       await Promise.all([close(web), close(api)]);
       await rm(root, { recursive: true, force: true });
     }
@@ -134,6 +145,21 @@ test("proxies API methods, bodies, status codes and headers without rewriting", 
     assert.deepEqual(await rejected.json(), { error: "invalid" });
     assert.equal(context.apiRequests.length, 2);
   } finally {
+    await context.dispose();
+  }
+});
+
+test("flushes streaming API headers through the production proxy", async () => {
+  const context = await fixture();
+  const controller = new AbortController();
+  const timeout = setTimeout(() => controller.abort(), 1_000);
+  try {
+    const response = await fetch(`${context.webOrigin}/api/events`, { signal: controller.signal });
+    assert.equal(response.status, 200);
+    assert.equal(response.headers.get("content-type"), "text/event-stream; charset=utf-8");
+  } finally {
+    clearTimeout(timeout);
+    controller.abort();
     await context.dispose();
   }
 });

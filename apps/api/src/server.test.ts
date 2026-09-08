@@ -29,6 +29,13 @@ interface ServerModule {
 const server = await import("./server.js") as unknown as ServerModule;
 
 describe("production server composition", () => {
+  const config: ApiConfig = {
+    databaseFile: ":memory:",
+    host: "127.0.0.1",
+    port: 43120,
+    langsmith: { enabled: false, project: "test", maxAttempts: 3 }
+  };
+
   beforeEach(() => {
     vi.clearAllMocks();
     fakes.createApp.mockResolvedValue(fakes.app);
@@ -37,7 +44,7 @@ describe("production server composition", () => {
 
   it("binds configured dependencies to the validated loopback address and port", async () => {
     const dependencies = { jobMatchService: { get: vi.fn() } } as unknown as AppDependencies;
-    await server.startServer(dependencies, { databaseFile: ":memory:", host: "127.0.0.1", port: 43120 });
+    await server.startServer(dependencies, config);
 
     expect(fakes.createApp).toHaveBeenCalledWith(dependencies);
     expect(fakes.app.listen).toHaveBeenCalledWith({ host: "127.0.0.1", port: 43120 });
@@ -47,7 +54,7 @@ describe("production server composition", () => {
     const listenFailure = new Error("address already in use");
     fakes.app.listen.mockRejectedValueOnce(listenFailure);
 
-    await expect(server.startServer({} as AppDependencies, { databaseFile: ":memory:", host: "127.0.0.1", port: 43120 })).rejects.toBe(listenFailure);
+    await expect(server.startServer({} as AppDependencies, config)).rejects.toBe(listenFailure);
     expect(fakes.app.close).toHaveBeenCalledOnce();
   });
 
@@ -56,7 +63,7 @@ describe("production server composition", () => {
     const close = vi.fn();
     fakes.createApp.mockRejectedValueOnce(startupFailure);
 
-    await expect(server.startServer({ close } as unknown as AppDependencies, { databaseFile: ":memory:", host: "127.0.0.1", port: 43120 })).rejects.toBe(startupFailure);
+    await expect(server.startServer({ close } as unknown as AppDependencies, config)).rejects.toBe(startupFailure);
     expect(close).toHaveBeenCalledOnce();
     expect(fakes.app.close).not.toHaveBeenCalled();
   });

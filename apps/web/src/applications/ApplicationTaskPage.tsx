@@ -319,11 +319,11 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
   };
 
   const selectWorkspaceView = (view: WorkspaceView) => {
-    const destination = view === "profile" ? "/" : view === "apply" ? "/?view=apply" : "/?view=reviews";
+    const destination = view === "profile" ? "/?view=profile" : view === "applications" ? "/?view=applications" : "/";
     onNavigate?.(destination);
   };
 
-  return <WorkspaceFrame activeView="reviews" onSelectView={selectWorkspaceView}>
+  return <WorkspaceFrame activeView="applications" onSelectView={selectWorkspaceView}>
     <section className="workspace-view application-shell embedded-application-shell" aria-labelledby="workspace-task-title">
       <header className="workspace-view-header">
         <div><span>投递工作台</span><h1 id="workspace-task-title">实时任务控制</h1></div>

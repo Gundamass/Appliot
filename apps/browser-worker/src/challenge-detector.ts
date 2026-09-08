@@ -31,7 +31,15 @@ const CHALLENGE_INSPECTION_SCRIPT = String.raw`(() => {
   const interactiveSelector = "input:not(:disabled), textarea:not(:disabled), select:not(:disabled), button:not(:disabled), a[href], [role=button], [role=link], [role=textbox], [role=combobox], [tabindex]";
   const boundaries = [];
   for (const frame of document.querySelectorAll("iframe")) {
-    const isVisible = visible(frame);
+    const style = getComputedStyle(frame);
+    const source = frame.getAttribute("src")?.trim() ?? "";
+    const isDecorativeMeasurementFrame = (source === "" || source === "about:blank")
+      && style.position === "absolute"
+      && style.zIndex === "-1"
+      && !frame.hasAttribute("title")
+      && !frame.hasAttribute("aria-label")
+      && !frame.hasAttribute("tabindex");
+    const isVisible = visible(frame) && !isDecorativeMeasurementFrame;
     boundaries.push({
       kind: "iframe",
       visible: isVisible,

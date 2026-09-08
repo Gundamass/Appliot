@@ -24,6 +24,7 @@ from resume_ocr_worker.types import (
     OCR_REVISION,
     WorkerSettings,
 )
+from resume_ocr_worker.types import OcrBlock, OcrResult
 
 
 MODEL = OCR_MODEL
@@ -243,14 +244,41 @@ def test_ocr_accepts_png_bytes_and_returns_markdown(client: TestClient, backend:
     )
 
     assert response.status_code == 200
-    assert set(response.json()) == {"text", "model", "modelRevision", "mode", "elapsedMs"}
+    assert set(response.json()) == {"text", "model", "modelRevision", "mode", "elapsedMs", "runtime", "blocks"}
     assert response.json()["text"] == "# Resume\nAda Lovelace"
     assert response.json()["model"] == MODEL
     assert response.json()["modelRevision"] == REVISION
     assert response.json()["mode"] == "document_to_markdown"
+    assert response.json()["runtime"] == "pytorch"
+    assert response.json()["blocks"] == []
     assert isinstance(response.json()["elapsedMs"], int)
     assert response.json()["elapsedMs"] >= 0
     assert backend.calls == [PNG_BYTES]
+
+
+def test_ocr_returns_runtime_and_bounded_block_geometry(token: str):
+    class DetailedBackend(FakeBackend):
+        runtime = "mindspore_lite"
+
+        def recognize(self, image_bytes: bytes) -> OcrResult:
+            return OcrResult(
+                text="A",
+                blocks=[OcrBlock(text="A", bbox=(0, 0, 1, 1))],
+                model=MODEL,
+                revision=REVISION,
+                runtime="mindspore_lite",
+            )
+
+    client = TestClient(create_app(DetailedBackend(), WorkerSettings(api_token=token, runtime="mindspore_lite")))
+    response = client.post(
+        "/v1/ocr",
+        headers={**authorized(token), "Content-Type": "image/png"},
+        content=PNG_BYTES,
+    )
+
+    assert response.status_code == 200
+    assert response.json()["runtime"] == "mindspore_lite"
+    assert response.json()["blocks"] == [{"text": "A", "bbox": [0, 0, 1, 1]}]
 
 
 @pytest.mark.parametrize("header", [None, "Basic credentials", "Bearer", "Bearer wrong-token"])

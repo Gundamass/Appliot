@@ -1,9 +1,22 @@
 import { beforeEach, describe, expect, it, vi } from "vitest";
-import Database from "better-sqlite3";
-import { CertifiedHintPackSchema, type FormField, type FormSnapshot, type JobPageSnapshot, type ProfileFact, type WorkerActivity } from "@resume/contracts";
-import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
 import { z } from "zod";
+import Database from "better-sqlite3";
+import { mkdtemp, rm } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import type {
+  FormField,
+  FormSnapshot,
+  JobPageSnapshot,
+  ProfileFact,
+  WorkerActivity
+} from "@resume/contracts";
+import { createRagService, type ProfileRepositoryPort } from "@resume/rag";
+import { mokahrHintPack } from "@resume/form-semantics";
 import type { FieldSemanticResolver } from "./applications/field-semantic-resolver.js";
+import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
+import { createLangSmithExporter } from "./agent/langsmith-exporter.js";
+import { createSqliteLangSmithOutbox } from "./agent/langsmith-outbox.js";
 import { loadConfig } from "./config.js";
 import { createApp } from "./app.js";
 const fixtureNodeRef = {
@@ -43,7 +56,6 @@ vi.mock("./db/migrate.js", async (importOriginal) => {
     }
   };
 });
-
 const {
   createProductionDependencies,
   createProductionFieldResolver,
@@ -69,36 +81,13 @@ function fullConfig() {
   });
 }
 
-const jobsExampleHintPack = CertifiedHintPackSchema.parse({
-  schemaVersion: 1,
-  packId: "test-jobs-example",
-  version: "1.0.0",
-  match: {
-    sites: [{ hostSuffix: "jobs.example.test", pathPrefixes: ["/"] }],
-    stages: ["application_form", "review"],
-    requiredTextSignals: [],
-    pageFingerprintHashes: []
-  },
-  sectionRules: [],
-  fieldRules: [],
-  actionRules: [],
-  fixtures: [{ fixtureId: "jobs-example", expectedProfilePaths: ["basics.name"] }],
-  lifecycleStatus: "certified",
-  certifiedAt: "2026-08-17T00:00:00.000Z",
-  provenance: {
-    proposalId: "test-jobs-example-proposal",
-    replayReportIds: ["test-jobs-example-replay"],
-    humanReviewId: "test-jobs-example-human-review"
-  }
-});
-
 describe("production dependency composition", () => {
-  it("fails closed on an unmatched application form before any field resolution or browser write", async () => {
+  it("fails closed on a drifted certified ATS form before any field resolution or browser write", async () => {
     const taskId = "0e5a5d8b-4123-4d4d-8b5f-8cf2eb0e7d81";
     const form: FormSnapshot = {
       id: "unknown-form",
       taskId,
-      url: "https://unknown.example.test/apply",
+      url: "https://app.mokahr.com/campus-recruitment/example/apply",
       title: "Unknown application",
       stage: "application_form",
       frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" },
@@ -110,7 +99,13 @@ describe("production dependency composition", () => {
     const browserClient = productionBrowserClient({
       observe: vi.fn(async () => ({ type: "snapshot" as const, snapshot: form }))
     });
-    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), { browserClient });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient,
+      hintPacks: [{
+        ...mokahrHintPack,
+        match: { ...mokahrHintPack.match, pageFingerprintHashes: ["0".repeat(64)] }
+      }]
+    });
 
     dependencies.applicationService!.start({ taskId, applicationUrl: form.url });
     await dependencies.applicationService!.openBrowser(taskId);
@@ -120,6 +115,86 @@ describe("production dependency composition", () => {
     expect(browserClient.invalidateExecution).toHaveBeenCalledOnce();
     expect(browserClient.execute).not.toHaveBeenCalled();
     await dependencies.close?.();
+  });
+
+  it("wires promotion unconditionally and enables automatic evolution only with a model and closed qualification gates", async () => {
+    const withoutProvider = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: productionBrowserClient()
+    });
+    const withProvider = createProductionDependencies(fullConfig(), {
+      browserClient: productionBrowserClient()
+    });
+    const withAutomaticEvolution = createProductionDependencies(fullConfig(), {
+      browserClient: productionBrowserClient(),
+      skillEvolutionQualification: {
+        safetySimulator: { evaluate: async () => ({ safe: true, incorrectWrites: 0, mismatches: 0 }) },
+        replayRunner: { evaluate: async () => [] },
+        syntheticAts: {
+          evaluate: async () => ({ safe: true, incorrectWrites: 0, mismatches: 0, scenarios: [] })
+        }
+      }
+    });
+    try {
+      expect(withoutProvider.skillEvolutionAgent).toBeUndefined();
+      expect(withProvider.skillEvolutionAgent).toBeDefined();
+      expect(withoutProvider.applicationSkillPromotionEngine).toBeDefined();
+      expect(withProvider.applicationSkillPromotionEngine).toBeDefined();
+      expect(withoutProvider.applicationSkillEvolutionLoop).toBeUndefined();
+      expect(withProvider.applicationSkillEvolutionLoop).toBeUndefined();
+      expect(withAutomaticEvolution.applicationSkillEvolutionLoop).toBeDefined();
+    } finally {
+      await withoutProvider.close?.();
+      await withProvider.close?.();
+      await withAutomaticEvolution.close?.();
+    }
+  });
+
+  it("exposes a trusted attestation provider that issues scoped tokens on demand", async () => {
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: productionBrowserClient()
+    });
+    try {
+      expect(dependencies.agentCallerAttestationProvider).toBeDefined();
+      expect(dependencies.agentCallerAttestationVerifier).toBeDefined();
+      const first = dependencies.agentCallerAttestationProvider.issue("runtime");
+      const second = dependencies.agentCallerAttestationProvider.issue("runtime");
+      expect(first).not.toBe(second);
+      expect(dependencies.agentCallerAttestationVerifier.verify(first)).toMatchObject({ valid: true, caller: "runtime" });
+      expect(dependencies.agentCallerAttestationVerifier.verify(second)).toMatchObject({ valid: true, caller: "runtime" });
+      // A fixed startup token set must not be part of the production boundary.
+      expect("agentCallerAttestations" in dependencies).toBe(false);
+    } finally {
+      await dependencies.close?.();
+    }
+  });
+
+  it("composes and exposes the inline conversation job-match action service", async () => {
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient: productionBrowserClient()
+    });
+
+    expect(dependencies.conversationJobMatchService).toBeDefined();
+    const app = await createApp(dependencies);
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/conversations" });
+      const conversationId = created.json().id as string;
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${conversationId}/job-match-actions`,
+        payload: {
+          conversationId,
+          sessionId: "33333333-3333-4333-8333-333333333333",
+          action: "pause",
+          sessionVersion: 0,
+          idempotencyKey: "composition-1"
+        }
+      });
+
+      expect(response.statusCode).toBe(404);
+      expect(response.json()).toMatchObject({ code: "job_match_session_not_found" });
+    } finally {
+      await app.close();
+    }
   });
 
   it("composes job matching from confirmed knowledge-base expectations with the shared browser lease", async () => {
@@ -178,6 +253,145 @@ describe("production dependency composition", () => {
     await expect(dependencies.applicationService!.openBrowser(taskId)).rejects.toThrow("browser_task_in_use");
     expect(browserClient.open).not.toHaveBeenCalled();
     await dependencies.close?.();
+  });
+
+  it("registers the Baidu campus adapter in the production job-matching service", async () => {
+    const browserClient = productionBrowserClient({
+      observeJob: vi.fn(async (ownerId: string): Promise<JobPageSnapshot> => ({
+        id: `baidu-snapshot-${ownerId}`,
+        ownerId,
+        url: "https://talent.baidu.com/jobs/list?projectType=3&recruitType=GRADUATE",
+        title: "百度校园招聘",
+        capturedAt: "2026-08-24T00:00:00.000Z",
+        entryHint: "job_list",
+        visibleText: ["职位列表"],
+        jobCards: [],
+        filterState: [],
+        pagination: { kind: "none", hasNext: false },
+        boundaries: []
+      }))
+    });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient
+    });
+    const expectation = confirmedProfileFact("preferences.targetRole", "技术");
+    dependencies.profileRepository.createExtracted({ ...expectation, status: "extracted" });
+    dependencies.profileRepository.confirm(expectation.id);
+
+    const created = await dependencies.jobMatchService.create({
+      url: "https://talent.baidu.com/jobs/list?projectType=3&recruitType=GRADUATE"
+    });
+
+    expect(created).toMatchObject({
+      source: "baidu",
+      adapterVersion: "baidu-job-v1",
+      entryKind: "job_list"
+    });
+    await dependencies.close?.();
+  });
+
+  it("does not start a browser to search for a recruitment site", async () => {
+    const browserClientFactory = vi.fn(async () => productionBrowserClient());
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClientFactory
+    });
+    const app = await createApp(dependencies);
+
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/conversations" });
+      const sessionId = created.json().id as string;
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${sessionId}/messages`,
+        payload: { text: "\u5e2e\u6211\u6295\u9012\u4e00\u4e0b\u767e\u5ea6\u6821\u56ed\u62db\u8058" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(response.json().pendingConfirmation).toBeUndefined();
+      expect(response.json().message.text).toContain("联网搜索尚未配置");
+      expect(browserClientFactory).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("uses the configured Tavily recruitment port before any browser worker starts", async () => {
+    const browserClientFactory = vi.fn(async () => productionBrowserClient());
+    const search = vi.fn(async (input: { companyName: string; recruitmentType: "campus" | "social" | "internship" | "unknown" }) => ({
+      query: `${input.companyName} ${input.recruitmentType}`,
+      candidates: [{
+        title: "百度校园招聘",
+        url: "https://talent.baidu.com/",
+        domain: "talent.baidu.com",
+        snippet: "校园招聘岗位",
+        source: "tavily" as const
+      }]
+    }));
+    const dependencies = createProductionDependencies(loadConfig({
+      DATABASE_FILE: ":memory:",
+      TAVILY_API_KEY: "tvly-test-key"
+    }), {
+      browserClientFactory,
+      recruitmentSiteSearch: { search } as never
+    });
+    const app = await createApp(dependencies);
+
+    try {
+      const created = await app.inject({ method: "POST", url: "/api/conversations" });
+      const sessionId = created.json().id as string;
+      const response = await app.inject({
+        method: "POST",
+        url: `/api/conversations/${sessionId}/messages`,
+        payload: { text: "帮我投递百度校园招聘" }
+      });
+
+      expect(response.statusCode).toBe(200);
+      expect(search).toHaveBeenCalledWith({ companyName: "百度", recruitmentType: "campus" });
+      expect(response.json().pendingConfirmation.target.kind).toBe("recruitment_site_choices");
+      expect(browserClientFactory).not.toHaveBeenCalled();
+    } finally {
+      await app.close();
+    }
+  });
+
+  it("restores a Runtime-owned application task after rebuilding production dependencies", async () => {
+    const directory = await mkdtemp(join(tmpdir(), "resume-langgraph-restart-"));
+    const databaseFile = join(directory, "resume.db");
+    const taskId = "2b9c0bfb-3785-4393-8e57-2a3082f29e3c";
+    const config = loadConfig({ DATABASE_FILE: databaseFile });
+    const firstBrowser = productionBrowserClient();
+    const first = createProductionDependencies(config, { browserClient: firstBrowser });
+
+    try {
+      createApplicationTaskRepository(first.database).create({
+        id: taskId,
+        applicationUrl: "https://jobs.example.test/apply"
+      });
+      first.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
+      await first.applicationService!.openBrowser(taskId);
+      await first.applicationService!.runUntilPause(taskId);
+      expect(first.applicationService!.state(taskId).value).toBe("awaiting_login");
+      const graphCheckpointCount = first.database.prepare(
+        "SELECT COUNT(*) AS count FROM agent_checkpoints"
+      ).get() as { count: number };
+      const legacyCheckpointCount = first.database.prepare(
+        "SELECT COUNT(*) AS count FROM application_checkpoints WHERE task_id = ?"
+      ).get(taskId) as { count: number };
+      expect(graphCheckpointCount.count).toBeGreaterThan(0);
+      expect(legacyCheckpointCount.count).toBe(0);
+      await first.close?.();
+
+      const second = createProductionDependencies(config, { browserClient: productionBrowserClient() });
+      try {
+        await second.applicationService!.openBrowser(taskId);
+        expect(second.applicationService!.state(taskId).value).toBe("awaiting_login");
+      } finally {
+        await second.close?.();
+      }
+    } finally {
+      await first.close?.();
+      await rm(directory, { recursive: true, force: true });
+    }
   });
 
   beforeEach(() => {
@@ -239,6 +453,56 @@ describe("production dependency composition", () => {
     await dependencies.close?.();
   });
 
+  it("routes a configured structured provider through the Runtime intent resolver", async () => {
+    const structuredDraft = {
+      primaryGoal: "fill_application",
+      subGoals: ["prepare_application", "fill_application", "verify_application"],
+      entities: {
+        applicationUrl: {
+          value: "https://jobs.example.test/apply",
+          source: "user_explicit",
+          confidence: 1,
+          evidenceRefs: [],
+          requiresConfirmation: false
+        },
+        resumeRef: {
+          value: "latest",
+          source: "model_inference",
+          confidence: 0.9,
+          evidenceRefs: [],
+          requiresConfirmation: true
+        }
+      },
+      constraints: [],
+      preferences: [],
+      successCriteria: [{ id: "ready", description: "complete the application before review", required: true }],
+      confidence: 0.9,
+      autonomyLevel: "execute_with_approval",
+      evidenceRefs: []
+    };
+    const fetch = vi.fn(async () => new Response(JSON.stringify({
+      choices: [{ message: { content: JSON.stringify(structuredDraft) } }]
+    }), { status: 200, headers: { "Content-Type": "application/json" } }));
+    const dependencies = createProductionDependencies(fullConfig(), {
+      fetch: fetch as typeof globalThis.fetch,
+      browserClient: productionBrowserClient()
+    });
+    try {
+      const result = await dependencies.agentIntentResolver.resolve({
+        text: "\u8bf7\u586b\u5199\u7533\u8bf7\u8868\u5e76\u5728\u63d0\u4ea4\u524d\u590d\u6838"
+      }, {
+        availableJobs: [],
+        availableResumes: [{ id: "resume-1", label: "latest" }]
+      });
+
+      expect(fetch).toHaveBeenCalledOnce();
+      expect(result.type).toBe("resolved");
+      if (result.type === "resolved") expect(result.intent.primaryGoal).toBe("fill_application");
+    } finally {
+      await dependencies.close?.();
+    }
+  });
+
   it("shares one scheduled embedding provider across ontology resolution and Fact synchronization", async () => {
     let releaseFirstRequest!: () => void;
     const firstRequest = new Promise<void>((resolve) => {
@@ -272,11 +536,7 @@ describe("production dependency composition", () => {
       EMBEDDING_MODEL: "Qwen/Qwen3-Embedding-8B",
       EMBEDDING_MODEL_REVISION: QWEN_REVISION,
       EMBEDDING_DIMENSIONS: "4096"
-    }), {
-      fetch: fetch as typeof globalThis.fetch,
-      browserClient: productionBrowserClient(),
-      hintPacks: [jobsExampleHintPack]
-    });
+    }), { fetch: fetch as typeof globalThis.fetch, browserClient: productionBrowserClient() });
     const profileFact = confirmedProfileFact("basics.name", "候选人事实文本");
     dependencies.profileRepository.createExtracted({ ...profileFact, status: "extracted" });
     dependencies.profileRepository.confirm(profileFact.id);
@@ -1155,6 +1415,152 @@ describe("production dependency composition", () => {
     await app.close();
   });
 
+  it("keeps a supported-site landing page observe-only when no Skill page variant matches", async () => {
+    const execute = vi.fn();
+    const browserClient = {
+      open: vi.fn(async (taskId: string, url: string) => ({
+        type: "opened" as const,
+        taskId,
+        url,
+        title: "百度招聘"
+      })),
+      observe: vi.fn(async (taskId: string) => ({
+        type: "snapshot" as const,
+        snapshot: {
+          frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const },
+          mutationEpoch: fixtureNodeRef.observedAt,
+          id: "snapshot-baidu-campus",
+          taskId,
+          url: "https://talent.baidu.com/jobs/campus",
+          title: "百度校园招聘",
+          stage: "application_form" as const,
+          fields: [],
+          actions: [],
+          errors: []
+        }
+      })),
+      execute,
+      stop: vi.fn()
+    };
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), { browserClient });
+    const app = await createApp(dependencies);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/applications",
+      payload: { applicationUrl: "https://talent.baidu.com/jobs/campus" }
+    });
+
+    expect(response.statusCode).toBe(201);
+    expect(execute).not.toHaveBeenCalled();
+    await app.close();
+  });
+
+  it("persists one redacted execution record for a matched Champion Skill attempt", async () => {
+    const applicationUrl = "https://talent.baidu.com/jobs/detail/GRADUATE/123/apply";
+    let requiredText = "application";
+    const browserClient = {
+      open: vi.fn(async (taskId: string, url: string) => ({
+        type: "opened" as const, taskId, url, title: requiredText
+      })),
+      observe: vi.fn(async (taskId: string) => ({
+        type: "snapshot" as const,
+        snapshot: {
+          frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const },
+          mutationEpoch: fixtureNodeRef.observedAt,
+          id: "snapshot-baidu-application",
+          taskId,
+          url: applicationUrl,
+          title: requiredText,
+          stage: "application_form" as const,
+          fields: [{
+            id: "candidate-name",
+            label: requiredText,
+            type: "text" as const,
+            required: true,
+            options: [],
+            currentValue: "",
+            semanticHint: "basics.name" as const,
+            nodeRef: fixtureNodeRef
+          }],
+          actions: [],
+          errors: []
+        }
+      })),
+      execute: vi.fn(),
+      stop: vi.fn()
+    };
+    const dependencies = createProductionDependencies(loadConfig({
+      DATABASE_FILE: ":memory:",
+      LANGSMITH_TRACING_ENABLED: "true",
+      LANGSMITH_API_KEY: "langsmith-test-key",
+      LANGSMITH_ENDPOINT: "https://api.smith.langchain.com"
+    }), { browserClient });
+    const championRow = dependencies.database.prepare(`
+      SELECT content_json FROM skill_versions
+      WHERE skill_id = 'baidu-application' AND status = 'champion'
+    `).get() as { content_json: string };
+    requiredText = JSON.parse(championRow.content_json).pageVariants[0].match.requiredTexts[0];
+    const app = await createApp(dependencies);
+
+    const response = await app.inject({
+      method: "POST",
+      url: "/api/applications",
+      payload: { applicationUrl }
+    });
+
+    expect(response.statusCode).toBe(201);
+    const rows = dependencies.database.prepare("SELECT payload_json FROM skill_execution_records").all() as Array<{ payload_json: string }>;
+    expect(rows).toHaveLength(1);
+    expect(JSON.parse(rows[0]!.payload_json)).toMatchObject({
+      binding: { skillId: "baidu-application", version: "1.0.0", site: "baidu" },
+      pageVariantId: "application-form",
+      allocation: "champion",
+      terminalResult: "handoff"
+    });
+    expect(rows[0]!.payload_json).not.toContain(applicationUrl);
+    expect(rows[0]!.payload_json).not.toContain(requiredText);
+    const outboxRows = dependencies.database.prepare("SELECT payload_json, status FROM langsmith_trace_outbox").all() as Array<{
+      payload_json: string;
+      status: string;
+    }>;
+    const skillProjection = outboxRows
+      .map((row) => ({ ...row, payload: JSON.parse(row.payload_json) }))
+      .find((row) => row.payload.skill?.skillId === "baidu-application");
+    expect(skillProjection).toMatchObject({
+      status: "pending",
+      payload: {
+        skill: {
+          skillId: "baidu-application",
+          skillVersion: "1.0.0",
+          pageVariantId: "application-form",
+          allocation: "champion"
+        }
+      }
+    });
+    expect(JSON.stringify(outboxRows)).not.toContain(applicationUrl);
+    expect(JSON.stringify(outboxRows)).not.toContain(requiredText);
+    expect(browserClient.execute).not.toHaveBeenCalled();
+
+    const exporter = createLangSmithExporter({
+      client: { createRun: vi.fn().mockRejectedValue(new Error("timeout")) },
+      outbox: createSqliteLangSmithOutbox(dependencies.database),
+      maxAttempts: 2
+    });
+    await expect(exporter.flushOnce()).resolves.toEqual({
+      sent: 0,
+      retried: outboxRows.length,
+      deadLetter: 0
+    });
+    expect(dependencies.database.prepare("SELECT COUNT(*) AS count FROM skill_execution_records").get())
+      .toEqual({ count: 1 });
+    expect(dependencies.database.prepare(`
+      SELECT COUNT(*) AS count FROM langsmith_trace_outbox
+      WHERE status = 'pending' AND attempts = 1
+    `).get()).toEqual({ count: outboxRows.length });
+    await app.close();
+  });
+
   it("lazily forwards browser Worker activity into the application event bus", async () => {
     const activityListeners = new Set<(activity: WorkerActivity) => void>();
     const onActivity = vi.fn((listener: (activity: WorkerActivity) => void) => {
@@ -1372,10 +1778,11 @@ describe("production dependency composition", () => {
     dependencies.applicationService!.start({ taskId, applicationUrl: "https://jobs.example.test/apply" });
     await dependencies.applicationService!.openBrowser(taskId);
 
-    await expect(dependencies.applicationService!.runUntilPause(taskId)).rejects.toThrow("observation failure");
+    await expect(dependencies.applicationService!.runUntilPause(taskId)).resolves.toBeUndefined();
 
     expect(browserClientFactory).toHaveBeenCalledOnce();
     expect(first.stop).not.toHaveBeenCalled();
+    expect(dependencies.applicationService!.state(taskId).value).toBe("failed");
     await dependencies.close?.();
   });
 
@@ -1425,14 +1832,15 @@ describe("production dependency composition", () => {
   });
 
   it("does not recycle or replay a failed execute command", async () => {
+    let observedForm!: FormSnapshot;
     const client = productionBrowserClient({
+      observe: vi.fn(async () => ({ type: "snapshot" as const, snapshot: observedForm })),
       execute: vi.fn(async () => { throw new Error("execution failure"); })
     });
     const browserClientFactory = vi.fn().mockResolvedValue(client);
     const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
       browserClient: client,
-      browserClientFactory,
-      hintPacks: [jobsExampleHintPack]
+      browserClientFactory
     });
     dependencies.profileRepository.createExtracted({
       id: "self-evaluation",
@@ -1465,6 +1873,7 @@ describe("production dependency composition", () => {
       actions: [],
       errors: []
     };
+    observedForm = form;
 
     await dependencies.applicationService!.runUntilPause(taskId, form);
     const review = dependencies.applicationService!.contentReview(taskId);
@@ -1475,7 +1884,7 @@ describe("production dependency composition", () => {
     expect(client.execute).toHaveBeenCalledOnce();
     expect(browserClientFactory).toHaveBeenCalledOnce();
     expect(client.stop).not.toHaveBeenCalled();
-    expect(dependencies.applicationService!.progress(taskId).status).toBe("paused");
+    expect(dependencies.applicationService!.progress(taskId).status).toBe("idle");
     await dependencies.close?.();
   });
 
@@ -1533,10 +1942,7 @@ describe("production dependency composition", () => {
       }),
       stop: vi.fn()
     };
-    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
-      browserClient,
-      hintPacks: [jobsExampleHintPack]
-    });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), { browserClient });
     dependencies.profileRepository.createExtracted({
       id: "self-profile",
       fieldPath: "selfEvaluation",
@@ -1655,6 +2061,7 @@ function productionBrowserClient(overrides: Record<string, unknown> = {}) {
   });
   return {
     open: vi.fn(async (taskId: string, url: string) => ({ type: "opened" as const, taskId, url, title: "Jobs" })),
+    openPublic: vi.fn(async (taskId: string, url: string) => ({ type: "opened" as const, taskId, url, title: "Jobs" })),
     observe: vi.fn(async (taskId: string) => ({
       type: "snapshot" as const,
       snapshot: {frameRef: { documentId: fixtureNodeRef.documentId, kind: "main" as const }, mutationEpoch: fixtureNodeRef.observedAt, 

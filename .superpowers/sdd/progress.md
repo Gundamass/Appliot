@@ -90,6 +90,15 @@ Task 1: complete (direct-workspace, no commit by user request; focused contract 
 Task 5: complete (direct-workspace, no commit by user request; focused Web tests 23/23, API projection 1/1, Web/API/contracts typechecks and diff check passed; final elapsed-baseline review accepted)
 Task 6 final safety follow-up: complete (direct-workspace, no commit by user request). Added execution epochs with immediate IPC invalidation on cancel/user activity, pre-mutation freshness checks, privacy-safe ordinary action click monitoring, visible PAGE_ERROR pauses, and native form-submit/network guards. Fresh verification: root pnpm test, root typecheck, root build, git diff --check, and browser E2E 9/9 passed.
 
+Program: independent project context documentation
+Plan: E:\projects\docs\superpowers\plans\2026-08-17-independent-project-context-docs.md
+Task 2: complete (external docs under E:\projects\docs\简历投递助手; review approved; source repository unchanged)
+Task 1: complete (external index and documentation rules under E:\projects\docs; review approved)
+Task 3: complete (external docs under E:\projects\docs\full-redbook-backend; review fix accepted; nested source root and no Git metadata documented)
+Task 4: complete (external docs under E:\projects\docs\bigdata-backend-sx; multiple citation corrections re-reviewed and approved; source repository unchanged)
+Task 5: complete (external docs under E:\projects\docs\hm-dianping; flash-sale initialization/durable-handoff and citation corrections re-reviewed and approved; source repository unchanged)
+Task 6: complete (four external context packages globally verified and re-reviewed; 20 context documents, 27 local links, 472 source paths; no context-package prohibited/credential values)
+
 ---
 
 Program: integrated profile workspace
@@ -122,3 +131,68 @@ Task 3: complete (commits 9f336bb..4497f24, direct final review clean). SQLite l
 Task 4: complete (commit c513180, direct local review per user request). Added allowlisted AI observations, independent proposal and replay-review roles, hard replay schema gates, correlated opt-in encrypted raw-response capture, and self-evaluation exclusion. Fresh verification: model-provider 54/54, ATS adapter 44/44, production composition 42/42, typecheck, and staged diff check passed.
 Task 5: complete (commit 0f1909a). Deterministic hard validation and isolated synthetic replay now exercise the controlled browser path with zero-submit and boundary assertions.
 Task 6: complete (direct workspace). Added the certified-pack execution gate, persisted adapter-review projection, safe re-observation after certification, certified repeated-section classification, and pack retirement on unsafe readback. The profile-resume observation-failure regression is covered. Fresh verification: Task 6 API tests 161/161, API state-machine test 115/115, root typecheck, diff check, and Mokahr high-coverage browser regression 1/1 passed.
+
+---
+
+Program: LangGraph agent architecture upgrade
+Plan: docs/superpowers/plans/2026-08-21-langgraph-agent-architecture-upgrade.md
+Branch start: f715ecb
+
+Task 1: complete (commit 3c9d9b8; contracts tests 76/76 and contracts typecheck passed)
+Task 2: complete (commit 57bec39; TraceSink/tool registry focused tests 6/6, migration tests 11/11, API typecheck passed)
+Task 2A: complete (commit 6ddbadc; LangSmith/config/outbox focused tests 36/36, API typecheck passed)
+Task 3: complete (commit 9938f37; SQLite LangGraph Checkpointer, migration compatibility, and restart persistence; focused tests 20/20, API typecheck, and diff check passed)
+
+---
+
+Program: Agent Runtime, Supervisor and Intent Understanding
+Plan: docs/superpowers/plans/2026-09-02-agent-runtime-supervisor-intent-plan.md
+
+Tasks 1-8: local code complete, not committed by user request. Added the
+CanonicalIntent/Plan/Capability/Runtime contracts, structured intent
+resolution and clarification, LangGraph-backed Runtime with budgets and
+cancel/recovery, Supervisor/Planner/Policy boundaries, specialist agents,
+SQLite event/evidence/request-context persistence, lifecycle routes, replay
+datasets, and browser safety regressions.
+Task 9: production composition root now uses AgentRuntime and the Runtime
+application service exclusively; the old graph service is not a production
+task entry point. Legacy graph/subgraph modules remain as bounded compatibility
+adapters for unmigrated tests and domain facades, so literal deletion of those
+files is still a follow-up migration rather than being claimed complete.
+
+Latest local verification: API 112 files / 930 tests passed; root workspace
+tests 112 files / 931 tests passed; typecheck passed; `pnpm eval:agent` passed
+with no failures and mis-submission count 0; Playwright 47/47 passed; and
+`git diff --check` passed. The evaluation report records recall@3 1.0 and
+OCR character accuracy 0.9667 on the current small synthetic corpus.
+
+---
+
+Program: explainable job recommendation and declarative Skill evolution
+Plan: docs/superpowers/plans/2026-09-06-job-recommendation-and-skill-evolution-plan.md
+Branch: fix/mokahr-campus-apply
+Branch start: 1ec0ca9
+Execution mode: direct workspace retained because the approved runtime and recommendation prerequisites are uncommitted on this branch; implementation subagents use isolated workspaces.
+Baseline: root workspace tests passed (contracts 107, job matching 78, API 944, Web 259, Browser Worker 134, plus remaining package suites); existing PDF/font and intentional route-error test output noted.
+Task 1: complete (commits 1ec0ca9..4f2b2e2, review clean; contracts 108/108 and typecheck passed with recorded RED/GREEN evidence)
+Task 2: complete (commits 4f2b2e2..9ae60e4, review clean; focused scoring 15/15, job-matching package 87/87, and typecheck passed)
+Task 3: complete (commits 9ae60e4..68cbe06, review clean; focused API 22/22, full API 954/954, and typecheck passed)
+Task 4: complete (commits 68cbe06..5a4077d, review clean after evidence allowlist fix; focused Web 6/6, full Web 260/260, build and typecheck passed)
+Task 5: complete (commits 5a4077d..ad5a696, final review approved; browser acceptance 3/3 and focused API 67/67 passed; the real HTTP selection route shares production-equivalent JobMatchService -> ApplicationService handoff wiring, leaves the application repository empty, and leaves Synthetic ATS submission count at zero with a separate positive counter control)
+Task 6: complete (commits a884c8b..e4edbca, final review approved; focused Skill suite 73/73, contracts 181/181, contracts/root typecheck passed; mandatory audit, closed patch surface, credential/encoded-literal rejection, descriptive compatibility and 256-sample Base64URL corpus verified)
+Task 7: complete (commits 71fb2b0..5818bf9, final review approved; migration/registry regression 35/35 and API typecheck passed; immutable content, atomic lifecycle/CAS, scoped allocations, quarantine withdrawal and append-only records verified)
+Task 8: complete (commits 943caa8..01577b9, final review approved; Task 8 focused 14/14, cumulative API Skill/migration 49/49, contracts 181/181 and API typecheck passed; semantic graph/origin/readback validation and three idempotent safe Champions verified)
+Task 9: complete (commits 0516a9e..81349bb, final review approved; interpreter 13/13, cumulative Skill API suite 62/62 and API typecheck passed; strict signatures, bounded glob/conditions/recovery, stable fingerprints, request ordering and forged-match rejection verified)
+Task 10: complete (commits c2eb578..2a7b721 plus reviewed direct-workspace Runtime integration in pre-existing untracked/dirty Agent Runtime files; final review approved; contracts 76/76, focused API 133/133, production composition 49/49 and dual typecheck passed; Champion-only atomic pre-write pinning, 1.0->1.1 compatibility, stable structural fingerprints, supported-site unmatched/cross-origin zero-write stops, and unchanged authorization/readback/audit/final-review controls verified)
+Task 11: complete (commits 0473365, d7d04a1, fdc621e plus reviewed direct-workspace integration in pre-existing untracked/dirty Runtime files; final review approved; contracts focused 86/86, API focused 131/131, full API 1044/1044, dual typecheck, build and diff check passed; one append-only first-write-wins record per bound attempt, persisted Champion/Challenger dimensions, pre-selector terminal-page coverage, credential/PII rejection, and durable LangSmith failure isolation verified)
+Task 12: complete (commit 419007d plus reviewed direct-workspace audit classification in the pre-existing untracked ApplicationAgent file; site runtime safety E2E and TDD integration fixes; interpreter/tooling focused 39/39, contracts 193/193, API 1049/1049, synthetic ATS 7/7, browser-worker 134/134, new Playwright 11/11, three package typechecks and root build passed; Moka/DJI/Baidu binding and reload recovery, repeated-field templates, renamed/delayed pages, duplicate semantics, stale nodes, ambiguous fingerprints, unmatched routes, unexpected navigation evidence, final-submit lock and zero submissions verified)
+Task 13: complete (commit 60a1ac0; redacted replay corpus with conservative capture quarantine, deterministic per-site/fingerprint/scenario temporal 80/20 manifests, separately wired training and evaluator capabilities, immutable restart-stable manifests, insert-only conflict detection, and replay-safe execution projections with transient NodeRefs removed; focused 39/39, full API 1055/1055, API typecheck and diff check passed; two independent review jobs were attempted but the review channel remained running without returning findings and was shut down, so final boundary review was completed locally)
+Task 14: complete (commit 38cbe05; fixed evaluator version 1.0.0 with code-owned lexicographic safety/incorrect-write/accuracy/completion/correction/retry-recovery/duration ordering, replay-safe raw facts, fail-closed partial-audit and timeout decisions, deterministic duplicate-aware aggregation, and seeded antisymmetry/transitivity invariants; focused evaluator 7/7, adjacent Skill regression 46/46, API typecheck and diff check passed)
+Task 15: complete (commit 9920990; bounded evolution-opportunity collector with exact site/fingerprint/Skill/version scope, latest-20 evaluated window, stable page/field/error themes and opportunity IDs, actionable-failure and fingerprint-drift triggers, improving Challenger recovery chains, shortest same-page/same-field fail-to-success pairs, open-run suppression, duplicate conflict rejection, and browser-ownership exclusion; collector 8/8 plus evaluator 7/7, API typecheck and diff check passed)
+Task 16: complete (commit f674f00 plus direct-workspace production composition wiring/test retained in the pre-existing dirty production-dependencies files; one-shot structured Skill patch generation against an exact active parent hash, strict higher version, prompt evidence allowlisting, training-only partition enforcement, fixed validator vocabulary, local patch application/hash/schema/semantic validation, stable provider/schema/parent/unchanged/validation rejections, bounded timeout and zero registry mutation; evolution agent 11/11, validator 11/11, production composition 51/51, API typecheck and diff check passed)
+Task 17: complete (commit 90e610e; idempotent opportunity lease, exact schema/semantics/safety/hidden-holdout/Synthetic ATS gate order, same-site same-sample Champion/candidate replay, fixed evaluator 1.0.0 lexicographic qualification, immutable hashed gate report, atomic candidate-to-replay-qualified CAS, and unchanged 100/0 traffic allocation; added reordered controls, delayed options, hidden honeypot and post-fill mutation alongside duplicate labels, unexpected navigation and stale NodeRef; focused Skill evolution 39/39, Synthetic ATS 7/7, offline Playwright 1/1, API typecheck, root build and diff check passed; E2E report ID evolution-report-evolution-opportunity-offline-e2e and all seven submission counts were zero; external review agent remained running without findings and was shut down, while local boundary review fixed target-stratum selection, cross-site holdout mixing, and runner-exception audit closure)
+Task 18: complete (commit c6453b7; deterministic SHA-256 uint32 bucket using the stable allocation ID as allocation salt; exact 0..99/1000 Challenger assignment; persisted task bindings remain pinned; pre-activation task timestamps remain Champion; unsafe or missing Challengers fall back to the valid Champion; fresh Runtime selections compile the actually selected version; replay-qualified activation is available only through one SQLite transaction that CASes lifecycle and writes 90/10 allocation, while the generic status path cannot bypass it; focused selector/registry 31/31, API typecheck and diff check passed; review agent remained running without findings and was shut down, local review closed the direct-transition bypass)
+Task 19: complete (commit e3a25bd; execution-ID normalized evaluation inputs stratified by site/fingerprint/scenario/required-field-count band; allocation/evaluator-derived xorshift seed; 10,000 within-stratum bootstrap iterations with fixed observed weights; hard Challenger safety, incorrect-write and new-audit-mismatch rollback; lexicographic first-difference confidence interval with higher-priority non-inferiority; exact insufficient/continue/stop-inconclusive thresholds; statistics 8/8 passed twice with byte-stable reordered input, API typecheck and diff check passed; review agent remained running without findings and was shut down)
+Task 20: complete (commit a71d609 plus direct-workspace production composition wiring/test retained in the pre-existing dirty production-dependencies files; durable first-write execution evidence drives deterministic online evaluation and idempotent lifecycle decisions; safety violation, incorrect write, or new audit mismatch immediately quarantines the Challenger and atomically restores 100% Champion traffic; positive statistical evidence promotes atomically, while fifty inconclusive eligible runs retire without unsafe classification; experiment statistics are isolated by activation time and evaluator version; duplicate and late delivery plus two-worker races are idempotent; focused promotion/recorder/registry/production regression 98/98, API typecheck and scoped diff check passed; the persistent lifecycle trigger was migrated to allow transactional Challenger retirement; review agent remained running without findings through two bounded waits and was shut down, while local review added experiment-window isolation and verified quarantined pinned tasks enter observe-only safe handoff before another compiled write)
+Task 21: complete (commit 88cdd0d plus direct-workspace automatic-evolution production composition wiring/test retained in the pre-existing dirty production-dependencies files; audited Champion failure clusters now enter constrained qualification automatically only when no Challenger is active, qualified next-patch candidates receive deterministic 10% traffic, positive evidence promotes, and a post-fill mutation produces an audit mismatch that hard-rolls back to the prior Champion; existing tasks remain pinned, quarantined bindings fail closed to observe-only handoff, execution evidence is append-only, and both Synthetic ATS submission counters remain zero; API 127 files/1115 tests, Synthetic ATS 7/7, Playwright runtime/offline/automatic evolution 13/13, root typecheck and production build passed with only the existing Web chunk-size warning; the independent review agent remained running without findings through two bounded waits and was shut down, and local review bound the evolved locator hint directly to the activated candidate)
+Task 22: complete (commit ed4fa8d; final verification report reconciles recommendation, Runtime, offline qualification and automatic evolution evidence; contracts 17 files/193 tests, job-matching 7/87, API 127/1115, Web 45/261, Synthetic ATS 1/7 and four-spec Playwright 16/16 passed; root typecheck and production build passed with only the existing 518.41 kB Web chunk warning; full diff hygiene passed and the explicit PII/approval/raw-DOM/querySelector/submit-command scan returned no matches; real 5173 inspection identified an old in-memory browser bundle rather than current rendering, then a refreshed build handled a live Tavily 10-second outage by stopping with a retryable error and without creating a match or application task; deterministic browser fixtures remain the authoritative Baidu/Moka/DJI acceptance evidence with zero submissions; final review agent remained running without findings through two bounded waits and was shut down, while local safety review closed every checklist item)

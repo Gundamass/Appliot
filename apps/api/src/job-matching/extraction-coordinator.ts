@@ -174,8 +174,28 @@ function filterReadbackMatches(plan: FilterPlan, snapshot: JobPageSnapshot): boo
     const readback = snapshot.filterState.find((filter) => filter.key === mapped.key);
     return readback !== undefined
       && readback.values.length === mapped.values.length
-      && mapped.values.every((value, index) => value === readback.values[index]);
+      && mapped.values.every((value, index) => filterValuesMatch(
+        mapped.key,
+        value,
+        readback.values[index] ?? ""
+      ));
   });
+}
+
+function filterValuesMatch(key: string, expected: string, actual: string): boolean {
+  const normalizedExpected = normalizeFilterValue(expected);
+  const normalizedActual = normalizeFilterValue(actual);
+  if (normalizedExpected === normalizedActual) return true;
+  if (key !== "location" && key !== "work_location") return false;
+  return stripAdministrativeSuffix(normalizedExpected) === stripAdministrativeSuffix(normalizedActual);
+}
+
+function normalizeFilterValue(value: string): string {
+  return value.normalize("NFKC").replace(/\s+/gu, " ").trim();
+}
+
+function stripAdministrativeSuffix(value: string): string {
+  return value.replace(/(?:特别行政区|自治区|自治州|地区|市|省|县|区)$/u, "");
 }
 
 async function readWithRetry<T>(operation: () => Promise<T>, attempts: number): Promise<T> {

@@ -1,6 +1,13 @@
 import type { SqliteDatabase } from "./client.js";
+import {
+  DEFAULT_CONVERSATION_TITLE,
+  LEGACY_CONVERSATION_TITLE,
+  conversationTitleFromFirstMessage
+} from "../conversations/conversation-title.js";
+import { migrateApplicationSkillSchema } from "../application-skills/skill-schema-migration.js";
 
 export function migrateDatabase(database: SqliteDatabase): void {
+  upgradeConversationProcessEvents(database);
   database.exec(`
     PRAGMA foreign_keys = ON;
 
@@ -82,8 +89,28 @@ export function migrateDatabase(database: SqliteDatabase): void {
       updated_at TEXT NOT NULL,
       profile_revision_applied INTEGER NOT NULL DEFAULT 0 CHECK (profile_revision_applied >= 0),
       profile_sync_status TEXT NOT NULL DEFAULT 'current' CHECK (profile_sync_status IN ('current', 'pending', 'failed')),
-      profile_sync_error TEXT
+      profile_sync_error TEXT,
+      orchestrator TEXT NOT NULL DEFAULT 'agent-runtime' CHECK (orchestrator = 'agent-runtime')
     );
+
+    CREATE TABLE IF NOT EXISTS agent_application_reviews (
+      id TEXT PRIMARY KEY,
+      task_id TEXT NOT NULL REFERENCES application_tasks(id) ON DELETE CASCADE,
+      interrupt_id TEXT NOT NULL,
+      field_id TEXT NOT NULL,
+      field_label TEXT NOT NULL,
+      original TEXT NOT NULL,
+      draft TEXT NOT NULL,
+      reasons_json TEXT NOT NULL CHECK (json_valid(reasons_json) AND json_type(reasons_json) = 'array'),
+      evidence_json TEXT NOT NULL CHECK (json_valid(evidence_json) AND json_type(evidence_json) = 'array'),
+      unsupported_claims_json TEXT NOT NULL CHECK (json_valid(unsupported_claims_json) AND json_type(unsupported_claims_json) = 'array'),
+      status TEXT NOT NULL CHECK (status IN ('needs_review', 'approved', 'blocked')),
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL,
+      UNIQUE (task_id, interrupt_id)
+    );
+    CREATE INDEX IF NOT EXISTS agent_application_reviews_task_status_idx
+      ON agent_application_reviews(task_id, status, updated_at);
 
     CREATE TABLE IF NOT EXISTS profile_metadata (
       id INTEGER PRIMARY KEY CHECK (id = 1),
@@ -101,7 +128,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
         'cancelled', 'expired'
       )),
       entry_kind TEXT CHECK (entry_kind IS NULL OR entry_kind IN ('job_list', 'job_detail', 'application_form')),
-      source TEXT CHECK (source IS NULL OR source IN ('moka', 'dji')),
+      source TEXT CHECK (source IS NULL OR source IN ('moka', 'dji', 'baidu')),
       initial_url TEXT NOT NULL,
       adapter_version TEXT,
       scoring_version TEXT NOT NULL DEFAULT 'job-match-v1' CHECK (scoring_version = 'job-match-v1'),
@@ -136,7 +163,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
     CREATE TABLE IF NOT EXISTS job_postings (
       id TEXT PRIMARY KEY,
       session_id TEXT NOT NULL REFERENCES job_match_sessions(id) ON DELETE CASCADE,
-      source TEXT NOT NULL CHECK (source IN ('moka', 'dji')),
+      source TEXT NOT NULL CHECK (source IN ('moka', 'dji', 'baidu')),
       source_job_id TEXT,
       canonical_url TEXT NOT NULL,
       content_hash TEXT NOT NULL,
@@ -342,7 +369,10 @@ export function migrateDatabase(database: SqliteDatabase): void {
       DELETE FROM application_checkpoints WHERE task_id = OLD.id;
       DELETE FROM application_answers WHERE task_id = OLD.id;
       DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
+      DELETE FROM agent_application_reviews WHERE task_id = OLD.id;
       DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
+      DELETE FROM agent_runtime_application_states
+      WHERE json_extract(payload_json, '$.taskId') = OLD.id;
     END;
 
     CREATE TABLE IF NOT EXISTS embeddings (
@@ -377,7 +407,205 @@ export function migrateDatabase(database: SqliteDatabase): void {
       created_at TEXT NOT NULL,
       PRIMARY KEY (index_id, fact_id)
     );
+
+    CREATE TABLE IF NOT EXISTS agent_trace_events (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      node TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      outcome TEXT NOT NULL,
+      reason_code TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL,
+      UNIQUE (run_id, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS agent_trace_events_run_sequence_idx
+      ON agent_trace_events(run_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS agent_events (
+      event_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL,
+      UNIQUE (run_id, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS agent_events_run_sequence_idx
+      ON agent_events(run_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS agent_runtime_request_contexts (
+      ref TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_evidence_records (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      invocation_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      source_ref TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      locator TEXT,
+      registered_at TEXT NOT NULL,
+      UNIQUE (run_id, step_id, invocation_id, kind, source_ref, content_hash, locator)
+    );
+    CREATE INDEX IF NOT EXISTS agent_evidence_records_provenance_idx
+      ON agent_evidence_records(run_id, step_id, invocation_id);
+
+    CREATE TABLE IF NOT EXISTS langsmith_trace_outbox (
+      id TEXT PRIMARY KEY,
+      trace_id TEXT NOT NULL UNIQUE,
+      run_id_hash TEXT NOT NULL,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'processing', 'sent', 'dead_letter')),
+      attempts INTEGER NOT NULL DEFAULT 0 CHECK (attempts >= 0),
+      next_attempt_at TEXT NOT NULL,
+      remote_run_id TEXT,
+      last_error_code TEXT,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS langsmith_trace_outbox_ready_idx
+      ON langsmith_trace_outbox(status, next_attempt_at);
+
+    CREATE TABLE IF NOT EXISTS agent_checkpoints (
+      thread_id TEXT NOT NULL,
+      checkpoint_ns TEXT NOT NULL,
+      checkpoint_id TEXT NOT NULL,
+      parent_checkpoint_id TEXT,
+      type TEXT NOT NULL,
+      metadata_type TEXT NOT NULL DEFAULT 'json',
+      checkpoint_blob BLOB NOT NULL,
+      metadata_blob BLOB NOT NULL,
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id)
+    );
+    CREATE INDEX IF NOT EXISTS agent_checkpoints_thread_namespace_id_idx
+      ON agent_checkpoints(thread_id, checkpoint_ns, checkpoint_id);
+
+    CREATE TABLE IF NOT EXISTS agent_checkpoint_writes (
+      thread_id TEXT NOT NULL,
+      checkpoint_ns TEXT NOT NULL,
+      checkpoint_id TEXT NOT NULL,
+      task_id TEXT NOT NULL,
+      write_index INTEGER NOT NULL,
+      channel TEXT NOT NULL,
+      type TEXT NOT NULL,
+      value_blob BLOB NOT NULL,
+      PRIMARY KEY (thread_id, checkpoint_ns, checkpoint_id, task_id, write_index),
+      FOREIGN KEY (thread_id, checkpoint_ns, checkpoint_id)
+        REFERENCES agent_checkpoints(thread_id, checkpoint_ns, checkpoint_id) ON DELETE CASCADE
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_runtime_application_states (
+      run_id TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS agent_runtime_application_states_updated_idx
+      ON agent_runtime_application_states(updated_at, run_id);
+
+    CREATE TABLE IF NOT EXISTS conversation_sessions (
+      id TEXT PRIMARY KEY,
+      title TEXT NOT NULL,
+      created_at TEXT NOT NULL,
+      updated_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS conversation_job_match_sessions (
+      conversation_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      job_match_session_id TEXT PRIMARY KEY REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+      created_at TEXT NOT NULL,
+      UNIQUE (conversation_id, job_match_session_id)
+    );
+    CREATE INDEX IF NOT EXISTS conversation_job_match_sessions_conversation_id_idx
+      ON conversation_job_match_sessions(conversation_id, job_match_session_id);
+
+    CREATE TABLE IF NOT EXISTS conversation_messages (
+      id TEXT PRIMARY KEY,
+      session_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      role TEXT NOT NULL CHECK (role IN ('user', 'assistant')),
+      text TEXT NOT NULL,
+      cards_json TEXT NOT NULL CHECK (json_valid(cards_json) AND json_type(cards_json) = 'array'),
+      intent_json TEXT CHECK (intent_json IS NULL OR json_valid(intent_json)),
+      created_at TEXT NOT NULL
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS conversation_messages_session_sequence_unique
+      ON conversation_messages(session_id, sequence);
+    CREATE INDEX IF NOT EXISTS conversation_messages_session_id_idx
+      ON conversation_messages(session_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS conversation_contexts (
+      session_id TEXT PRIMARY KEY REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      version INTEGER NOT NULL CHECK (version >= 0),
+      context_json TEXT NOT NULL CHECK (json_valid(context_json) AND json_type(context_json) = 'object'),
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS conversation_contexts_session_id_idx
+      ON conversation_contexts(session_id);
+
+    CREATE TABLE IF NOT EXISTS conversation_turns (
+      conversation_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      request_id TEXT NOT NULL,
+      input_text TEXT NOT NULL,
+      response_json TEXT NOT NULL CHECK (json_valid(response_json) AND json_type(response_json) = 'object'),
+      created_at TEXT NOT NULL,
+      PRIMARY KEY (conversation_id, request_id)
+    );
+    CREATE UNIQUE INDEX IF NOT EXISTS conversation_turns_conversation_request_unique
+      ON conversation_turns(conversation_id, request_id);
+
+    CREATE TABLE IF NOT EXISTS conversation_confirmations (
+      confirmation_id TEXT PRIMARY KEY,
+      conversation_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json) AND json_type(payload_json) = 'object'),
+      status TEXT NOT NULL CHECK (status IN ('pending', 'consumed')),
+      created_at TEXT NOT NULL,
+      consumed_at TEXT
+    );
+    CREATE INDEX IF NOT EXISTS conversation_confirmations_conversation_status_idx
+      ON conversation_confirmations(conversation_id, status, created_at);
+
+    CREATE TABLE IF NOT EXISTS conversation_process_events (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      conversation_id TEXT NOT NULL REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      turn_sequence INTEGER NOT NULL CHECK (turn_sequence > 0),
+      step_id TEXT NOT NULL CHECK (length(step_id) BETWEEN 1 AND 96),
+      type TEXT NOT NULL CHECK (type = 'process_changed'),
+      stage TEXT NOT NULL CHECK (stage IN (
+        'understanding_request', 'searching_recruitment_site', 'validating_recruitment_site',
+        'recruitment_site_found', 'waiting_for_confirmation', 'processing_confirmation',
+        'reading_recruitment_site', 'loading_recommendations', 'matching_jobs',
+        'loading_application_progress', 'creating_job_match_session', 'job_match_session_ready',
+        'creating_application_task', 'generating_response', 'completed', 'failed'
+      )),
+      status TEXT NOT NULL CHECK (status IN ('running', 'completed', 'waiting', 'failed')),
+      summary TEXT NOT NULL CHECK (length(summary) BETWEEN 1 AND 500),
+      details_json TEXT NOT NULL DEFAULT '{}' CHECK (json_valid(details_json) AND json_type(details_json) = 'object'),
+      created_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS conversation_process_events_conversation_id_idx
+      ON conversation_process_events(conversation_id, id);
+    CREATE INDEX IF NOT EXISTS conversation_process_events_turn_idx
+      ON conversation_process_events(conversation_id, turn_sequence, id);
+
+    CREATE TABLE IF NOT EXISTS conversation_process_event_cursors (
+      conversation_id TEXT PRIMARY KEY REFERENCES conversation_sessions(id) ON DELETE CASCADE,
+      discarded_through_id INTEGER NOT NULL CHECK (discarded_through_id > 0)
+    );
   `);
+
+  backfillConversationTitles(database);
+
+  const agentCheckpointColumns = database.prepare("PRAGMA table_info(agent_checkpoints)").all() as Array<{ name: string }>;
+  if (!agentCheckpointColumns.some((column) => column.name === "metadata_type")) {
+    database.exec("ALTER TABLE agent_checkpoints ADD COLUMN metadata_type TEXT NOT NULL DEFAULT 'json'");
+  }
 
   const taskColumns = database.prepare("PRAGMA table_info(application_tasks)").all() as Array<{ name: string }>;
   if (!taskColumns.some((column) => column.name === "name")) {
@@ -392,6 +620,11 @@ export function migrateDatabase(database: SqliteDatabase): void {
   if (!taskColumns.some((column) => column.name === "profile_sync_error")) {
     database.exec("ALTER TABLE application_tasks ADD COLUMN profile_sync_error TEXT");
   }
+  if (!taskColumns.some((column) => column.name === "orchestrator")) {
+    database.exec("ALTER TABLE application_tasks ADD COLUMN orchestrator TEXT NOT NULL DEFAULT 'agent-runtime' CHECK (orchestrator = 'agent-runtime')");
+  }
+
+  upgradeApplicationTaskOrchestrator(database);
 
   const checkpointColumns = database.prepare("PRAGMA table_info(application_checkpoints)").all() as Array<{ name: string }>;
   if (!checkpointColumns.some((column) => column.name === "snapshot_json")) {
@@ -410,6 +643,8 @@ export function migrateDatabase(database: SqliteDatabase): void {
   upgradeApplicationStateConstraints(database);
 
   upgradeFactForeignKeys(database);
+
+  upgradeJobSourceConstraints(database);
 
   const documentColumns = database.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;
   if (!documentColumns.some((column) => column.name === "source_path")) {
@@ -438,6 +673,68 @@ export function migrateDatabase(database: SqliteDatabase): void {
     WHEN NOT ((NEW.scope = 'profile' AND NEW.task_id IS NULL) OR (NEW.scope = 'application' AND NEW.task_id IS NOT NULL))
     BEGIN SELECT RAISE(ABORT, 'fact revision scope and task mismatch'); END;
   `);
+
+  migrateApplicationSkillSchema(database);
+}
+
+/**
+ * Collapse the old XState/LangGraph ownership marker into the Runtime-only
+ * contract. Existing task rows are deliberately re-owned by the Runtime so
+ * a restart cannot route them into a second orchestrator.
+ */
+function upgradeApplicationTaskOrchestrator(database: SqliteDatabase): void {
+  const sql = tableSql(database, "application_tasks");
+  const needsRebuild = sql.length > 0 && !sql.includes("orchestrator = 'agent-runtime'");
+  const foreignKeysWereEnabled = database.pragma("foreign_keys", { simple: true }) === 1;
+  if (foreignKeysWereEnabled) database.pragma("foreign_keys = OFF");
+  try {
+    const upgrade = database.transaction(() => {
+      database.exec("DROP TRIGGER IF EXISTS application_tasks_cleanup");
+      if (needsRebuild) {
+        database.exec(`
+          CREATE TABLE application_tasks_runtime_new (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            application_url TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            profile_revision_applied INTEGER NOT NULL DEFAULT 0 CHECK (profile_revision_applied >= 0),
+            profile_sync_status TEXT NOT NULL DEFAULT 'current' CHECK (profile_sync_status IN ('current', 'pending', 'failed')),
+            profile_sync_error TEXT,
+            orchestrator TEXT NOT NULL DEFAULT 'agent-runtime' CHECK (orchestrator = 'agent-runtime')
+          );
+          INSERT INTO application_tasks_runtime_new (
+            id, name, application_url, created_at, updated_at,
+            profile_revision_applied, profile_sync_status, profile_sync_error, orchestrator
+          )
+          SELECT
+            id, name, application_url, created_at, updated_at,
+            profile_revision_applied, profile_sync_status, profile_sync_error, 'agent-runtime'
+          FROM application_tasks;
+          DROP TABLE application_tasks;
+          ALTER TABLE application_tasks_runtime_new RENAME TO application_tasks;
+        `);
+      }
+      database.exec(`
+        CREATE TRIGGER application_tasks_cleanup
+        AFTER DELETE ON application_tasks
+        BEGIN
+          DELETE FROM application_task_events WHERE task_id = OLD.id;
+          DELETE FROM application_task_event_cursors WHERE task_id = OLD.id;
+          DELETE FROM application_checkpoints WHERE task_id = OLD.id;
+          DELETE FROM application_answers WHERE task_id = OLD.id;
+          DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
+          DELETE FROM agent_application_reviews WHERE task_id = OLD.id;
+          DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
+          DELETE FROM agent_runtime_application_states
+          WHERE json_extract(payload_json, '$.taskId') = OLD.id;
+        END;
+      `);
+    });
+    upgrade();
+  } finally {
+    if (foreignKeysWereEnabled) database.pragma("foreign_keys = ON");
+  }
 }
 
 function upgradeApplicationStateConstraints(database: SqliteDatabase): void {
@@ -520,7 +817,10 @@ function upgradeApplicationStateConstraints(database: SqliteDatabase): void {
         DELETE FROM application_checkpoints WHERE task_id = OLD.id;
         DELETE FROM application_answers WHERE task_id = OLD.id;
         DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
+        DELETE FROM agent_application_reviews WHERE task_id = OLD.id;
         DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
+        DELETE FROM agent_runtime_application_states
+        WHERE json_extract(payload_json, '$.taskId') = OLD.id;
       END;
     `);
   });
@@ -582,6 +882,119 @@ function upgradeFactForeignKeys(database: SqliteDatabase): void {
       DROP TABLE fact_embeddings_legacy;
       COMMIT;
     `);
+  }
+}
+
+function backfillConversationTitles(database: SqliteDatabase): void {
+  const legacy = database.prepare(`
+    SELECT id FROM conversation_sessions WHERE title = ? ORDER BY id
+  `).all(LEGACY_CONVERSATION_TITLE) as Array<{ id: string }>;
+  const firstUserMessage = database.prepare(`
+    SELECT text FROM conversation_messages
+    WHERE session_id = ? AND role = 'user'
+    ORDER BY sequence ASC LIMIT 1
+  `);
+  const update = database.prepare("UPDATE conversation_sessions SET title = ? WHERE id = ? AND title = ?");
+  const run = database.transaction(() => {
+    for (const { id } of legacy) {
+      const row = firstUserMessage.get(id) as { text: string } | undefined;
+      const title = row === undefined ? DEFAULT_CONVERSATION_TITLE : conversationTitleFromFirstMessage(row.text);
+      update.run(title, id, LEGACY_CONVERSATION_TITLE);
+    }
+  });
+  run();
+}
+
+function upgradeConversationProcessEvents(database: SqliteDatabase): void {
+  const existing = database.prepare(
+    "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'conversation_process_events'"
+  ).get();
+  if (existing === undefined) return;
+
+  const columns = database.prepare("PRAGMA table_info(conversation_process_events)").all() as Array<{ name: string }>;
+  if (columns.some(({ name }) => name === "turn_sequence")) return;
+
+  database.exec(`
+    DROP TABLE IF EXISTS conversation_process_event_cursors;
+    DROP TABLE conversation_process_events;
+  `);
+}
+
+function upgradeJobSourceConstraints(database: SqliteDatabase): void {
+  const sessionNeedsUpgrade = !tableSql(database, "job_match_sessions").includes("'baidu'");
+  const postingNeedsUpgrade = !tableSql(database, "job_postings").includes("'baidu'");
+  if (!sessionNeedsUpgrade && !postingNeedsUpgrade) return;
+
+  const foreignKeysWereEnabled = database.pragma("foreign_keys", { simple: true }) === 1;
+  if (foreignKeysWereEnabled) database.pragma("foreign_keys = OFF");
+  try {
+    const upgrade = database.transaction(() => {
+      if (sessionNeedsUpgrade) {
+        database.exec(`
+          CREATE TABLE job_match_sessions_source_new (
+            id TEXT PRIMARY KEY,
+            version INTEGER NOT NULL DEFAULT 0 CHECK (version >= 0),
+            state TEXT NOT NULL CHECK (state IN (
+              'created', 'awaiting_filter_confirmation', 'opening_job_page', 'awaiting_login',
+              'applying_filters', 'extracting_jobs', 'matching_jobs', 'awaiting_job_selection',
+              'selected', 'converted_to_application', 'awaiting_challenge', 'paused', 'failed',
+              'cancelled', 'expired'
+            )),
+            entry_kind TEXT CHECK (entry_kind IS NULL OR entry_kind IN ('job_list', 'job_detail', 'application_form')),
+            source TEXT CHECK (source IS NULL OR source IN ('moka', 'dji', 'baidu')),
+            initial_url TEXT NOT NULL,
+            adapter_version TEXT,
+            scoring_version TEXT NOT NULL DEFAULT 'job-match-v1' CHECK (scoring_version = 'job-match-v1'),
+            profile_revision INTEGER NOT NULL CHECK (profile_revision >= 0),
+            expectation_revision INTEGER NOT NULL CHECK (expectation_revision >= 0),
+            execution_epoch INTEGER NOT NULL DEFAULT 0 CHECK (execution_epoch >= 0),
+            selected_result_id TEXT,
+            selected_posting_content_hash TEXT,
+            conflict_summary_hash TEXT,
+            selection_idempotency_key TEXT,
+            application_task_id TEXT REFERENCES application_tasks(id),
+            conversion_idempotency_key TEXT,
+            stop_reason TEXT,
+            error_code TEXT,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL
+          );
+          INSERT INTO job_match_sessions_source_new SELECT * FROM job_match_sessions;
+          DROP TABLE job_match_sessions;
+          ALTER TABLE job_match_sessions_source_new RENAME TO job_match_sessions;
+          CREATE UNIQUE INDEX job_match_sessions_selection_idempotency_unique
+            ON job_match_sessions(selection_idempotency_key) WHERE selection_idempotency_key IS NOT NULL;
+          CREATE UNIQUE INDEX job_match_sessions_conversion_idempotency_unique
+            ON job_match_sessions(conversion_idempotency_key) WHERE conversion_idempotency_key IS NOT NULL;
+        `);
+      }
+
+      if (postingNeedsUpgrade) {
+        database.exec(`
+          CREATE TABLE job_postings_source_new (
+            id TEXT PRIMARY KEY,
+            session_id TEXT NOT NULL REFERENCES job_match_sessions(id) ON DELETE CASCADE,
+            source TEXT NOT NULL CHECK (source IN ('moka', 'dji', 'baidu')),
+            source_job_id TEXT,
+            canonical_url TEXT NOT NULL,
+            content_hash TEXT NOT NULL,
+            payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+            extracted_at TEXT NOT NULL
+          );
+          INSERT INTO job_postings_source_new SELECT * FROM job_postings;
+          DROP TABLE job_postings;
+          ALTER TABLE job_postings_source_new RENAME TO job_postings;
+          CREATE UNIQUE INDEX job_postings_session_url_hash_unique
+            ON job_postings(session_id, source, canonical_url, content_hash);
+          CREATE UNIQUE INDEX job_postings_session_source_id_hash_unique
+            ON job_postings(session_id, source, source_job_id, content_hash) WHERE source_job_id IS NOT NULL;
+          CREATE INDEX job_postings_session_id_idx ON job_postings(session_id, id);
+        `);
+      }
+    });
+    upgrade();
+  } finally {
+    if (foreignKeysWereEnabled) database.pragma("foreign_keys = ON");
   }
 }
 

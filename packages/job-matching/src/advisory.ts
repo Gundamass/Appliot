@@ -1,7 +1,7 @@
-import { JobRequirementSchema, type JobRequirement, type RequirementOutcome } from "@resume/contracts";
+import { JobRequirementSchema, type JobRequirement } from "@resume/contracts";
 
 export interface JobRequirementAdvisory {
-  outcome: RequirementOutcome;
+  outcome: "satisfied" | "unknown";
   confidence: number;
   evidenceIds: string[];
 }

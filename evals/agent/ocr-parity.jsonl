@@ -1,0 +1,3 @@
+{"caseId":"ocr-001","suiteVersion":"ocr-v1","privacy":"synthetic","inputFixtureId":"ocr-golden-a","runtime":"mindspore_lite","referenceCharacters":120,"candidateEditDistance":5,"baselineEditDistance":4}
+{"caseId":"ocr-002","suiteVersion":"ocr-v1","privacy":"synthetic","inputFixtureId":"ocr-golden-b","runtime":"mindspore_lite","referenceCharacters":80,"candidateEditDistance":3,"baselineEditDistance":3}
+{"caseId":"ocr-003","suiteVersion":"ocr-v1","privacy":"hashed_reference","inputFixtureId":"ocr-golden-c-hash","runtime":"mindspore_lite","referenceCharacters":100,"candidateEditDistance":2,"baselineEditDistance":2}

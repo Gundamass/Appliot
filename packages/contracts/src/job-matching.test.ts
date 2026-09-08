@@ -52,6 +52,24 @@ const postingDraft = {
   adapterVersion: posting.adapterVersion
 } as const;
 
+const legacyResult = {
+  id: "result-1",
+  version: 1,
+  sessionId: "session-1",
+  postingId: posting.id,
+  fitScore: 75,
+  confidence: 65.5,
+  rankingScore: 68.53,
+  outcomes: [{ requirementId: requirement.id, outcome: "unknown", reasonCode: "profile_fact_missing" }],
+  evidence: [],
+  gaps: [{ requirementId: requirement.id, outcome: "unknown", summary: "档案中缺少已确认技能证据" }],
+  scoringVersion: "job-match-v1",
+  profileRevision: 7,
+  expectationRevision: 3,
+  postingContentHash: posting.contentHash,
+  stale: false
+} as const;
+
 const jobSnapshot = {
   id: "job-snapshot-1",
   ownerId: "session-1",
@@ -130,6 +148,14 @@ describe("job matching contracts", () => {
     }).hasNext).toBe(true);
   });
 
+  it("accepts the registered Baidu campus source", () => {
+    expect(JobPostingDraftSchema.parse({
+      ...postingDraft,
+      source: "baidu",
+      adapterVersion: "baidu-job-v1"
+    }).source).toBe("baidu");
+  });
+
   it("accepts only finite, sanitized browser job snapshots", () => {
     expect(JobPageSnapshotSchema.parse(jobSnapshot)).toEqual(jobSnapshot);
 
@@ -159,26 +185,36 @@ describe("job matching contracts", () => {
   });
 
   it("pins match results to deterministic versions and hashes", () => {
-    const result = {
-      id: "result-1",
-      version: 1,
-      sessionId: "session-1",
-      postingId: posting.id,
-      fitScore: 75,
-      confidence: 65.5,
-      rankingScore: 68.53,
-      outcomes: [{ requirementId: requirement.id, outcome: "unknown", reasonCode: "profile_fact_missing" }],
-      evidence: [],
-      gaps: [{ requirementId: requirement.id, outcome: "unknown", summary: "档案中缺少已确认技能证据" }],
-      scoringVersion: "job-match-v1",
-      profileRevision: 7,
-      expectationRevision: 3,
-      postingContentHash: posting.contentHash,
-      stale: false
-    } as const;
+    expect(JobMatchResultSchema.parse(legacyResult)).toEqual(legacyResult);
+    expect(JobMatchResultSchema.safeParse({ ...legacyResult, scoringVersion: "job-match-v2" }).success).toBe(false);
+    expect(JobMatchResultSchema.safeParse({ ...legacyResult, fitScore: 100.01 }).success).toBe(false);
+  });
 
-    expect(JobMatchResultSchema.parse(result)).toEqual(result);
-    expect(JobMatchResultSchema.safeParse({ ...result, scoringVersion: "job-match-v2" }).success).toBe(false);
-    expect(JobMatchResultSchema.safeParse({ ...result, fitScore: 100.01 }).success).toBe(false);
+  it("parses legacy results and strict v2 score breakdowns", () => {
+    expect(JobMatchResultSchema.parse(legacyResult).scoreBreakdown).toBeUndefined();
+
+    const scoreBreakdown = {
+      total: 70,
+      dimensions: [{
+        dimension: "skill",
+        label: "技能",
+        earned: 35,
+        available: 50,
+        satisfied: 2,
+        unknown: 1,
+        conflict: 0
+      }]
+    } as const;
+    const parsed = JobMatchResultSchema.parse({ ...legacyResult, scoreBreakdown });
+
+    expect(parsed.scoreBreakdown?.dimensions[0]?.label).toBe("技能");
+    expect(JobMatchResultSchema.safeParse({
+      ...legacyResult,
+      scoreBreakdown: { ...scoreBreakdown, total: -0.01 }
+    }).success).toBe(false);
+    expect(JobMatchResultSchema.safeParse({
+      ...legacyResult,
+      scoreBreakdown: { ...scoreBreakdown, total: 100.01 }
+    }).success).toBe(false);
   });
 });

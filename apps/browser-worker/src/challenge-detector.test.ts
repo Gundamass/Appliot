@@ -44,6 +44,19 @@ describe("challenge classification", () => {
 });
 
 describe("DOM boundary inspection", () => {
+  it("does not treat blank negative-z-index measurement iframes as a blocking challenge", async () => {
+    await withPage(`<!doctype html><title>Jobs</title>
+      <div style="position:relative; width:240px; height:40px">
+        <iframe style="position:absolute; inset:0; width:100%; height:100%; z-index:-1; border:0"></iframe>
+        <a href="#/job/1">岗位详情</a>
+      </div>`, async (snapshot) => {
+      expect(snapshot.boundaries).toEqual([
+        { kind: "iframe", visible: false, interactive: false, reasonCode: "hidden_iframe" }
+      ]);
+      expect(snapshot.challenge).toBeUndefined();
+    });
+  }, 30_000);
+
   it("reports bounded boundary metadata without traversable details", async () => {
     await withPage(`<!doctype html><title>Apply</title>
       <style>

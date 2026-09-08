@@ -1,0 +1,18 @@
+{
+  "$schema": "https://json-schema.org/draft/2020-12/schema",
+  "$id": "agent-evaluation-manifest-v1",
+  "title": "Resume assistant agent evaluation case",
+  "type": "object",
+  "required": ["caseId", "suiteVersion", "privacy"],
+  "properties": {
+    "caseId": { "type": "string", "minLength": 1, "pattern": "^[a-z0-9._-]+$" },
+    "suiteVersion": { "type": "string", "minLength": 1, "maxLength": 40 },
+    "privacy": { "enum": ["synthetic", "hashed_reference", "local_only"] },
+    "inputFixtureId": { "type": "string", "minLength": 1, "maxLength": 128 },
+    "expectedPostingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "rankedPostingIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "evidenceIds": { "type": "array", "items": { "type": "string", "minLength": 1 } },
+    "commands": { "type": "array", "items": { "type": "object" } }
+  },
+  "additionalProperties": true
+}

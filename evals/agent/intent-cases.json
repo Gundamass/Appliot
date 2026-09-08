@@ -1,0 +1,23 @@
+[
+  {
+    "caseId": "intent-analyze-resume",
+    "suiteVersion": "agent-intent-v1",
+    "privacy": "synthetic",
+    "goal": "analyze resume",
+    "expected": { "primaryGoal": "analyze_resume", "needsClarification": false }
+  },
+  {
+    "caseId": "intent-multi-goal-application",
+    "suiteVersion": "agent-intent-v1",
+    "privacy": "synthetic",
+    "goal": "find a matching job and prepare an application",
+    "expected": { "primaryGoal": "match_resume_to_job", "subGoals": ["match_resume_to_job", "prepare_application"] }
+  },
+  {
+    "caseId": "intent-missing-job",
+    "suiteVersion": "agent-intent-v1",
+    "privacy": "synthetic",
+    "goal": "match my resume to a job",
+    "expected": { "primaryGoal": "match_resume_to_job", "needsClarification": true, "missingEntities": ["target_job"] }
+  }
+]

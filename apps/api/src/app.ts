@@ -24,6 +24,14 @@ import { registerJobMatchRoutes } from "./job-matching/routes.js";
 import type { createJobMatchService } from "./job-matching/job-match-service.js";
 import { registerAdapterRoutes } from "./ats-adapters/routes.js";
 import type { AdapterReviewService } from "./ats-adapters/adapter-review-service.js";
+import { registerConversationRoutes } from "./conversations/conversation-routes.js";
+import type { ConversationService } from "./conversations/conversation-service.js";
+import type { ConversationProcessEventBus } from "./conversations/conversation-events.js";
+import { registerConversationJobMatchRoutes } from "./conversations/conversation-job-match-routes.js";
+import type { ConversationJobMatchService } from "./conversations/conversation-job-match-service.js";
+import type { AgentRuntime } from "./agent/runtime/agent-runtime.js";
+import { registerAgentRuntimeRoutes } from "./agent/events/routes.js";
+import type { AgentEventTraceSink } from "./agent/events/trace-sink.js";
 
 export type { AdapterHealthRegistry } from "./health/adapter-health.js";
 
@@ -43,6 +51,12 @@ export interface AppDependencies {
   applicationService?: ApplicationService;
   adapterReviewService?: AdapterReviewService;
   jobMatchService?: ReturnType<typeof createJobMatchService>;
+  conversationService?: ConversationService;
+  conversationJobMatchService?: ConversationJobMatchService;
+  conversationProcessEvents?: ConversationProcessEventBus;
+  conversationSseHeartbeatMs?: number;
+  agentRuntime?: AgentRuntime;
+  agentEventTraceSink?: AgentEventTraceSink;
   taskEvents?: TaskEventBus;
   applicationSseHeartbeatMs?: number;
   close?(): void | Promise<void>;
@@ -99,6 +113,22 @@ export async function createApp(dependencies: CreateAppDependencies) {
   }
   if (dependencies.jobMatchService) {
     registerJobMatchRoutes(app, { service: dependencies.jobMatchService });
+  }
+  if (dependencies.conversationService) {
+    registerConversationRoutes(app, {
+      service: dependencies.conversationService,
+      ...(dependencies.conversationProcessEvents === undefined ? {} : { processEvents: dependencies.conversationProcessEvents }),
+      ...(dependencies.conversationSseHeartbeatMs === undefined ? {} : { sseHeartbeatMs: dependencies.conversationSseHeartbeatMs })
+    });
+  }
+  if (dependencies.conversationJobMatchService) {
+    registerConversationJobMatchRoutes(app, { service: dependencies.conversationJobMatchService });
+  }
+  if (dependencies.agentRuntime && dependencies.agentEventTraceSink) {
+    registerAgentRuntimeRoutes(app, {
+      runtime: dependencies.agentRuntime,
+      events: dependencies.agentEventTraceSink
+    });
   }
   return app;
 }

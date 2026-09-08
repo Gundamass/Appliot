@@ -14,6 +14,7 @@ import { installDomRuntime } from "./dom-runtime.js";
 import { ControlledExecutor } from "./executor.js";
 import { BrowserObserver } from "./observer.js";
 import { JobObserver } from "./job-observer.js";
+import { installPublicNavigationGuard } from "./public-navigation-guard.js";
 import { BoundedRuntimeTraceBuffer } from "./runtime-trace.js";
 
 export interface BrowserSessionOptions {
@@ -39,10 +40,20 @@ const executableCandidates = process.platform === "win32"
       "/usr/bin/chromium-browser"
     ];
 
-function resolveExecutablePath(configuredPath?: string): string {
-  const candidate = configuredPath ?? process.env.RESUME_BROWSER_EXECUTABLE
-    ?? executableCandidates.find((path) => existsSync(path));
-  if (!candidate || !existsSync(candidate)) {
+export function resolveExecutablePath(configuredPath?: string): string {
+  const explicitCandidate = configuredPath ?? process.env.RESUME_BROWSER_EXECUTABLE;
+  if (explicitCandidate !== undefined) {
+    if (!existsSync(explicitCandidate)) {
+      throw new Error("未找到可用的 Edge、Chrome 或 Chromium 浏览器");
+    }
+    return explicitCandidate;
+  }
+
+  const playwrightCandidate = chromium.executablePath();
+  const candidate = existsSync(playwrightCandidate)
+    ? playwrightCandidate
+    : executableCandidates.find((path) => existsSync(path));
+  if (!candidate) {
     throw new Error("未找到可用的 Edge、Chrome 或 Chromium 浏览器");
   }
   return candidate;
@@ -68,6 +79,8 @@ export class BrowserSessionManager {
   private activeTaskId: string | undefined;
   private monitoredTaskId: string | undefined;
   private trustedOrigin: string | undefined;
+  private publicNavigationGuardCleanup: (() => Promise<void>) | undefined;
+  private publicNavigationGuardTaskId: string | undefined;
   private readonly activityListeners = new Set<(activity: WorkerActivity) => void>();
   private executionEpochs = new Map<string, number>();
   private readonly runtimeTrace = new BoundedRuntimeTraceBuffer();
@@ -149,6 +162,7 @@ export class BrowserSessionManager {
 
   async releaseTask(taskId: string): Promise<void> {
     this.executionEpochs.delete(taskId);
+    if (this.publicNavigationGuardTaskId === taskId) await this.clearPublicNavigationGuard();
     if (this.activeTaskId !== taskId) return;
     const executor = this.executor;
     this.activityMonitor?.stop();
@@ -164,21 +178,35 @@ export class BrowserSessionManager {
     await executor?.release();
   }
 
-  async open(taskId: string, value: string): Promise<Extract<WorkerResponse, { type: "opened" }>> {
+  async open(
+    taskId: string,
+    value: string,
+    navigationPolicy: "default" | "public_https" = "default"
+  ): Promise<Extract<WorkerResponse, { type: "opened" }>> {
     await this.ensureActivePage();
     if (!this.page) {
       throw new Error("浏览器 Worker 尚未完成握手");
     }
     const url = requireWebUrl(value);
     await this.monitorTask(taskId);
-    await this.page.goto(url.href, { waitUntil: "domcontentloaded" });
-    this.trustedOrigin = pageOrigin(this.page.url());
-    return {
-      type: "opened",
-      taskId,
-      url: this.page.url(),
-      title: await this.page.title()
-    };
+    await this.clearPublicNavigationGuard();
+    const cleanup = navigationPolicy === "public_https"
+      ? await installPublicNavigationGuard(this.page)
+      : undefined;
+    this.publicNavigationGuardCleanup = cleanup;
+    this.publicNavigationGuardTaskId = cleanup === undefined ? undefined : taskId;
+    try {
+      await this.page.goto(url.href, { waitUntil: "domcontentloaded" });
+      this.trustedOrigin = pageOrigin(this.page.url());
+      return {
+        type: "opened",
+        taskId,
+        url: this.page.url(),
+        title: await this.page.title()
+      };
+    } finally {
+      if (this.publicNavigationGuardCleanup === cleanup) await this.clearPublicNavigationGuard();
+    }
   }
 
   subscribeActivity(listener: (activity: WorkerActivity) => void): () => void {
@@ -188,6 +216,7 @@ export class BrowserSessionManager {
   }
 
   async stop(): Promise<void> {
+    await this.clearPublicNavigationGuard();
     const context = this.context;
     const executor = this.executor;
     context?.off("page", this.onPageOpened);
@@ -288,6 +317,13 @@ export class BrowserSessionManager {
     const currentEpoch = this.executionEpochs.get(ownerId) ?? 0;
     if (executionEpoch < currentEpoch) throw new Error("execution_invalidated");
     this.executionEpochs.set(ownerId, executionEpoch);
+  }
+
+  private async clearPublicNavigationGuard(): Promise<void> {
+    const cleanup = this.publicNavigationGuardCleanup;
+    this.publicNavigationGuardCleanup = undefined;
+    this.publicNavigationGuardTaskId = undefined;
+    await cleanup?.();
   }
 }
 

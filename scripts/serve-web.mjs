@@ -81,6 +81,7 @@ function proxyRequest(request, response, apiOrigin) {
     const responseHeaders = { ...upstreamResponse.headers };
     delete responseHeaders.connection;
     response.writeHead(upstreamResponse.statusCode ?? 502, responseHeaders);
+    response.flushHeaders();
     upstreamResponse.pipe(response);
   });
   upstreamRequest.on("error", () => {

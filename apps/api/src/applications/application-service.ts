@@ -29,6 +29,7 @@ import {
   applicationMachine,
   sendApplicationEvent,
   type ApplicationActor,
+  type ApplicationContext,
   type ApplicationStateValue
 } from "./application-machine.js";
 import {
@@ -76,7 +77,7 @@ interface BrowserPort {
 export interface ApplicationService {
   start(input: StartApplicationInput): void;
   activeBrowserTaskId(): string | undefined;
-  state(taskId: string): ReturnType<ApplicationActor["getSnapshot"]>;
+  state(taskId: string): ApplicationServiceSnapshot;
   requiresRecovery(taskId: string): boolean;
   openBrowser(taskId: string): Promise<void>;
   resume(taskId: string): Promise<void>;
@@ -92,7 +93,7 @@ export interface ApplicationService {
   approveReview(taskId: string, reviewId: string, editedValue?: string): Promise<void>;
   rejectReview(taskId: string, reviewId: string): Promise<void>;
   cancel(taskId: string): Promise<void>;
-  dispose(taskId: string): void;
+  dispose(taskId: string): void | Promise<void>;
   runUntilPause(taskId: string, initialSnapshot?: FormSnapshot): Promise<void>;
   requestIntermediateClick(taskId: string, actionId: string): Promise<void>;
   progress(taskId: string): ApplicationProgressSnapshot;
@@ -100,6 +101,11 @@ export interface ApplicationService {
   handleActivity(activity: WorkerActivity): Promise<void>;
   retryCurrent(taskId: string): Promise<void>;
   manualDone(taskId: string): Promise<void>;
+}
+
+export interface ApplicationServiceSnapshot {
+  value: ApplicationStateValue;
+  context: ApplicationContext;
 }
 
 export type ContentReview = StoredContentReview;

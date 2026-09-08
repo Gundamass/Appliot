@@ -262,7 +262,14 @@ export class ControlledExecutor {
     } catch (error) {
       const code = executionErrorCode(error);
       if (activePhase !== undefined) this.recordTrace(command, activePhase, startedAt, code);
-      const snapshot = this.current?.snapshot ?? current.snapshot;
+      let snapshot = this.current?.snapshot ?? current.snapshot;
+      try {
+        const observed = await this.observer.observe(command.taskId);
+        await this.replaceCurrent(observed);
+        snapshot = observed.snapshot;
+      } catch {
+        // Preserve the last trusted snapshot when the page cannot be observed.
+      }
       return {
         type: "execution_result",
         taskId: command.taskId,

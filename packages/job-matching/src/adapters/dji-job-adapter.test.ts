@@ -9,11 +9,30 @@ import {
 } from "./fixtures.js";
 
 describe("djiJobAdapter", () => {
+  it("normalizes the current DJI campus landing page to its live jobs portal", () => {
+    expect(djiJobAdapter.normalizeEntryUrl?.(
+      new URL("https://careers.dji.com/zh-CN/campus?source=RM-Title")
+    )?.toString()).toBe(
+      "https://apply.careers.dji.com/campus-recruitment/dji/143359?locale=zh-CN#/"
+    );
+  });
+
   it("identifies DJI list, detail and application entries only on the DJI host", () => {
     expect(djiJobAdapter.identify(djiListFixture)).toBe("job_list");
     expect(djiJobAdapter.identify(djiDetailFixture)).toBe("job_detail");
     expect(djiJobAdapter.identify(djiApplicationFixture)).toBe("application_form");
     expect(djiJobAdapter.identify(mokaListFixture)).toBe("unsupported");
+  });
+
+  it("identifies the current DJI campus portal list after the landing-page redirect", () => {
+    expect(djiJobAdapter.identify({
+      ...djiListFixture,
+      url: "https://apply.careers.dji.com/campus-recruitment/dji/143359?locale=zh-CN#/",
+      jobCards: [{
+        ...djiListFixture.jobCards[0]!,
+        canonicalUrl: "https://apply.careers.dji.com/campus-recruitment/dji/143359?locale=zh-CN#/job/job-1"
+      }]
+    })).toBe("job_list");
   });
 
   it("uses DJI filter keys and leaves unsupported salary local", () => {
@@ -23,9 +42,24 @@ describe("djiJobAdapter", () => {
     expect(plan.mapped).toEqual(expect.arrayContaining([
       { criterionIndex: 0, key: "keyword", values: ["Java"] },
       { criterionIndex: 1, key: "work_location", values: ["深圳"] },
-      { criterionIndex: 2, key: "job_type", values: ["全职"] }
     ]));
-    expect(plan.localOnly).toContainEqual({ criterionIndex: 3, reasonCode: "unsupported_salary" });
+    expect(plan.localOnly).toEqual(expect.arrayContaining([
+      { criterionIndex: 2, reasonCode: "unsupported_employment_type" },
+      { criterionIndex: 3, reasonCode: "unsupported_salary" }
+    ]));
+  });
+
+  it("does not send an unrestricted location to the DJI portal", () => {
+    const expectation = {
+      ...jobExpectationFixture,
+      criteria: jobExpectationFixture.criteria.map((criterion) => criterion.kind === "location"
+        ? { ...criterion, values: ["\u5168\u56fd"] }
+        : criterion)
+    };
+    const plan = djiJobAdapter.mapFilters(expectation);
+
+    expect(plan.mapped).not.toContainEqual(expect.objectContaining({ key: "work_location" }));
+    expect(plan.localOnly).toContainEqual({ criterionIndex: 1, reasonCode: "unrestricted_location" });
   });
 
   it("extracts DJI list and detail data without inventing absent fields", () => {

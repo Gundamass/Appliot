@@ -117,7 +117,7 @@ export const jobMatchSessions = sqliteTable("job_match_sessions", {
   version: integer("version").notNull().default(0),
   state: text("state").notNull(),
   entryKind: text("entry_kind", { enum: ["job_list", "job_detail", "application_form"] }),
-  source: text("source", { enum: ["moka", "dji"] }),
+  source: text("source", { enum: ["moka", "dji", "baidu"] }),
   initialUrl: text("initial_url").notNull(),
   adapterVersion: text("adapter_version"),
   scoringVersion: text("scoring_version").notNull().default("job-match-v1"),
@@ -159,7 +159,7 @@ export const jobMatchExpectationSnapshots = sqliteTable("job_match_expectation_s
 export const jobPostings = sqliteTable("job_postings", {
   id: text("id").primaryKey(),
   sessionId: text("session_id").notNull().references(() => jobMatchSessions.id, { onDelete: "cascade" }),
-  source: text("source", { enum: ["moka", "dji"] }).notNull(),
+  source: text("source", { enum: ["moka", "dji", "baidu"] }).notNull(),
   sourceJobId: text("source_job_id"),
   canonicalUrl: text("canonical_url").notNull(),
   contentHash: text("content_hash").notNull(),
@@ -168,7 +168,7 @@ export const jobPostings = sqliteTable("job_postings", {
 }, (table) => [
   unique("job_postings_session_url_hash_unique").on(table.sessionId, table.source, table.canonicalUrl, table.contentHash),
   index("job_postings_session_id_idx").on(table.sessionId, table.id),
-  check("job_postings_source_valid", sql`${table.source} IN ('moka', 'dji')`),
+  check("job_postings_source_valid", sql`${table.source} IN ('moka', 'dji', 'baidu')`),
   check("job_postings_payload_valid", sql`json_valid(${table.payloadJson})`)
 ]);
 
@@ -269,4 +269,76 @@ export const factEmbeddings = sqliteTable("fact_embeddings", {
   primaryKey({ columns: [table.indexId, table.factId] }),
   check("fact_embeddings_fact_revision_positive", sql`${table.factRevision} > 0`),
   check("fact_embeddings_vector_json_valid", sql`json_valid(${table.vectorJson})`)
+]);
+
+export const conversationSessions = sqliteTable("conversation_sessions", {
+  id: text("id").primaryKey(),
+  title: text("title").notNull(),
+  createdAt: text("created_at").notNull(),
+  updatedAt: text("updated_at").notNull()
+});
+
+export const conversationMessages = sqliteTable("conversation_messages", {
+  id: text("id").primaryKey(),
+  sessionId: text("session_id").notNull().references(() => conversationSessions.id, { onDelete: "cascade" }),
+  sequence: integer("sequence").notNull(),
+  role: text("role").notNull(),
+  text: text("text").notNull(),
+  cardsJson: text("cards_json").notNull(),
+  intentJson: text("intent_json"),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  unique("conversation_messages_session_sequence_unique").on(table.sessionId, table.sequence),
+  index("conversation_messages_session_id_idx").on(table.sessionId),
+  check("conversation_messages_sequence_positive", sql`${table.sequence} > 0`),
+  check("conversation_messages_role_valid", sql`${table.role} IN ('user', 'assistant')`),
+  check("conversation_messages_cards_json_valid", sql`json_valid(${table.cardsJson}) AND json_type(${table.cardsJson}) = 'array'`),
+  check("conversation_messages_intent_json_valid", sql`${table.intentJson} IS NULL OR json_valid(${table.intentJson})`)
+]);
+
+export const conversationContexts = sqliteTable("conversation_contexts", {
+  sessionId: text("session_id").primaryKey().references(() => conversationSessions.id, { onDelete: "cascade" }),
+  version: integer("version").notNull().default(0),
+  contextJson: text("context_json").notNull(),
+  updatedAt: text("updated_at").notNull()
+}, (table) => [
+  index("conversation_contexts_session_id_idx").on(table.sessionId),
+  check("conversation_contexts_version_nonnegative", sql`${table.version} >= 0`),
+  check("conversation_contexts_json_valid", sql`json_valid(${table.contextJson}) AND json_type(${table.contextJson}) = 'object'`)
+]);
+
+export const conversationProcessEvents = sqliteTable("conversation_process_events", {
+  id: integer("id").primaryKey({ autoIncrement: true }),
+  conversationId: text("conversation_id").notNull().references(() => conversationSessions.id, { onDelete: "cascade" }),
+  turnSequence: integer("turn_sequence").notNull(),
+  stepId: text("step_id").notNull(),
+  type: text("type").notNull(),
+  stage: text("stage").notNull(),
+  status: text("status").notNull(),
+  summary: text("summary").notNull(),
+  detailsJson: text("details_json").notNull().default("{}"),
+  createdAt: text("created_at").notNull()
+}, (table) => [
+  index("conversation_process_events_conversation_id_idx").on(table.conversationId, table.id),
+  index("conversation_process_events_turn_idx").on(table.conversationId, table.turnSequence, table.id),
+  check("conversation_process_events_turn_sequence_positive", sql`${table.turnSequence} > 0`),
+  check("conversation_process_events_step_id_bounded", sql`length(${table.stepId}) BETWEEN 1 AND 96`),
+  check("conversation_process_events_type_valid", sql`${table.type} = 'process_changed'`),
+  check("conversation_process_events_stage_valid", sql`${table.stage} IN (
+    'understanding_request', 'searching_recruitment_site', 'validating_recruitment_site',
+    'recruitment_site_found', 'waiting_for_confirmation', 'processing_confirmation',
+    'reading_recruitment_site', 'loading_recommendations', 'matching_jobs',
+    'loading_application_progress', 'creating_job_match_session', 'job_match_session_ready',
+    'creating_application_task', 'generating_response', 'completed', 'failed'
+  )`),
+  check("conversation_process_events_status_valid", sql`${table.status} IN ('running', 'completed', 'waiting', 'failed')`),
+  check("conversation_process_events_summary_bounded", sql`length(${table.summary}) BETWEEN 1 AND 500`),
+  check("conversation_process_events_details_json_valid", sql`json_valid(${table.detailsJson}) AND json_type(${table.detailsJson}) = 'object'`)
+]);
+
+export const conversationProcessEventCursors = sqliteTable("conversation_process_event_cursors", {
+  conversationId: text("conversation_id").primaryKey().references(() => conversationSessions.id, { onDelete: "cascade" }),
+  discardedThroughId: integer("discarded_through_id").notNull()
+}, (table) => [
+  check("conversation_process_event_cursors_id_positive", sql`${table.discardedThroughId} > 0`)
 ]);

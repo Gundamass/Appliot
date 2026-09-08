@@ -6,6 +6,7 @@ import type {
   JobMatchSessionState,
   JobPosting
 } from "@resume/contracts";
+import { z } from "zod";
 
 export interface JobMatchCursor {
   value: string;
@@ -30,7 +31,7 @@ export interface JobMatchSession {
   createdAt: string;
   updatedAt: string;
   entryKind?: "job_list" | "job_detail" | "application_form";
-  source?: "moka" | "dji";
+  source?: "moka" | "dji" | "baidu";
   adapterVersion?: string;
   selectedResultId?: string;
   selectedPostingContentHash?: string;
@@ -50,6 +51,7 @@ export type JobConflictSelection = JobSelection & { conflictSummaryHash: string 
 export interface JobMatchApi {
   create(url: string): Promise<JobMatchSession | { redirect: "application"; applicationUrl: string }>;
   get(sessionId: string): Promise<JobMatchSession>;
+  findOwningConversation(sessionId: string): Promise<{ conversationId: string }>;
   confirmFilters(sessionId: string, expectation: JobExpectationSnapshot, guard: JobMatchGuard): Promise<JobMatchSession>;
   pause(sessionId: string, guard: JobMatchGuard): Promise<JobMatchSession>;
   resume(sessionId: string, guard: JobMatchGuard): Promise<JobMatchSession>;
@@ -71,6 +73,7 @@ export function createJobMatchApi(baseUrl = ""): JobMatchApi {
   return {
     create: (url) => request(`${baseUrl}/api/job-match-sessions`, post({ url })),
     get: (id) => request<JobMatchSession>(path(id), { method: "GET" }),
+    findOwningConversation: async (id) => OwningConversationSchema.parse(await request<unknown>(`${path(id)}/conversation`, { method: "GET" })),
     confirmFilters: (id, expectation, guard) => request<JobMatchSession>(`${path(id)}/filter-confirmation`, json("PUT", { ...guard, expectation })),
     pause: (id, guard) => guardMutation("pause", id, guard),
     resume: (id, guard) => guardMutation("resume", id, guard),
@@ -82,6 +85,8 @@ export function createJobMatchApi(baseUrl = ""): JobMatchApi {
     cancel: (id, guard) => guardMutation("cancel", id, guard)
   };
 }
+
+const OwningConversationSchema = z.object({ conversationId: z.string().min(1).max(256) }).strict();
 
 function post(body: unknown): RequestInit { return json("POST", body); }
 function json(method: "POST" | "PUT", body: unknown): RequestInit { return { method, headers: { "Content-Type": "application/json" }, body: JSON.stringify(body) }; }

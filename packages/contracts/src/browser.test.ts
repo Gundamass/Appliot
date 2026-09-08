@@ -496,11 +496,17 @@ describe("browser command contracts", () => {
       type: "handshake",
       approvalKey: "a".repeat(43)
     }).success).toBe(true);
-    expect(WorkerRequestSchema.safeParse({
+    expect(WorkerRequestSchema.parse({
       type: "open",
       taskId: "task-1",
       url: "https://jobs.example.test/apply"
-    }).success).toBe(true);
+    })).toMatchObject({ navigationPolicy: "default" });
+    expect(WorkerRequestSchema.parse({
+      type: "open",
+      taskId: "task-1",
+      url: "https://jobs.example.test/apply",
+      navigationPolicy: "public_https"
+    })).toMatchObject({ navigationPolicy: "public_https" });
     expect(WorkerRequestSchema.safeParse({ type: "shutdown" }).success).toBe(true);
     expect(WorkerRequestSchema.parse({ type: "release_task", taskId: "task-1" })).toEqual({
       type: "release_task",

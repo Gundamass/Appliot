@@ -13,8 +13,20 @@ const OcrResponseSchema = z.object({
   model: z.string(),
   modelRevision: z.string(),
   mode: z.literal("document_to_markdown"),
-  elapsedMs: z.number().nonnegative()
+  elapsedMs: z.number().finite().nonnegative(),
+  runtime: z.enum(["pytorch", "mindspore_lite"]),
+  blocks: z.array(z.object({
+    text: z.string().min(1),
+    bbox: z.tuple([
+      z.number().finite().int().nonnegative(),
+      z.number().finite().int().nonnegative(),
+      z.number().finite().int().nonnegative(),
+      z.number().finite().int().nonnegative()
+    ])
+  }).strict()).max(10_000)
 }).strict();
+
+export type RemoteOcrDetailedResult = z.infer<typeof OcrResponseSchema>;
 
 export interface RemoteOcrConfig {
   apiToken: string;
@@ -70,6 +82,11 @@ export class RemoteOcrEngine implements OcrEngine {
   }
 
   async recognize(image: Uint8Array): Promise<string> {
+    const result = await this.recognizeDetailed(image);
+    return result.text;
+  }
+
+  async recognizeDetailed(image: Uint8Array): Promise<RemoteOcrDetailedResult> {
     const contentType = imageContentType(image);
 
     for (let attempt = 0; attempt <= MAX_RETRIES; attempt += 1) {
@@ -93,7 +110,10 @@ export class RemoteOcrEngine implements OcrEngine {
     throw new RemoteOcrError("response", false);
   }
 
-  private async request(image: Uint8Array, contentType: "image/png" | "image/jpeg"): Promise<string> {
+  private async request(
+    image: Uint8Array,
+    contentType: "image/png" | "image/jpeg"
+  ): Promise<RemoteOcrDetailedResult> {
     const controller = new AbortController();
     const timeout = setTimeout(() => controller.abort(), this.config.timeoutMs);
 
@@ -135,7 +155,7 @@ export class RemoteOcrEngine implements OcrEngine {
 
       const text = parsed.data.text.trim();
       if (text === "") throw new RemoteOcrError("response", false);
-      return text;
+      return { ...parsed.data, text };
     } finally {
       clearTimeout(timeout);
     }

@@ -1,6 +1,8 @@
 import { createHash, randomUUID } from "node:crypto";
+import { setTimeout as delay } from "node:timers/promises";
 import {
   ConflictJobSelectionInputSchema,
+  JOB_RECOMMENDATION_LIMIT,
   JobMatchMutationGuardSchema,
   JobSelectionInputSchema,
   type ConflictJobSelectionInput,
@@ -33,7 +35,7 @@ interface ExtractionServicePort {
 }
 
 interface MatcherServicePort {
-  match(sessionId: string, postings: JobMatchAggregate["postings"]): Promise<unknown>;
+  match(sessionId: string): Promise<unknown>;
 }
 
 interface JobMatchServiceDependencies {
@@ -65,9 +67,31 @@ export function createJobMatchService(dependencies: JobMatchServiceDependencies)
 
   const present = (aggregate: JobMatchAggregate): PresentedJobMatchSession => {
     const adapter = aggregate.source === undefined ? undefined : adapterBySource.get(aggregate.source);
+    const presented = { ...aggregate, results: presentedResults(aggregate.results) };
     return adapter === undefined || adapter.version !== aggregate.adapterVersion
-      ? aggregate
-      : { ...aggregate, filterPlan: adapter.mapFilters(aggregate.expectation) };
+      ? presented
+      : { ...presented, filterPlan: adapter.mapFilters(aggregate.expectation) };
+  };
+
+  const finalizeMatching = async (sessionId: string): Promise<JobMatchAggregate> => {
+    const current = dependencies.repository.get(sessionId, { required: true });
+    if (current.state !== "matching_jobs") return current;
+    await dependencies.matcher.match(sessionId);
+    const matched = dependencies.repository.get(sessionId, { required: true });
+    dependencies.repository.mutate(sessionId, matched.version, (session) => ({
+      ...session,
+      state: "awaiting_job_selection",
+      profileRevision: dependencies.profileRevision()
+    }));
+    const completed = dependencies.repository.get(sessionId, { required: true });
+    releaseOwner(dependencies, sessionId);
+    await dependencies.browser.releaseTask?.(sessionId).catch(() => undefined);
+    return completed;
+  };
+
+  const extractAndMatch = async (sessionId: string): Promise<JobMatchAggregate> => {
+    await dependencies.extraction.runExtraction(sessionId);
+    return finalizeMatching(sessionId);
   };
 
   const get = (sessionId: string): PresentedJobMatchSession => {
@@ -88,15 +112,14 @@ export function createJobMatchService(dependencies: JobMatchServiceDependencies)
 
   const service = {
     async create(input: { url: string }): Promise<JobMatchCreateResult> {
-      const url = requireWebUrl(input.url);
+      const url = normalizeEntryUrl(requireWebUrl(input.url), dependencies.adapters);
       const expectation = dependencies.expectationSnapshot();
       if (expectation.criteria.length === 0) throw new Error("job_expectation_required");
       const sessionId = createId("session");
       const owner = dependencies.browserOwnershipLease.acquire({ ownerKind: "job_match", ownerId: sessionId });
       try {
         await dependencies.browser.open(sessionId, url);
-        const snapshot = await dependencies.browser.observeJob(sessionId);
-        const identified = identifyEntry(snapshot, dependencies.adapters);
+        const identified = await observeAndIdentifyEntry(dependencies.browser, sessionId, dependencies.adapters);
         if (identified.entryKind === "application_form") {
           dependencies.browserOwnershipLease.release(owner);
           await dependencies.browser.releaseTask?.(sessionId);
@@ -144,7 +167,7 @@ export function createJobMatchService(dependencies: JobMatchServiceDependencies)
       const current = requireMutation(dependencies.repository, sessionId, guard, "awaiting_filter_confirmation");
       await dependencies.extraction.confirmFilters(sessionId, expectation, guard);
       dependencies.repository.confirmExpectation(sessionId, current.version, expectation);
-      return dependencies.repository.get(sessionId, { required: true });
+      return present(await extractAndMatch(sessionId));
     },
 
     async pause(sessionId: string, rawGuard: JobMatchMutationGuard): Promise<JobMatchAggregate> {
@@ -197,21 +220,20 @@ export function createJobMatchService(dependencies: JobMatchServiceDependencies)
       await service.resume(sessionId, guard);
       const opened = dependencies.repository.get(sessionId, { required: true });
       dependencies.repository.mutate(sessionId, opened.version, (session) => ({ ...session, state: "extracting_jobs" }));
-      await dependencies.extraction.runExtraction(sessionId);
-      return dependencies.repository.get(sessionId, { required: true });
+      return present(await extractAndMatch(sessionId));
     },
 
     async rematch(sessionId: string, rawGuard: JobMatchMutationGuard): Promise<JobMatchAggregate> {
       const guard = JobMatchMutationGuardSchema.parse(rawGuard);
       const current = requireMutation(dependencies.repository, sessionId, guard, ["awaiting_job_selection", "matching_jobs"]);
       dependencies.repository.markResultsStale(sessionId);
-      await dependencies.matcher.match(sessionId, dependencies.repository.get(sessionId, { required: true }).postings);
+      await dependencies.matcher.match(sessionId);
       dependencies.repository.mutate(sessionId, current.version, (session) => ({
         ...session,
         state: "awaiting_job_selection",
         profileRevision: dependencies.profileRevision()
       }));
-      return dependencies.repository.get(sessionId, { required: true });
+      return present(dependencies.repository.get(sessionId, { required: true }));
     },
 
     select(sessionId: string, rawInput: JobSelectionInput): StoredJobMatchSession {
@@ -331,6 +353,33 @@ function identifyEntry(snapshot: JobPageSnapshot, adapters: readonly JobAdapter[
   throw new Error("unsupported_job_entry");
 }
 
+const JOB_ENTRY_OBSERVATION_RETRY_COUNT = 20;
+const JOB_ENTRY_OBSERVATION_RETRY_DELAY_MS = 250;
+
+async function observeAndIdentifyEntry(
+  browser: Pick<JobMatchBrowserPort, "observeJob">,
+  ownerId: string,
+  adapters: readonly JobAdapter[]
+): Promise<ReturnType<typeof identifyEntry>> {
+  for (let attempt = 0; attempt < JOB_ENTRY_OBSERVATION_RETRY_COUNT; attempt += 1) {
+    const snapshot = await browser.observeJob(ownerId);
+    try {
+      return identifyEntry(snapshot, adapters);
+    } catch (error) {
+      if (!isPendingSpaSnapshot(snapshot) || attempt === JOB_ENTRY_OBSERVATION_RETRY_COUNT - 1) throw error;
+      await delay(JOB_ENTRY_OBSERVATION_RETRY_DELAY_MS);
+    }
+  }
+  throw new Error("unsupported_job_entry");
+}
+
+function isPendingSpaSnapshot(snapshot: JobPageSnapshot): boolean {
+  return snapshot.entryHint === "unknown"
+    && snapshot.jobCards.length === 0
+    && snapshot.challenge === undefined
+    && !snapshot.boundaries.some((boundary) => boundary.visible && boundary.interactive);
+}
+
 function selectionAggregate(
   repository: JobMatchRepository,
   sessionId: string,
@@ -396,6 +445,19 @@ function hasConflict(result: JobMatchResult): boolean {
   return result.outcomes.some((outcome) => outcome.outcome === "conflict");
 }
 
+function presentedResults(results: readonly JobMatchResult[]): JobMatchResult[] {
+  const recommendations = results.filter((result) => !hasConflict(result)).sort(compareResults);
+  const conflicts = results.filter(hasConflict).sort(compareResults);
+  return [...recommendations, ...conflicts].slice(0, JOB_RECOMMENDATION_LIMIT);
+}
+
+function compareResults(left: JobMatchResult, right: JobMatchResult): number {
+  return right.rankingScore - left.rankingScore
+    || right.fitScore - left.fitScore
+    || right.confidence - left.confidence
+    || compareText(left.id, right.id);
+}
+
 function releaseOwner(dependencies: JobMatchServiceDependencies, sessionId: string): void {
   const owner = dependencies.browserOwnershipLease.current();
   if (owner?.ownerKind === "job_match" && owner.ownerId === sessionId) {
@@ -412,6 +474,15 @@ function requireWebUrl(value: string): string {
   }
   if (url.protocol !== "http:" && url.protocol !== "https:") throw new Error("invalid_job_url");
   return url.href;
+}
+
+function normalizeEntryUrl(value: string, adapters: readonly JobAdapter[]): string {
+  const parsed = new URL(value);
+  for (const adapter of adapters) {
+    const normalized = adapter.normalizeEntryUrl?.(parsed);
+    if (normalized !== undefined) return requireWebUrl(normalized.href);
+  }
+  return value;
 }
 
 function recordTrace(trace: JobMatchTraceSink | undefined, input: Parameters<JobMatchTraceSink["record"]>[0]): void {
