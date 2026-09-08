@@ -196,10 +196,13 @@ export const ApplicationFieldCoverageSchema = z.object({
 
 const LegacyConversationApplicationTaskIdSchema = z.string()
   .regex(/^conversation-application-[a-f0-9]{32}$/u);
+const LegacyJobApplicationTaskIdSchema = z.string()
+  .regex(/^job-application-[a-f0-9]{32}$/u);
 
 export const ApplicationTaskIdSchema = z.union([
   z.string().uuid(),
-  LegacyConversationApplicationTaskIdSchema
+  LegacyConversationApplicationTaskIdSchema,
+  LegacyJobApplicationTaskIdSchema
 ]);
 
 export const ApplicationTaskSchema = z.object({

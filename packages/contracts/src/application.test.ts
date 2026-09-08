@@ -15,13 +15,18 @@ import {
 const taskId = "91dc4bd6-425a-4cab-a38d-d13e33cda771";
 
 describe("application contracts", () => {
-  it("accepts UUIDs and only the exact legacy conversation application id shape", () => {
+  it("accepts UUIDs and only the exact legacy application id shapes", () => {
     expect(ApplicationTaskIdSchema.parse("91dc4bd6-425a-4cab-a38d-d13e33cda771"))
       .toBe("91dc4bd6-425a-4cab-a38d-d13e33cda771");
     expect(ApplicationTaskIdSchema.parse(
       "conversation-application-c655eb3bfb0dd5a53bb138b78c1e4377"
     )).toBe("conversation-application-c655eb3bfb0dd5a53bb138b78c1e4377");
+    expect(ApplicationTaskIdSchema.parse(
+      "job-application-c655eb3bfb0dd5a53bb138b78c1e4377"
+    )).toBe("job-application-c655eb3bfb0dd5a53bb138b78c1e4377");
     expect(ApplicationTaskIdSchema.safeParse("conversation-application-not-hex").success).toBe(false);
+    expect(ApplicationTaskIdSchema.safeParse("job-application-not-hex").success).toBe(false);
+    expect(ApplicationTaskIdSchema.safeParse("other-application-c655eb3bfb0dd5a53bb138b78c1e4377").success).toBe(false);
     expect(ApplicationTaskIdSchema.safeParse("arbitrary-task-id").success).toBe(false);
   });
 

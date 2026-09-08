@@ -16,7 +16,7 @@ export function extractConversationUrlInput(rawText: string): ConversationUrlInp
 
   const candidate = matches[0]!;
   if (!candidate.toLowerCase().startsWith("https://")) return undefined;
-  const recovered = recoverEncodedNaturalLanguageSuffix(candidate);
+  const recovered = recoverApplicationUrlSuffix(candidate);
   if (recovered !== undefined) {
     return {
       rawText,
@@ -37,7 +37,7 @@ export function countConversationWebUrls(rawText: string): number {
   return conversationWebUrls(rawText).length;
 }
 
-function recoverEncodedNaturalLanguageSuffix(candidate: string): { url: string; suffix: string } | undefined {
+export function recoverApplicationUrlSuffix(candidate: string): { url: string; suffix: string } | undefined {
   const encodedBytes = TRAILING_ENCODED_BYTES_PATTERN.exec(candidate)?.[1];
   if (encodedBytes === undefined) return undefined;
 
