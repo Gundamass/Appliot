@@ -1,6 +1,7 @@
 import { randomUUID } from "node:crypto";
 import {
   ApplicationCommandSchema,
+  ApplicationTaskIdSchema,
   ApplicationTaskInputSchema,
   ApplicationTaskSchema,
   suggestApplicationTaskName,
@@ -17,7 +18,7 @@ import type { TaskEventBus } from "./task-events.js";
 import type { ProfileRepository } from "../profile/profile-repository.js";
 import type { ApplicationTaskRepository, StoredApplicationTask } from "./application-task-repository.js";
 
-const TaskParamsSchema = z.object({ id: z.string().uuid() }).strict();
+const TaskParamsSchema = z.object({ id: ApplicationTaskIdSchema }).strict();
 const RecoveryCommandSchema = z.object({
   type: z.enum(["retry_current", "manual_done", "cancel"])
 }).strict();

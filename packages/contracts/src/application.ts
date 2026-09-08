@@ -194,8 +194,16 @@ export const ApplicationFieldCoverageSchema = z.object({
   fields: z.array(ApplicationFieldAssessmentSchema).max(500)
 }).strict();
 
+const LegacyConversationApplicationTaskIdSchema = z.string()
+  .regex(/^conversation-application-[a-f0-9]{32}$/u);
+
+export const ApplicationTaskIdSchema = z.union([
+  z.string().uuid(),
+  LegacyConversationApplicationTaskIdSchema
+]);
+
 export const ApplicationTaskSchema = z.object({
-  id: z.string().uuid(),
+  id: ApplicationTaskIdSchema,
   applicationUrl: ApplicationTaskInputSchema.shape.applicationUrl,
   name: ApplicationTaskNameSchema.optional(),
   state: ApplicationTaskStateSchema,
@@ -293,7 +301,7 @@ export const ApplicationActivitySchema = z.object({
 
 const ApplicationTaskEventBaseShape = {
   id: z.string().regex(/^\d+$/),
-  taskId: z.string().uuid(),
+  taskId: ApplicationTaskIdSchema,
   createdAt: z.string().datetime()
 };
 
@@ -347,7 +355,7 @@ export const ApplicationTaskEventSchema = z.discriminatedUnion("type", [
 
 export const ApplicationTaskHistoryResetSchema = z.object({
   type: z.literal("history_reset"),
-  taskId: z.string().uuid(),
+  taskId: ApplicationTaskIdSchema,
   reason: z.literal("history_gap"),
   requestedLastEventId: z.string().regex(/^\d+$/),
   oldestAvailableId: z.string().regex(/^\d+$/)

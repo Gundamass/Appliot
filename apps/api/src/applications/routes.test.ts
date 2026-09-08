@@ -260,6 +260,41 @@ async function buildContentReviewApp(reviewStatus: "needs_review" | "blocked" | 
 }
 
 describe("application task routes", () => {
+  it("lists and loads strict legacy conversation task ids without accepting arbitrary ids", async () => {
+    const { app, database, applicationService } = await buildApp();
+    const legacyTaskId = "conversation-application-c655eb3bfb0dd5a53bb138b78c1e4377";
+    const tasks = createApplicationTaskRepository(database);
+    tasks.createFromJob({
+      id: legacyTaskId,
+      name: "旧会话填写任务",
+      applicationUrl: "https://jobs.example.com/apply/legacy"
+    });
+    applicationService.start({
+      taskId: legacyTaskId,
+      applicationUrl: "https://jobs.example.com/apply/legacy"
+    });
+
+    const listResponse = await app.inject({ method: "GET", url: "/api/applications" });
+    expect(listResponse.statusCode).toBe(200);
+    expect(listResponse.json()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ id: legacyTaskId })
+    ]));
+
+    const detailResponse = await app.inject({
+      method: "GET",
+      url: `/api/applications/${legacyTaskId}`
+    });
+    expect(detailResponse.statusCode).toBe(200);
+    expect(detailResponse.json()).toMatchObject({ id: legacyTaskId });
+
+    const invalidResponse = await app.inject({
+      method: "GET",
+      url: "/api/applications/arbitrary-task-id"
+    });
+    expect(invalidResponse.statusCode).toBe(400);
+    expect(invalidResponse.json()).toMatchObject({ code: "invalid_task_id" });
+  });
+
   it("creates a task, persists its explicit name, emits replayable state changes, and never exposes a submit command", async () => {
     const { app, database, eventBus } = await buildApp();
 
