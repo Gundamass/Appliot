@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { mkdtemp, rm } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
@@ -14,6 +14,15 @@ import { migrateDatabase } from "../../apps/api/src/db/migrate.js";
 import { ControlledExecutor } from "../../apps/browser-worker/src/executor.js";
 import { BrowserObserver } from "../../apps/browser-worker/src/observer.js";
 import { ChallengeDetector } from "../../apps/browser-worker/src/challenge-detector.js";
+import { createServer, type ViteDevServer } from "../../apps/web/node_modules/vite/dist/node/index.js";
+import { fileURLToPath } from "node:url";
+import { createApp, type AppDependencies } from "../../apps/api/src/app.js";
+import { createProfileRepository } from "../../apps/api/src/profile/profile-repository.js";
+import { createLocalOriginalDocumentStore } from "../../apps/api/src/profile/original-document-store.js";
+import { createLocalAvatarStore } from "../../apps/api/src/profile/avatar-store.js";
+import { createAdapterHealthRegistry } from "../../apps/api/src/health/adapter-health.js";
+import type { ExtractedDocument } from "../../packages/profile-domain/src/pdf/types.js";
+import type { ProfileFact } from "../../packages/contracts/src/profile.js";
 
 export type ChallengeP0Scenario =
   | "captcha"
@@ -32,6 +41,80 @@ export interface ChallengeP0State {
     kind: ChallengeKind;
     fillCount: number;
   };
+}
+
+export interface FullStackWebHarnessOptions {
+  extractPdf?(bytes: Uint8Array): Promise<ExtractedDocument>;
+  extractFacts?(document: ExtractedDocument): Promise<ProfileFact[]>;
+  configure?(dependencies: AppDependencies): void;
+}
+
+export async function createFullStackWebHarness(options: FullStackWebHarnessOptions = {}) {
+  const temporaryRoot = await mkdtemp(join(tmpdir(), "resume-full-stack-"));
+  const database = createSqliteDatabase(join(temporaryRoot, "resume-assistant.sqlite"));
+  migrateDatabase(database);
+  const profileRepository = createProfileRepository(database);
+  const dependencies: AppDependencies = {
+    database,
+    profileRepository,
+    originalDocumentStore: createLocalOriginalDocumentStore(join(temporaryRoot, "originals")),
+    avatarStore: createLocalAvatarStore(join(temporaryRoot, "originals")),
+    adapterHealth: createAdapterHealthRegistry(),
+    extractPdf: options.extractPdf ?? (async (bytes) => ({
+      fingerprint: createHash("sha256").update(bytes).digest("hex"),
+      pages: [{ page: 1, text: "Ada Lovelace", source: "pdf_text" }]
+    })),
+    extractFacts: options.extractFacts ?? (async (document) => [{
+      id: `fact-${document.fingerprint.slice(0, 12)}`,
+      fieldPath: "basics.name",
+      value: "Ada Lovelace",
+      status: "extracted",
+      confidence: 1,
+      scope: "profile",
+      evidence: [{ documentId: document.fingerprint, page: 1, text: "Ada Lovelace", extraction: "pdf_text" }],
+      revision: 1
+    }])
+  };
+  options.configure?.(dependencies);
+  const api = await createApp(dependencies);
+  let web: ViteDevServer | undefined;
+  try {
+    await api.listen({ host: "127.0.0.1", port: 0 });
+    const apiAddress = api.server.address();
+    if (!apiAddress || typeof apiAddress === "string") throw new Error("full_stack_api_not_listening");
+    const apiOrigin = `http://127.0.0.1:${apiAddress.port}`;
+    web = await createServer({
+      root: fileURLToPath(new URL("../../apps/web", import.meta.url)),
+      server: {
+        host: "127.0.0.1",
+        port: 0,
+        proxy: { "/api": { target: apiOrigin } }
+      },
+      logLevel: "silent"
+    });
+    await web.listen();
+    const webAddress = web.httpServer?.address();
+    if (!webAddress || typeof webAddress === "string") throw new Error("full_stack_web_not_listening");
+    return {
+      database,
+      profileRepository,
+      apiOrigin,
+      webBaseUrl: `http://127.0.0.1:${webAddress.port}`,
+      temporaryRoot,
+      async close(): Promise<void> {
+        await web?.close();
+        await api.close();
+        if (database.open) database.close();
+        await rm(temporaryRoot, { recursive: true, force: true });
+      }
+    };
+  } catch (error) {
+    await web?.close().catch(() => undefined);
+    await api.close().catch(() => undefined);
+    if (database.open) database.close();
+    await rm(temporaryRoot, { recursive: true, force: true });
+    throw error;
+  }
 }
 
 export async function createChallengeP0Harness(page: Page, scenario: ChallengeP0Scenario) {

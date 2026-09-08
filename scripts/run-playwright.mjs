@@ -18,6 +18,8 @@ export function normalizePlaywrightArgs(args) {
 
 export function runPlaywright(args, { environment = process.env, spawn = spawnSync } = {}) {
   const result = spawn(process.execPath, [
+    "--import",
+    "tsx",
     fileURLToPath(import.meta.resolve("@playwright/test/cli")),
     ...normalizePlaywrightArgs(args)
   ], {

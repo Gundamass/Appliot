@@ -1,7 +1,7 @@
 import assert from "node:assert/strict";
 import test from "node:test";
 
-import { normalizePlaywrightArgs, sanitizePlaywrightEnvironment } from "./run-playwright.mjs";
+import { normalizePlaywrightArgs, runPlaywright, sanitizePlaywrightEnvironment } from "./run-playwright.mjs";
 
 test("removes exactly one leading pnpm argument delimiter", () => {
   assert.deepEqual(
@@ -38,4 +38,18 @@ test("preserves ordinary DEBUG values", () => {
   const environment = sanitizePlaywrightEnvironment({ DEBUG: "pw:api", PATH: "/bin" });
 
   assert.deepEqual(environment, { DEBUG: "pw:api", PATH: "/bin" });
+});
+
+test("loads tsx so browser tests can import source TypeScript transitively", () => {
+  let spawnedArgs;
+  const status = runPlaywright(["test", "tests/browser/example.spec.ts"], {
+    environment: {},
+    spawn(_executable, args) {
+      spawnedArgs = args;
+      return { status: 0 };
+    }
+  });
+
+  assert.equal(status, 0);
+  assert.deepEqual(spawnedArgs.slice(0, 2), ["--import", "tsx"]);
 });
