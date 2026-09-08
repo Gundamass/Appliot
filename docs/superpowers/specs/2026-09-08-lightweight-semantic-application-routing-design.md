@@ -1,105 +1,142 @@
-# Lightweight Semantic Application Routing Design
+# 轻量化语义识别与填写任务修复设计
 
-## Problem
+## 要解决的问题
 
-Direct application messages currently fail in three connected ways:
+目前有三个相互关联的问题：
 
-- a pasted URL can absorb immediately following prose because URL extraction reads until whitespace;
-- the deterministic router recognizes only a small set of filling phrases, while the DeepSeek classifier is instructed not to return URLs even though an `application_url` target requires one;
-- conversation-created application tasks use a `conversation-application-*` identifier, while application HTTP routes and response contracts require UUIDs. The task row is created and rendered in chat, but `/api/applications` and `/api/applications/:id` fail when they parse it.
+1. 用户粘贴网址后马上输入中文，系统可能把后面的中文也当成网址的一部分。
+2. 系统只认识少量固定说法。例如认识“填写”，却可能不认识“帮我投递这个页面”等相同含义的表达。
+3. 对话中虽然显示“填写任务已创建”，但生成的任务编号格式不正确，详情接口无法读取，因此打开后显示“任务加载失败”。
 
-The product should understand varied natural-language requests without adding a new keyword rule for every wording, while keeping the set of executable modules fixed and auditable.
+## 最终效果
 
-## Goals
+修复后，下面这些说法都可以被理解为进入填写流程：
 
-- Keep the interaction lightweight: no mention system, URL chips, or message protocol expansion.
-- Make pasted URLs and following prose unambiguous in the common input path.
-- Let DeepSeek classify varied wording into the existing fixed intent set.
-- Keep URL and task identifier authority in deterministic backend code.
-- Ensure a task reported as created can be listed, loaded by ID, and opened in the filling workspace.
-- Preserve the existing confirmation gate before controlled filling begins.
+- `填写 https://example.com/apply`
+- `帮我投递 https://example.com/apply`
+- `用这个页面申请 https://example.com/apply`
+- `https://example.com/apply 这个页面帮我填写一下`
 
-## Non-goals
+系统仍然只会进入已有的固定模块，不允许模型自己创建新流程。
 
-- DeepSeek does not choose tools, execute routes, generate URLs, or create database identifiers.
-- This change does not add a free-running intent Agent or a ReAct loop. Intent classification remains one bounded structured-generation call.
-- This change does not introduce `@` references or structured message attachments.
-- This change does not automatically submit an application.
+## 实现方式
 
-## Design
+### 一、粘贴网址后自动补空格
 
-### 1. Paste-time URL separation
+当用户在聊天输入框中粘贴一个完整的 HTTP 或 HTTPS 网址时，前端自动在网址后面补一个空格。
 
-`ConversationComposer` handles paste events. When the clipboard's trimmed plain text is exactly one valid HTTP or HTTPS URL, the composer inserts that original clipboard text followed by one ASCII space at the current selection. It preserves text before and after the selection and restores the caret after the inserted space.
+例如用户粘贴：
 
-Ordinary text, mixed clipboard content, and non-web protocols keep native paste behavior. The 500-character message limit is still enforced. This is a convenience and accuracy improvement, not a backend correctness boundary.
+```text
+https://example.com/apply
+```
 
-### 2. Deterministic extraction, semantic classification, deterministic binding
+输入框实际变成：
 
-The conversation graph extracts at most one HTTPS URL before model classification. It then replaces the exact extracted occurrence in the model-visible user message with the literal placeholder `[URL]`.
+```text
+https://example.com/apply 
+```
 
-DeepSeek receives a compact classifier prompt that:
+用户继续输入中文时，网址和文字自然分开。普通文字粘贴不受影响，也不增加 `@` 菜单或链接卡片。
 
-- enumerates the existing `ConversationIntentKindSchema` routes and their meanings;
-- asks only for a route, target kind/reference metadata that does not contain a URL, and whether confirmation is required;
-- distinguishes application filling from recruitment-site discovery and job recommendation;
-- treats questions and indirect wording according to their semantic goal rather than a phrase allowlist.
+### 二、DeepSeek 只判断用户想做什么
 
-After structured output validation, deterministic backend code binds the previously extracted URL when the model selected `start_application`. The model cannot copy, normalize, edit, or invent a URL. Existing public-HTTPS validation and confirmation creation remain authoritative.
+后端先从原始消息中提取网址，然后把网址替换成 `[URL]` 再交给 DeepSeek。
 
-The deterministic fast paths remain for confirmation messages, explicit indexed recommendation actions, help, and other high-confidence commands. The small filling-phrase predicate no longer acts as the extensibility mechanism for arbitrary URL-bearing prose.
+例如：
 
-### 3. Missing and ambiguous URLs
+```text
+帮我投递[URL]这个页面
+```
 
-- If the classifier selects application filling and one URL was extracted, bind it and request confirmation.
-- If application filling is selected without a URL, resolve an existing selected recommendation/application context when available; otherwise ask the user to provide a page or select a job.
-- A bare URL with no semantic purpose continues to ask whether it is for filling or job recommendation.
-- Multiple URLs remain ambiguous and cause clarification rather than silent selection.
-- If DeepSeek is unavailable or returns invalid output, existing deterministic behavior remains the fallback and performs no new side effect.
+DeepSeek 只能从已有意图中选择，例如：
 
-### 4. Application task identity
+- 创建填写任务；
+- 岗位推荐；
+- 查找招聘入口；
+- 查看已有任务；
+- 无法确认，需要追问。
 
-New conversation-created tasks use a deterministic RFC 4122 UUID derived from the existing idempotency material (`conversationId` plus result ID or normalized application URL). Version and variant bits are set explicitly, so retries return the same UUID and satisfy application API contracts.
+DeepSeek 不负责返回真实网址、任务编号或执行命令。因此模型即使理解错误，也不能直接操作浏览器或数据库。
 
-For previously created `conversation-application-<32 hex>` rows, application request and response schemas accept only that exact legacy shape in addition to UUIDs. This narrow compatibility path makes existing rows listable and loadable without rewriting foreign references or deleting user data. No other arbitrary identifier form is accepted. New writes never emit the legacy form.
+### 三、后端绑定真实网址并进入固定模块
 
-### 5. Fixed module boundary
+如果 DeepSeek 判断用户要填写，后端把之前提取的真实网址重新绑定到“创建填写任务”模块，并继续使用现有的确认流程。
 
-The model-selected intent is mapped through the existing deterministic conversation graph routes. Schema validation, target resolution, confirmation state, URL policy, application task creation, browser ownership, and execution remain outside the model. Trace events record whether classification used a deterministic fast path, structured DeepSeek output, clarification, or fallback.
+```text
+用户消息
+  → 后端提取网址
+  → DeepSeek 判断意图
+  → 后端校验判断结果和真实网址
+  → 显示“确认开始填写”
+  → 用户确认
+  → 创建填写任务
+```
 
-## Failure handling
+模型只负责语义理解，真正的模块选择、网址校验、用户确认、任务创建和浏览器操作仍由固定代码控制。
 
-- Paste enhancement failure falls back to normal input behavior; it cannot trigger an action.
-- Invalid or unsupported URLs produce clarification or validation errors before task creation.
-- Invalid model output is recorded and falls back to the non-side-effecting deterministic result.
-- Task creation is not considered successful until the created identifier can be projected through `ApplicationTaskSchema` and read through the application service.
+### 四、没有网址或意思不明确时
 
-## Testing
+- 用户要填写并提供了一个网址：进入填写确认。
+- 用户要填写但没有网址，且已经选择了岗位：使用该岗位的申请页面。
+- 用户要填写但没有网址，也没有选择岗位：请用户提供网址或先选择岗位。
+- 用户只发送一个网址：询问“用于填写还是岗位推荐”。
+- 用户发送多个网址：请用户明确选择其中一个。
+- DeepSeek 暂时不可用：使用现有规则安全降级，不自动创建任务。
 
-### Boundary set
+## 填写任务无法打开的修复
 
-- Paste a URL, then type Chinese immediately: the submitted message contains a separating space.
-- Send `投递<URL>这个页面可以投递吗` and equivalent varied wording: DeepSeek chooses application filling and backend binds the extracted URL without model-generated URL data.
-- Send recommendation wording with a URL: it stays on the recruitment/job-matching path.
-- Send a bare URL, no URL, two URLs, malformed URL, or an unsupported protocol: no unintended filling task is created.
-- Force DeepSeek timeout and invalid structured output: deterministic fallback remains safe.
-- Create a direct-URL task: its ID is a UUID, repeated creation is idempotent, list returns 200, detail returns 200, and the returned ID is unchanged end to end.
-- Seed an exact legacy `conversation-application-<32 hex>` task: list and detail remain readable; unrelated non-UUID IDs are rejected.
+### 根因
 
-### Retention set
+普通填写任务使用标准 UUID，例如：
 
-- Existing indexed recommendation selection and confirmation still create UUID tasks.
-- Existing recruitment-site discovery and job recommendation flows remain unchanged.
-- Existing filling phrases, confirmation copy, cancellation behavior, and browser safety gates continue to pass.
-- The conversation composer still submits ordinary text, preserves selection replacement, respects max length, and does not alter mixed clipboard content.
+```text
+7bd22014-b7df-4d62-9a1c-25ff7979d39e
+```
 
-### End-to-end acceptance
+但对话创建的任务使用了另一种格式：
 
-Run API and web integration tests, then use the real local frontend and API to:
+```text
+conversation-application-c655eb3bfb0dd5a53bb138b78c1e4377
+```
 
-1. paste a real application URL and add prose;
-2. verify the response asks for filling confirmation rather than listing recommendations;
-3. approve the confirmation;
-4. verify `/api/applications` and `/api/applications/:id` both return 200;
-5. open the task card and verify the filling workspace loads the same task.
+任务已经写入数据库，所以聊天页面显示创建成功；但是任务详情接口只接受 UUID，因此详情页加载失败，任务列表接口也可能被这条记录拖垮。
+
+### 修复方式
+
+1. 以后通过对话创建的任务也生成标准 UUID。
+2. 同一次对话对同一个网址重复操作，仍返回同一个 UUID，避免重复创建。
+3. 对已经存在的旧格式任务，只兼容严格的 `conversation-application-` 加 32 位十六进制格式，使旧任务能够被列表和详情接口读取。
+4. 其他任意格式的任务编号仍然拒绝，避免放宽接口安全边界。
+5. 不删除或覆盖现有任务数据。
+
+## 不做的内容
+
+- 不做 `@` 快捷引用系统。
+- 不改变聊天消息的数据格式。
+- 不让 DeepSeek 自由选择或调用工具。
+- 不增加完整的意图 Agent 循环。
+- 不自动执行最终提交。
+
+## 测试要求
+
+### 必须修好的场景
+
+1. 粘贴网址后继续输入中文，网址与中文之间自动存在空格。
+2. 使用“填写、投递、申请、帮我处理”等不同说法，都能进入正确的填写确认流程。
+3. 岗位推荐相关表达仍进入岗位推荐，不被误判为填写。
+4. 裸网址、多个网址、错误网址和没有网址的请求不会错误创建任务。
+5. DeepSeek 超时或返回错误内容时，不会触发错误操作。
+6. 新创建任务的编号是 UUID。
+7. 创建成功后，任务列表接口返回 200，任务详情接口返回 200。
+8. 点击聊天中的任务卡片后，填写工作台能够加载同一个任务。
+9. 已存在的严格旧格式任务仍能打开，其他非法任务编号仍被拒绝。
+
+### 真实联调验收
+
+1. 在真实聊天输入框粘贴一个申请网址并追加文字。
+2. 确认系统显示填写确认，而不是岗位推荐结果。
+3. 点击确认创建填写任务。
+4. 检查任务列表和详情接口都能读取该任务。
+5. 点击“打开投递任务”，确认填写工作台正常显示，不再出现“任务加载失败”。
 
