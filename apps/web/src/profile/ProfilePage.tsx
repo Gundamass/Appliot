@@ -1,18 +1,16 @@
-import { SelfEvaluationReviewSchema, type AdapterId, type AdapterStatus, type ProfileCompleteness, type ProfileDocumentSummary, type ProfileFact, type SelfEvaluationReview as SelfEvaluationReviewModel } from "@resume/contracts";
+import { SelfEvaluationReviewSchema, type AdapterId, type AdapterStatus, type CurrentProfileDocumentSummary, type ProfileCompleteness, type ProfileDocumentSummary, type ProfileFact, type SelfEvaluationReview as SelfEvaluationReviewModel } from "@resume/contracts";
 import { FileText, Plus, RefreshCw, ShieldCheck } from "lucide-react";
 import { useCallback, useEffect, useRef, useState } from "react";
-import { ProfileApiError, type ProfileApi, type RagApi, type SelfEvaluationReviewApi } from "../api/client.js";
+import type { ProfileApi, RagApi, SelfEvaluationReviewApi } from "../api/client.js";
 import type { HealthApi } from "../api/health-client.js";
 import { SelfEvaluationReview } from "../reviews/SelfEvaluationReview.js";
 import { RagWorkspace } from "../rag/RagWorkspace.js";
 import { ServiceStatus } from "../health/ServiceStatus.js";
 import { CandidateProfileCenter, type CandidateProfileCenterHandle } from "./CandidateProfileCenter.js";
 import { ProfileSummaryBar, type ProfileSaveState } from "./ProfileSummaryBar.js";
-import { ResumeParsePanel } from "./ResumeParsePanel.js";
+import { ResumeParsePanel, type ResumeOperationState } from "./ResumeParsePanel.js";
 
-type UploadState = "idle" | "uploading" | "accepted_refreshing" | "success" | "accepted_refresh_error" | "error";
 type ReadResult = "success" | "error" | "stale";
-type AcceptedUploadPhase = "none" | "refreshing" | "error" | "success";
 
 interface ProfilePageProps {
   api: ProfileApi;
@@ -27,22 +25,19 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
   const [facts, setFacts] = useState<ProfileFact[]>([]);
   const [completeness, setCompleteness] = useState<ProfileCompleteness>();
   const [latestDocument, setLatestDocument] = useState<ProfileDocumentSummary>();
+  const [currentDocument, setCurrentDocument] = useState<CurrentProfileDocumentSummary>();
   const [parseOpen, setParseOpen] = useState(true);
   const [loading, setLoading] = useState(true);
   const [loadError, setLoadError] = useState(false);
   const [selectedFile, setSelectedFile] = useState<File>();
-  const [uploadState, setUploadState] = useState<UploadState>("idle");
-  const [uploadMessage, setUploadMessage] = useState<string>();
-  const [uploadErrorCode, setUploadErrorCode] = useState<string>();
+  const [resumeOperation, setResumeOperation] = useState<ResumeOperationState>({ kind: "idle" });
   const contextGeneration = useRef(0);
   const readGeneration = useRef(0);
   const completenessReadGeneration = useRef(0);
   const latestDocumentReadGeneration = useRef(0);
+  const currentDocumentReadGeneration = useRef(0);
   const operationSequence = useRef(0);
-  const uploadOwner = useRef<number | null>(null);
-  const acceptedUploadOwner = useRef<number | null>(null);
-  const acceptedUploadPhase = useRef<AcceptedUploadPhase>("none");
-  const fileInputRef = useRef<HTMLInputElement>(null);
+  const resumeOperationOwner = useRef<number | null>(null);
   const profileCenterRef = useRef<CandidateProfileCenterHandle>(null);
   const [profileSaveState, setProfileSaveState] = useState<ProfileSaveState>("saved");
   const [view, setView] = useState<"profile" | "self-evaluation" | "rag">("profile");
@@ -183,14 +178,6 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     reviewActionOwner.current = null;
   }, [reviewApi]);
 
-  const settleAcceptedUploadSuccess = useCallback((context: number) => {
-    if (!isCurrentContext(context) || acceptedUploadOwner.current === null) return;
-    if (acceptedUploadPhase.current !== "refreshing" && acceptedUploadPhase.current !== "error") return;
-    acceptedUploadPhase.current = "success";
-    setUploadState("success");
-    setUploadMessage("简历已导入，资料已刷新");
-  }, [isCurrentContext]);
-
   const requestFacts = useCallback(async (
     requestApi: ProfileApi,
     context: number,
@@ -207,7 +194,6 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
       if (!isCurrentContext(context) || readGeneration.current !== request) return "stale";
       setFacts(nextFacts);
       setLoadError(false);
-      settleAcceptedUploadSuccess(context);
       return "success";
     } catch {
       if (!isCurrentContext(context) || readGeneration.current !== request) return "stale";
@@ -216,10 +202,9 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     } finally {
       if (foreground && isCurrentContext(context) && readGeneration.current === request) setLoading(false);
     }
-  }, [isCurrentContext, settleAcceptedUploadSuccess]);
+  }, [isCurrentContext]);
 
   const loadFacts = useCallback(async (): Promise<ReadResult> => {
-    if (acceptedUploadPhase.current === "refreshing") return "stale";
     return requestFacts(api, contextGeneration.current, true);
   }, [api, requestFacts]);
 
@@ -255,45 +240,53 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     }
   }, [api, isCurrentContext]);
 
+  const loadCurrentDocument = useCallback(async (
+    requestApi: ProfileApi = api,
+    context: number = contextGeneration.current
+  ) => {
+    const request = ++currentDocumentReadGeneration.current;
+    try {
+      const document = await requestApi.getCurrentDocument();
+      if (!isCurrentContext(context) || currentDocumentReadGeneration.current !== request) return;
+      setCurrentDocument(document);
+    } catch {
+      if (!isCurrentContext(context) || currentDocumentReadGeneration.current !== request) return;
+      setCurrentDocument(undefined);
+    }
+  }, [api, isCurrentContext]);
+
   useEffect(() => {
     const context = ++contextGeneration.current;
     readGeneration.current += 1;
     completenessReadGeneration.current += 1;
     latestDocumentReadGeneration.current += 1;
-    uploadOwner.current = null;
-    acceptedUploadOwner.current = null;
-    acceptedUploadPhase.current = "none";
+    currentDocumentReadGeneration.current += 1;
+    resumeOperationOwner.current = null;
     setFacts([]);
     setCompleteness(undefined);
     setLatestDocument(undefined);
+    setCurrentDocument(undefined);
     setLoading(true);
     setLoadError(false);
     setSelectedFile(undefined);
-    setUploadState("idle");
-    setUploadMessage(undefined);
-    setUploadErrorCode(undefined);
-    if (fileInputRef.current) fileInputRef.current.value = "";
+    setResumeOperation({ kind: "idle" });
     void requestFacts(api, context, true);
     void loadCompleteness(api, context);
     void loadLatestDocument(api, context);
+    void loadCurrentDocument(api, context);
     return () => {
       if (contextGeneration.current === context) contextGeneration.current += 1;
       readGeneration.current += 1;
       completenessReadGeneration.current += 1;
       latestDocumentReadGeneration.current += 1;
-      uploadOwner.current = null;
-      acceptedUploadOwner.current = null;
-      acceptedUploadPhase.current = "none";
+      currentDocumentReadGeneration.current += 1;
+      resumeOperationOwner.current = null;
     };
-  }, [api, loadCompleteness, loadLatestDocument, requestFacts]);
+  }, [api, loadCompleteness, loadCurrentDocument, loadLatestDocument, requestFacts]);
 
   const selectFile = (file: File | undefined) => {
-    if (acceptedUploadPhase.current === "refreshing") return;
-    acceptedUploadOwner.current = null;
-    acceptedUploadPhase.current = "none";
-    setUploadState("idle");
-    setUploadMessage(undefined);
-    setUploadErrorCode(undefined);
+    if (resumeOperationOwner.current !== null) return;
+    setResumeOperation({ kind: "idle" });
     if (!file) {
       setSelectedFile(undefined);
       return;
@@ -301,68 +294,81 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
     const pdfName = file.name.toLowerCase().endsWith(".pdf");
     if (!pdfName || (file.type !== "application/pdf" && file.type !== "")) {
       setSelectedFile(undefined);
-      setUploadState("error");
-      setUploadMessage("请选择 PDF 文件");
+      setResumeOperation({ kind: "error", message: "请选择 PDF 文件", retry: "upload" });
       return;
     }
     if (file.type === "") {
       setSelectedFile(undefined);
-      setUploadState("error");
-      setUploadMessage("浏览器未提供 PDF 文件类型，无法上传");
+      setResumeOperation({ kind: "error", message: "浏览器未提供 PDF 文件类型，无法上传", retry: "upload" });
       return;
     }
     setSelectedFile(file);
   };
 
-  const refreshAcceptedUpload = async (owner: number, context: number, requestApi: ProfileApi) => {
-    if (!isCurrentContext(context) || acceptedUploadOwner.current !== owner) return;
-    if (acceptedUploadPhase.current === "refreshing") return;
-    acceptedUploadPhase.current = "refreshing";
-    setUploadState("accepted_refreshing");
-    setUploadMessage("简历已导入，正在刷新资料");
-    const result = await requestFacts(requestApi, context, false);
-    if (!isCurrentContext(context) || acceptedUploadOwner.current !== owner) return;
-    if (result !== "success" && acceptedUploadPhase.current === "refreshing") {
-      acceptedUploadPhase.current = "error";
-      setUploadState("accepted_refresh_error");
-      setUploadMessage("简历已导入，但资料刷新失败");
+  const parseDocument = async (document: CurrentProfileDocumentSummary, owner: number, context: number) => {
+    setResumeOperation({ kind: "parsing", documentId: document.documentId });
+    setCurrentDocument({ ...document, importStatus: "importing" });
+    try {
+      const parsed = await api.parseCurrentDocument(document.documentId);
+      if (!isCurrentContext(context) || resumeOperationOwner.current !== owner) return;
+      setCurrentDocument(parsed);
+      await Promise.all([
+        requestFacts(api, context, false),
+        loadCompleteness(api, context),
+        loadCurrentDocument(api, context),
+        loadLatestDocument(api, context)
+      ]);
+      if (!isCurrentContext(context) || resumeOperationOwner.current !== owner) return;
+      setLoading(false);
+      setResumeOperation({ kind: "success", message: "简历已解析，档案资料已更新" });
+    } catch {
+      if (!isCurrentContext(context) || resumeOperationOwner.current !== owner) return;
+      setCurrentDocument({ ...document, importStatus: "failed" });
+      setResumeOperation({ kind: "error", message: "简历解析失败，请检查解析服务后重试", retry: "parse" });
+    } finally {
+      if (resumeOperationOwner.current === owner) resumeOperationOwner.current = null;
     }
   };
 
-  const uploadFile = async () => {
-    if (!selectedFile || uploadOwner.current !== null || acceptedUploadPhase.current === "refreshing") return;
-    readGeneration.current += 1;
-    setLoading(false);
-    setLoadError(false);
+  const updateResume = async (mode: "update_only" | "update_and_parse") => {
+    if (!selectedFile || resumeOperationOwner.current !== null) return;
+    if (mode === "update_and_parse") {
+      readGeneration.current += 1;
+      setLoading(false);
+      setLoadError(false);
+    }
     const context = contextGeneration.current;
     const owner = ++operationSequence.current;
     const file = selectedFile;
-    uploadOwner.current = owner;
-    setUploadState("uploading");
-    setUploadMessage(undefined);
-    setUploadErrorCode(undefined);
+    resumeOperationOwner.current = owner;
+    setResumeOperation({ kind: "uploading", mode });
     try {
-      await api.upload(file);
-      if (!isCurrentContext(context) || uploadOwner.current !== owner) return;
+      const retained = await api.updateCurrentDocument(file);
+      if (!isCurrentContext(context) || resumeOperationOwner.current !== owner) return;
+      setCurrentDocument(retained);
       setSelectedFile(undefined);
-      if (fileInputRef.current) fileInputRef.current.value = "";
-      acceptedUploadOwner.current = owner;
-      uploadOwner.current = null;
-      void loadLatestDocument(api, context);
-      void refreshAcceptedUpload(owner, context, api);
-    } catch (error) {
-      if (!isCurrentContext(context) || uploadOwner.current !== owner) return;
-      setUploadState("error");
-      setUploadMessage(uploadErrorMessage(error));
-      setUploadErrorCode(error instanceof ProfileApiError ? error.code : undefined);
-      acceptedUploadPhase.current = "none";
-      uploadOwner.current = null;
+      if (mode === "update_only") {
+        setResumeOperation({ kind: "success", message: "当前简历已更新，已有档案资料未改变" });
+        resumeOperationOwner.current = null;
+        return;
+      }
+      await parseDocument(retained, owner, context);
+    } catch {
+      if (!isCurrentContext(context) || resumeOperationOwner.current !== owner) return;
+      setResumeOperation({ kind: "error", message: "简历更新失败，请重试", retry: "upload" });
+      resumeOperationOwner.current = null;
     }
   };
 
-  const uploading = uploadState === "uploading";
-  const acceptedRefreshing = uploadState === "accepted_refreshing";
-  const controlsLocked = uploading || acceptedRefreshing;
+  const retryParse = () => {
+    if (!currentDocument || resumeOperationOwner.current !== null) return;
+    const context = contextGeneration.current;
+    const owner = ++operationSequence.current;
+    resumeOperationOwner.current = owner;
+    void parseDocument(currentDocument, owner, context);
+  };
+
+  const controlsLocked = resumeOperation.kind === "uploading" || resumeOperation.kind === "parsing";
   const deepseek = adapterStatus("deepseek");
   const deepseekAvailable = healthApi === undefined || deepseek?.state === "configured" || deepseek?.state === "ready";
   const ocr = adapterStatus("ocr");
@@ -431,20 +437,13 @@ export function ProfilePage({ api, healthApi, reviewApi, ragApi, onStartApplicat
           <ResumeParsePanel
             open={parseOpen}
             selectedFile={selectedFile}
-            uploadState={uploadState}
-            uploadMessage={uploadMessage}
-            latestDocument={latestDocument}
+            operationState={resumeOperation}
+            currentDocument={currentDocument}
             onSelectFile={selectFile}
-            onUpload={() => void uploadFile()}
-            onRetry={() => {
-              if (acceptedUploadOwner.current !== null) {
-                void refreshAcceptedUpload(acceptedUploadOwner.current, contextGeneration.current, api);
-              }
-            }}
+            onUpdateOnly={() => void updateResume("update_only")}
+            onUpdateAndParse={() => void updateResume("update_and_parse")}
+            onRetryParse={retryParse}
             onClose={() => setParseOpen(false)}
-            {...(uploadErrorCode === "document_already_imported" ? {
-              errorAction: { label: "查看已导入资料", onClick: () => setParseOpen(false) }
-            } : {})}
           />
         </div>
         {loading ? (
@@ -487,15 +486,6 @@ function factText(facts: ProfileFact[], leaves: string[]): string | undefined {
     }
   }
   return undefined;
-}
-
-function uploadErrorMessage(error: unknown): string {
-  if (!(error instanceof ProfileApiError)) return "服务器暂时无法完成简历解析，请稍后重试";
-  if (error.code === "document_already_imported") return "这份简历已经导入过，无需重复解析。你可以直接查看已保存的档案资料";
-  if (error.code === "profile_import_unavailable") return "简历解析服务当前不可用，请检查 OCR 和模型服务状态后重试";
-  if (error.code === "invalid_pdf_upload") return "文件不是有效的 PDF，或文件内容已经损坏，请重新导出后重试";
-  if (error.statusCode === 413) return "PDF 文件超过 15 MiB，请压缩后重新上传";
-  return "服务器暂时无法完成简历解析，请稍后重试";
 }
 
 function fieldLeaf(fieldPath: string): string {

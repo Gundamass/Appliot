@@ -1,41 +1,54 @@
-import type { ProfileDocumentSummary } from "@resume/contracts";
+import type { CurrentProfileDocumentSummary, DocumentImportStatus } from "@resume/contracts";
 import { CircleAlert, FileText, RefreshCw, Upload, X } from "lucide-react";
 import { useEffect, useRef } from "react";
 
-export type ProfileUploadState = "idle" | "uploading" | "accepted_refreshing" | "success" | "accepted_refresh_error" | "error";
+export type ResumeOperationState =
+  | { kind: "idle" }
+  | { kind: "uploading"; mode: "update_only" | "update_and_parse" }
+  | { kind: "parsing"; documentId: string }
+  | { kind: "success"; message: string }
+  | { kind: "error"; message: string; retry: "upload" | "parse" };
 
 interface ResumeParsePanelProps {
   open: boolean;
   selectedFile?: File | undefined;
-  uploadState: ProfileUploadState;
-  uploadMessage?: string | undefined;
-  latestDocument?: ProfileDocumentSummary | undefined;
+  operationState: ResumeOperationState;
+  currentDocument?: CurrentProfileDocumentSummary | undefined;
   onSelectFile(file: File | undefined): void;
-  onUpload(): void;
-  onRetry(): void;
+  onUpdateOnly(): void;
+  onUpdateAndParse(): void;
+  onRetryParse(): void;
   onClose(): void;
-  errorAction?: { label: string; onClick(): void } | undefined;
 }
+
+const STATUS_LABELS: Record<DocumentImportStatus, string> = {
+  retained: "未解析",
+  importing: "解析中",
+  completed: "已解析",
+  failed: "解析失败，可重试"
+};
 
 export function ResumeParsePanel({
   open,
   selectedFile,
-  uploadState,
-  uploadMessage,
-  latestDocument,
+  operationState,
+  currentDocument,
   onSelectFile,
-  onUpload,
-  onRetry,
-  onClose,
-  errorAction
+  onUpdateOnly,
+  onUpdateAndParse,
+  onRetryParse,
+  onClose
 }: ResumeParsePanelProps) {
   const inputRef = useRef<HTMLInputElement>(null);
   useEffect(() => {
     if (!selectedFile && inputRef.current) inputRef.current.value = "";
   }, [selectedFile]);
   if (!open) return null;
-  const busy = uploadState === "uploading" || uploadState === "accepted_refreshing";
-  const messageRole = uploadState === "error" || uploadState === "accepted_refresh_error" ? "alert" : "status";
+
+  const busy = operationState.kind === "uploading" || operationState.kind === "parsing";
+  const canRetryCurrent = !selectedFile
+    && !busy
+    && (currentDocument?.importStatus === "retained" || currentDocument?.importStatus === "failed");
 
   return (
     <section className="resume-parse-panel" aria-labelledby="resume-parse-title">
@@ -43,10 +56,16 @@ export function ResumeParsePanel({
       <div className="resume-parse-heading">
         <span className="resume-parse-icon"><FileText aria-hidden="true" size={20} /></span>
         <div>
-          <h2 id="resume-parse-title">简历解析</h2>
-          <p>{latestDocument ? <><strong>{latestDocument.filename}</strong><span>已提取 {latestDocument.extractedFactCount} 项资料</span></> : "上传 PDF 简历，将解析结果写入对应档案栏目"}</p>
+          <h2 id="resume-parse-title">简历更新</h2>
+          {currentDocument ? (
+            <p className="resume-current-document">
+              <strong>{currentDocument.filename}</strong>
+              <span>{STATUS_LABELS[currentDocument.importStatus]}</span>
+              {currentDocument.importStatus === "completed" && <span>已提取 {currentDocument.extractedFactCount} 项资料</span>}
+            </p>
+          ) : <p>上传 PDF 简历。你可以只更新投递文件，也可以同时解析并更新档案资料。</p>}
         </div>
-        <button className="icon-button" type="button" aria-label="收起简历解析" title="收起简历解析" onClick={onClose}>
+        <button className="icon-button" type="button" aria-label="收起简历更新" title="收起简历更新" onClick={onClose}>
           <X aria-hidden="true" size={18} />
         </button>
       </div>
@@ -64,27 +83,29 @@ export function ResumeParsePanel({
             onChange={(event) => onSelectFile(event.target.files?.[0])}
           />
         </label>
-        <button className="button primary" type="button" aria-label="上传并提取" disabled={!selectedFile || busy} onClick={onUpload}>
-          {uploadState === "uploading" ? "正在上传" : "开始解析"}
+        <button className="button secondary" type="button" disabled={!selectedFile || busy} onClick={onUpdateOnly}>
+          仅更新简历
         </button>
-        {uploadState === "accepted_refresh_error" && (
-          <button className="button secondary" type="button" onClick={onRetry}>
-            <RefreshCw aria-hidden="true" size={16} />重新刷新资料
+        <button className="button primary" type="button" disabled={!selectedFile || busy} onClick={onUpdateAndParse}>
+          更新并解析
+        </button>
+        {canRetryCurrent && (
+          <button className="button secondary" type="button" onClick={onRetryParse}>
+            <RefreshCw aria-hidden="true" size={16} />重新解析
           </button>
         )}
-        {uploadState === "error" && errorAction && (
-          <button className="button secondary" type="button" onClick={errorAction.onClick}>{errorAction.label}</button>
-        )}
       </div>
-      {uploadState === "uploading" && selectedFile && (
+      {operationState.kind === "uploading" && selectedFile && (
         <div className="upload-progress" role="progressbar" aria-label={`正在上传 ${selectedFile.name}`}><span /></div>
       )}
-      {uploadMessage && (messageRole === "alert" ? (
+      {operationState.kind === "parsing" && <p className="resume-parse-message" role="status">正在解析当前简历并更新档案资料</p>}
+      {operationState.kind === "success" && <p className="resume-parse-message" role="status">{operationState.message}</p>}
+      {operationState.kind === "error" && (
         <div className="resume-parse-message error" role="alert">
           <CircleAlert aria-hidden="true" size={18} />
-          <div><strong>解析未完成</strong><span>{uploadMessage}</span></div>
+          <div><strong>操作未完成</strong><span>{operationState.message}</span></div>
         </div>
-      ) : <p className="resume-parse-message" role="status">{uploadMessage}</p>)}
+      )}
     </section>
   );
 }
