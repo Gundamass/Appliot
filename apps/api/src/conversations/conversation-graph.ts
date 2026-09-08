@@ -339,17 +339,25 @@ async function classifyIntent(
 
   try {
     const raw = await dependencies.modelProvider.generateStructured({
-      system: "你是受限的求职工作台意图分类器。只能返回允许的 ConversationIntent JSON，不得生成工具名、URL、浏览器命令或数据库 ID。",
-      user: state.text!,
+      system: [
+        "你是受限的求职工作台意图分类器。",
+        "只能从 ConversationIntentSchema 已允许的固定 kind 中选择。",
+        "[URL] 表示后端已经安全提取的网址；不要返回、复制或猜测网址。",
+        "用户希望填写、申请或处理具体页面时选择 start_application，target 可以省略。",
+        "用户希望发现招聘入口或推荐岗位时选择对应的 recruitment/job recommendation kind。",
+        "意思不明确时返回 unknown。",
+        "不得生成工具名、浏览器命令或数据库 ID。只返回 JSON。"
+      ].join(""),
+      user: modelVisibleText(state.text!, manualUrl),
       schema: ConversationIntentSchema,
-      jsonExample: { kind: "list_recommendations", requiresConfirmation: false }
+      jsonExample: { kind: "start_application", requiresConfirmation: true }
     });
     const parsed = ConversationIntentSchema.safeParse(raw);
     if (!parsed.success) {
       const intent = unknownIntent();
       return finish({ intent, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", "unknown", "model_output_invalid"), state.traceIds) });
     }
-    const intent = normalizeIntent(parsed.data);
+    const intent = normalizeIntent(bindExtractedApplicationUrl(parsed.data, manualUrl));
     return finish({ intent, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", intent.kind, "model_structured"), state.traceIds) });
   } catch {
     return finish({ intent: fallback, traceIds: trace(dependencies, nodeEvent(state, "classify_intent", fallback.kind, "model_unavailable_fallback"), state.traceIds) });
@@ -1398,6 +1406,22 @@ function normalizeIntent(intent: ConversationIntent): ConversationIntent {
     return { ...intent, requiresConfirmation: true };
   }
   return { ...intent, requiresConfirmation: false };
+}
+
+function modelVisibleText(text: string, manualUrl: string | undefined): string {
+  return manualUrl === undefined ? text : text.replace(manualUrl, "[URL]");
+}
+
+function bindExtractedApplicationUrl(
+  intent: ConversationIntent,
+  manualUrl: string | undefined
+): ConversationIntent {
+  if (manualUrl === undefined || intent.kind !== "start_application") return intent;
+  return ConversationIntentSchema.parse({
+    ...intent,
+    target: { kind: "application_url", url: manualUrl },
+    requiresConfirmation: true
+  });
 }
 
 function unknownIntent(): ConversationIntent {

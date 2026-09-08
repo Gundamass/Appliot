@@ -549,6 +549,60 @@ describe("conversation graph", () => {
     expect(generateStructured).toHaveBeenCalledTimes(1);
   });
 
+  it("uses DeepSeek semantics for varied application wording and binds the original URL", async () => {
+    const dependencies = fakeDependencies();
+    const generateStructured = vi.fn(async () => ({
+      kind: "start_application",
+      requiresConfirmation: true
+    }));
+    dependencies.modelProvider = { generateStructured };
+    dependencies.validatePublicHttpsUrl = vi.fn(async (url: string) => ({
+      url,
+      domain: "jobs.example.com"
+    }));
+
+    const response = await runConversationTurn(
+      dependencies,
+      "用这个页面帮我处理 https://jobs.example.com/apply/123 好吗",
+      { version: 0, recentPostingIds: [] }
+    );
+
+    expect(generateStructured).toHaveBeenCalledWith(expect.objectContaining({
+      user: "用这个页面帮我处理 [URL] 好吗"
+    }));
+    expect(JSON.stringify(generateStructured.mock.calls[0]![0])).not
+      .toContain("https://jobs.example.com/apply/123");
+    expect(response.message.intent).toMatchObject({
+      kind: "start_application",
+      target: {
+        kind: "application_url",
+        url: "https://jobs.example.com/apply/123"
+      },
+      requiresConfirmation: true
+    });
+    expect(response.pendingConfirmation?.target).toMatchObject({
+      kind: "application_url",
+      url: "https://jobs.example.com/apply/123"
+    });
+  });
+
+  it("does not create an application target when DeepSeek is unavailable", async () => {
+    const dependencies = fakeDependencies();
+    dependencies.modelProvider = {
+      generateStructured: vi.fn(async () => { throw new Error("offline"); })
+    };
+
+    const response = await runConversationTurn(
+      dependencies,
+      "用这个页面帮我处理 https://jobs.example.com/apply/123 好吗",
+      { version: 0, recentPostingIds: [] }
+    );
+
+    expect(response.message.intent?.kind).toBe("unknown");
+    expect(response.pendingConfirmation).toBeUndefined();
+    expect(dependencies.createFromJob).not.toHaveBeenCalled();
+  });
+
   it("falls back to unknown when a structured model returns an invalid intent", async () => {
     const dependencies = fakeDependencies();
     dependencies.modelProvider = {
