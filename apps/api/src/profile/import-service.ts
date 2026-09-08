@@ -88,7 +88,9 @@ export async function importProfileDocument(
     }
   }
 
-  if (retainedDocument.importStatus === "completed" || !documents.claimImport(fingerprint)) {
+  retainedDocument = documents.setCurrent(retainedDocument.id);
+
+  if (retainedDocument.importStatus === "completed" || !documents.claimImport(retainedDocument.id)) {
     throw new DuplicateDocumentError();
   }
 
@@ -97,7 +99,7 @@ export async function importProfileDocument(
     document = ExtractedDocumentSchema.parse(await dependencies.extractPdf(snapshot));
     if (document.fingerprint !== fingerprint) throw new InvalidExtractionOutputError();
   } catch (error) {
-    documents.markRetained(fingerprint);
+    documents.releaseImport(retainedDocument.id);
     if (error instanceof InvalidPdfError || error instanceof ProfileImportUnavailableError) throw error;
     if (error instanceof InvalidPdfDocumentError) throw new InvalidPdfError();
     if (error instanceof z.ZodError || error instanceof InvalidExtractionOutputError) throw new InvalidExtractionOutputError();
@@ -109,7 +111,7 @@ export async function importProfileDocument(
     facts = z.array(ExtractedFactSchema).parse(await dependencies.extractFacts(document));
     validateFactEvidence(document, facts);
   } catch (error) {
-    documents.markRetained(fingerprint);
+    documents.releaseImport(retainedDocument.id);
     if (error instanceof ProfileImportUnavailableError) throw error;
     if (!(error instanceof z.ZodError) && !(error instanceof InvalidExtractionOutputError)) throw error;
     throw new InvalidExtractionOutputError();
@@ -127,12 +129,12 @@ export async function importProfileDocument(
         insertChunk.run(randomUUID(), imported.documentId, page.page, page.text, createdAt);
       }
       for (const fact of facts) dependencies.profileRepository.createExtracted(fact);
-      documents.markCompleted(fingerprint);
+      if (!documents.completeCurrentImport(retainedDocument.id)) throw new Error("current_document_changed");
 
       return imported;
     })();
   } catch (error) {
-    documents.markRetained(fingerprint);
+    documents.releaseImport(retainedDocument.id);
     throw new ImportPersistenceError();
   }
 }
