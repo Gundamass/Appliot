@@ -208,10 +208,19 @@ describe("conversation recruitment tools", () => {
     await registry.invoke("create_application_task", input, context);
 
     expect(createFromJob).toHaveBeenCalledTimes(2);
-    expect(createFromJob.mock.calls[0]?.[0].id).toBe(createFromJob.mock.calls[1]?.[0].id);
+    const firstTaskId = createFromJob.mock.calls[0]![0].id;
+    const secondTaskId = createFromJob.mock.calls[1]![0].id;
+    expect(firstTaskId).toBe(secondTaskId);
+    expect(firstTaskId).toMatch(
+      /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
+    );
     expect(createFromJob).toHaveBeenCalledWith(expect.objectContaining(input));
     expect(start).toHaveBeenCalledWith(expect.objectContaining(input));
-    expect(first.cards[0]).toMatchObject({ type: "application_task", ...input });
+    expect(first.cards[0]).toMatchObject({
+      type: "application_task",
+      taskId: firstTaskId,
+      ...input
+    });
   });
 
   it("rejects a malformed direct application URL as invalid tool input", async () => {
