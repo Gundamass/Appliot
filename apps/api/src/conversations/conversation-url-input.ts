@@ -47,6 +47,15 @@ function recoverEncodedNaturalLanguageSuffix(candidate: string): { url: string; 
     if (!IDENTIFIER_PARAMETER_PATTERN.test(parameter[1])) return undefined;
     const identifierPrefix = parameter[2].slice(0, -encodedBytes.length);
     if (!/^[A-Za-z0-9._~-]+$/u.test(identifierPrefix)) return undefined;
+  } else {
+    const pathPrefix = candidate.slice(0, -encodedBytes.length);
+    if (pathPrefix.includes("#")) return undefined;
+    try {
+      const lastSegment = new URL(pathPrefix).pathname.split("/").at(-1);
+      if (lastSegment === undefined || !/^[A-Za-z0-9._~-]+$/u.test(lastSegment)) return undefined;
+    } catch {
+      return undefined;
+    }
   }
 
   let suffix: string;

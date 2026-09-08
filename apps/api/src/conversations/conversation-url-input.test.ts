@@ -57,6 +57,17 @@ describe("conversation URL input projection", () => {
     });
   });
 
+  it("preserves a legitimate path made entirely from encoded Chinese", () => {
+    const raw = "投递 https://jobs.example.com/%E8%BF%99%E4%B8%AA%E5%B2%97%E4%BD%8D%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97";
+
+    expect(extractConversationUrlInput(raw)).toEqual({
+      rawText: raw,
+      url: "https://jobs.example.com/%E8%BF%99%E4%B8%AA%E5%B2%97%E4%BD%8D%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97",
+      modelText: "投递 [URL]",
+      boundary: "explicit"
+    });
+  });
+
   it("rejects messages containing more than one HTTPS URL", () => {
     expect(extractConversationUrlInput(
       "比较 https://jobs.example.com/one 和 https://jobs.example.com/two"
