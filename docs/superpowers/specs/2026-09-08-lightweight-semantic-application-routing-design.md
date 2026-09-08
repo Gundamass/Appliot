@@ -140,3 +140,67 @@ conversation-application-c655eb3bfb0dd5a53bb138b78c1e4377
 4. 检查任务列表和详情接口都能读取该任务。
 5. 点击“打开投递任务”，确认填写工作台正常显示，不再出现“任务加载失败”。
 
+## 2026-09-08 线上回归补充：固定 URL 路由 Schema
+
+### 新发现的首错点
+
+真实失败消息为：
+
+```text
+投递https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440%E8%BF%99%E4%B8%AA%E9%A1%B5%E9%9D%A2%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97
+```
+
+前端补空格只能处理“单独粘贴一个完整 URL”的输入事件，不能修复已经被编码进 URL 参数的中文。后端又在模型调用前用 `hasExplicitFillingIntent` 识别少量关键词；“投递 + URL”未命中，在 DeepSeek 未配置时最终记录为 `deterministic_fallback → unknown`。
+
+### URL 边界与原文保真
+
+新增独立的 URL 输入投影，产出：
+
+```ts
+interface ConversationUrlInput {
+  rawText: string;
+  url: string;
+  modelText: string;
+  boundary: "explicit" | "recovered_encoded_suffix";
+}
+```
+
+- `rawText` 始终保持用户原文，继续写入会话消息，不做静默改写。
+- `url` 是后端用于安全校验和后续绑定的 URL。
+- `modelText` 将 URL 替换为 `[URL]`，并保留 URL 前后的自然语言。
+- 普通空格或原始中文形成显式边界时直接切分。
+- 对“标识符参数的 ASCII 值后紧跟一段百分号编码中文”的高置信场景，恢复中文后缀到 `modelText`，并从 `url` 中剥离。标识符参数只接受名称以 `id`、`uuid`、`token`、`code` 或 `key` 结尾且前缀值为 ASCII 标识符的情况。
+- 中文搜索参数等非标识符参数保持完整，避免把合法 URL 内容误当用户话术。
+- 无法高置信恢复时不猜测边界，返回澄清或安全降级。
+
+### 固定路由 Schema
+
+带单个 URL 且包含附加文本的请求统一交给一次 DeepSeek 结构化调用，不再通过“填写、投递、申请、帮我处理”等关键词分支决定模块。模型只能返回：
+
+```ts
+const UrlIntentRouteSchema = z.object({
+  kind: z.enum([
+    "start_application",
+    "request_job_recommendations",
+    "discover_recruitment_site",
+    "list_application_tasks",
+    "unknown"
+  ]),
+  requiresConfirmation: z.boolean()
+}).strict();
+```
+
+后端将该结果映射到现有 `ConversationIntentSchema`，仅当 `kind === "start_application"` 时绑定解析得到的 URL，并强制 `requiresConfirmation: true`。模型不能生成 URL、任务 ID、工具名、浏览器命令或新模块。裸 URL、多 URL、模型超时和非法输出继续安全降级，不创建任务。
+
+### 架构边界
+
+意图分类只进行一次受约束调用，不增加 ReAct 循环。完整 Agent 循环继续用于确认之后的页面观察、字段填写、结果反馈和纠错。确定性 UUID 与严格旧任务 ID 兼容保持现有实现，不重新设计。
+
+### 增量验收
+
+1. 上述真实失败消息必须向模型投影为包含 `投递[URL]这个页面可以投递吗` 的语义文本，原始会话消息逐字保留。
+2. 模型返回 `start_application` 后，确认目标必须使用未包含编码中文后缀的 URL。
+3. 四类同义表达由同一个固定 Schema 分类，不新增同义词正则。
+4. 中文搜索参数、招聘入口、裸 URL、多 URL、模型不可用和非法模型输出不得误建填写任务。
+5. TraceSink 必须记录 `model_structured`；真实服务必须加载 DeepSeek 配置，不得以 `deterministic_fallback` 冒充语义分类通过。
+
