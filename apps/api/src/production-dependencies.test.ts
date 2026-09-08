@@ -59,7 +59,8 @@ vi.mock("./db/migrate.js", async (importOriginal) => {
 const {
   createProductionDependencies,
   createProductionFieldResolver,
-  fieldPathForApplicationAnswer
+  fieldPathForApplicationAnswer,
+  resolveApplicationFileId
 } = await import("./production-dependencies.js");
 
 const QWEN_REVISION = "1d8ad4ca9b3dd8059ad90a75d4983776a23d44af";
@@ -82,6 +83,25 @@ function fullConfig() {
 }
 
 describe("production dependency composition", () => {
+  it("uses an unparsed current resume for application file fields", () => {
+    const current = {
+      id: "document-current",
+      fingerprint: "b".repeat(64),
+      filename: "current.pdf",
+      sourcePath: "C:/current.pdf",
+      importStatus: "retained" as const,
+      isCurrent: true,
+      createdAt: "2026-09-08T00:00:00.000Z"
+    };
+
+    expect(resolveApplicationFileId(
+      { resolveForTask: vi.fn() },
+      { findCurrent: vi.fn(() => current) },
+      "task-1",
+      applicationField("简历附件", { type: "file" })
+    )).toBe(`${current.fingerprint}.pdf`);
+  });
+
   it("fails closed on a drifted certified ATS form before any field resolution or browser write", async () => {
     const taskId = "0e5a5d8b-4123-4d4d-8b5f-8cf2eb0e7d81";
     const form: FormSnapshot = {

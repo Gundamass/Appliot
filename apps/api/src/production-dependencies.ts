@@ -579,14 +579,7 @@ export function createProductionDependencies(
         return actionPolicy.approve(input, snapshot).token;
       },
       resolveFileId(_taskId, field) {
-        if (/avatar|photo|头?像|照?片|证?件?照/iu.test(`${field.semanticHint ?? ""} ${field.label}`)) {
-          const avatar = profileRepository.resolveForTask(_taskId, "basics.avatar")?.value;
-          return typeof avatar === "string" && /^avatar-[0-9a-f-]+\.(?:jpg|png|webp)$/u.test(avatar) ? avatar : undefined;
-        }
-        const document = documentRepository.findLatestCompleted();
-        return /resume|cv|简历/iu.test(`${field.semanticHint ?? ""} ${field.label}`) && document !== undefined
-          ? `${document.fingerprint}.pdf`
-          : undefined;
+        return resolveApplicationFileId(profileRepository, documentRepository, _taskId, field);
       },
       listProfileFacts() {
         return profileRepository.listActive();
@@ -985,3 +978,22 @@ const unavailableEvidenceRetrieval: EvidenceRetrievalPort = Object.freeze({
 });
 
 export { createProductionFieldResolver, fieldPathForApplicationAnswer } from "./applications/production-field-resolver.js";
+
+export function resolveApplicationFileId(
+  profileRepository: { resolveForTask(taskId: string, fieldPath: string): { value: unknown } | undefined },
+  documentRepository: { findCurrent(): { fingerprint: string } | undefined },
+  taskId: string,
+  field: { label: string; semanticHint?: string | undefined }
+): string | undefined {
+  const description = `${field.semanticHint ?? ""} ${field.label}`;
+  if (/avatar|photo|头?像|照?片|证?件?照/iu.test(description)) {
+    const avatar = profileRepository.resolveForTask(taskId, "basics.avatar")?.value;
+    return typeof avatar === "string" && /^avatar-[0-9a-f-]+\.(?:jpg|png|webp)$/u.test(avatar)
+      ? avatar
+      : undefined;
+  }
+  const document = documentRepository.findCurrent();
+  return /resume|cv|简历/iu.test(description) && document !== undefined
+    ? `${document.fingerprint}.pdf`
+    : undefined;
+}
