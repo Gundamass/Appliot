@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from "vitest";
 import type { ConversationContext, ConversationTurnResponse } from "@resume/contracts";
 import type { JobMatchAggregate, JobMatchRepository } from "../job-matching/job-match-repository.js";
+import { prepareApplicationTarget } from "../applications/application-target.js";
 import { createConversationGraph, type ConversationGraphDependencies } from "./conversation-graph.js";
 
 const context: ConversationContext = {
@@ -95,6 +96,8 @@ function dependencies(options: {
       createFromJob
     },
     applicationService: { start },
+    prepareApplicationTarget: (rawUrl: string, identity: string) =>
+      prepareApplicationTarget(rawUrl, identity, async () => ["220.181.7.203"]),
     ...(options.withJobMatchService === true ? {
       jobMatchService: {
         select,

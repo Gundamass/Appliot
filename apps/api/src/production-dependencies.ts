@@ -49,6 +49,8 @@ import { SqliteAgentCheckpointer } from "./agent/sqlite-checkpointer.js";
 import { createRuntimeApplicationService } from "./applications/runtime-application-service.js";
 import { createGraphApplicationReviewRepository } from "./applications/graph-application-review-repository.js";
 import { createApplicationTaskRepository } from "./applications/application-task-repository.js";
+import { prepareApplicationTarget } from "./applications/application-target.js";
+import type { HostnameResolver } from "./recruitment-search/public-https-url.js";
 import { createRuntimeApplicationStateStore } from "./agent/runtime/application-state-store.js";
 import { SkillRegistry } from "./application-skills/skill-registry.js";
 import { bootstrapApplicationSkills } from "./application-skills/bootstrap.js";
@@ -127,6 +129,7 @@ export interface ProductionAdapterDependencies {
   browserClientFactory?: () => Promise<ProductionBrowserClient>;
   hintPacks?: readonly CertifiedHintPack[];
   recruitmentSiteSearch?: RecruitmentSiteSearchPort;
+  resolveHostname?: HostnameResolver;
   skillEvolutionQualification?: Pick<
     EvolutionCoordinatorDependencies,
     "safetySimulator" | "replayRunner" | "syntheticAts"
@@ -180,6 +183,22 @@ export function createProductionDependencies(
   const agentTraceSink = createSqliteTraceSink(database, {
       langSmithEnabled: config.langsmith.enabled
     });
+  const prepareTarget = async (rawUrl: string, identity: string) => {
+    const target = await prepareApplicationTarget(rawUrl, identity, adapters.resolveHostname);
+    const boundaryKind = identity === "direct"
+      ? "direct"
+      : identity.startsWith("conversation:") ? "conversation" : "job_match";
+    agentTraceSink.record({
+      runId: `application-target:${target.id}`,
+      taskId: target.id,
+      node: `application_target_${boundaryKind}`,
+      kind: "checkpoint",
+      outcome: "prepared",
+      reasonCode: target.boundary,
+      candidateIds: [new URL(target.applicationUrl).hostname.toLowerCase()]
+    });
+    return target;
+  };
   const agentEventTraceSink = createSqliteAgentEventTraceSink(database);
   const agentCheckpointer = new SqliteAgentCheckpointer(database);
     const profileRepository = createProfileRepository(database);
@@ -798,6 +817,7 @@ export function createProductionDependencies(
       extraction: extractionCoordinator,
       matcher: matchCoordinator,
       trace: jobMatchTrace,
+      prepareApplicationTarget: prepareTarget,
       prepareApplicationTask: (input) => applicationService.start(input)
     });
     const recruitmentSiteSearch = adapters.recruitmentSiteSearch
@@ -807,6 +827,7 @@ export function createProductionDependencies(
       jobMatchRepository,
       applicationTasks: taskRepository,
       applicationService,
+      prepareApplicationTarget: prepareTarget,
       jobMatchService,
       processEvents: conversationProcessEvents,
       checkpointer: agentCheckpointer,
@@ -870,6 +891,7 @@ export function createProductionDependencies(
       ...(structuredProvider === undefined ? {} : { selfEvaluationModelProvider: structuredProvider }),
       ...(embeddingSearch === undefined ? {} : { embeddingSearch }),
       applicationService,
+      prepareApplicationTarget: prepareTarget,
       adapterReviewService,
       browserOwnershipLease,
       taskEvents,

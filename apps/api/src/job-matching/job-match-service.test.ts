@@ -133,6 +133,12 @@ function harness(
     confirmFilters: vi.fn(),
     runExtraction: vi.fn()
   };
+  const prepareApplicationTarget = vi.fn(async (applicationUrl: string) => ({
+    id: "91dc4bd6-425a-5cab-a38d-d13e33cda771",
+    applicationUrl,
+    boundary: "explicit" as const
+  }));
+  const prepareApplicationTask = vi.fn();
   const service = createJobMatchService({
     repository,
     applicationTasks,
@@ -145,6 +151,8 @@ function harness(
     matcher,
     trace,
     createId: (kind) => kind === "session" ? "session-1" : "application-1",
+    prepareApplicationTarget,
+    prepareApplicationTask,
     submissionCount: () => submissionCount
   });
   return {
@@ -157,6 +165,8 @@ function harness(
     extraction,
     trace,
     matcher,
+    prepareApplicationTarget,
+    prepareApplicationTask,
     get submissionCount() { return submissionCount; }
   };
 }
@@ -425,6 +435,13 @@ describe("JobMatchService selection and conversion", () => {
     const first = await value.service.convert("session-1", guard);
     expect(await value.service.convert("session-1", guard)).toEqual(first);
     expect(value.applicationTasks.list()).toHaveLength(1);
+    expect(first.id).toBe("91dc4bd6-425a-5cab-a38d-d13e33cda771");
+    expect(value.prepareApplicationTarget).toHaveBeenCalledOnce();
+    expect(value.prepareApplicationTarget).toHaveBeenCalledWith(
+      seeded.job.canonicalUrl,
+      "job-match:session-1:convert-once"
+    );
+    expect(value.prepareApplicationTask).toHaveBeenCalledOnce();
     expect(value.repository.get("session-1", { required: true })).toMatchObject({
       state: "converted_to_application",
       applicationTaskId: first.id

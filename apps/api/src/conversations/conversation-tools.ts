@@ -1,4 +1,3 @@
-import { createHash } from "node:crypto";
 import {
   ConversationCardSchema,
   JOB_RECOMMENDATION_LIMIT,
@@ -12,6 +11,7 @@ import {
   type JobMatchResult
 } from "@resume/contracts";
 import type { ApplicationService } from "../applications/application-service.js";
+import { prepareApplicationTarget as prepareTarget, type PreparedApplicationTarget } from "../applications/application-target.js";
 import type {
   ApplicationTaskRepository,
   StoredApplicationTask
@@ -89,7 +89,7 @@ export interface ConversationToolDependencies {
       postingContentHash: string;
     }): Promise<StoredApplicationTask>;
   };
-  createTaskId?: (conversationId: string, resultId: string) => string;
+  prepareApplicationTarget?: (rawUrl: string, identity: string) => Promise<PreparedApplicationTarget>;
 }
 
 const ListRecommendationsInputSchema = z.object({
@@ -133,7 +133,7 @@ const CreateJobMatchSessionInputSchema = z.object({}).strict();
 
 export function createConversationToolRegistry(dependencies: ConversationToolDependencies) {
   const names = [...conversationToolNames] as ConversationToolName[];
-  const createTaskId = dependencies.createTaskId ?? defaultTaskId;
+  const prepareApplicationTarget = dependencies.prepareApplicationTarget ?? prepareTarget;
 
   return {
     names(): ConversationToolName[] {
@@ -189,7 +189,7 @@ export function createConversationToolRegistry(dependencies: ConversationToolDep
           }
           case "create_application_task": {
             const input = CreateApplicationTaskInputSchema.parse(rawInput);
-            result = await createApplicationTask(dependencies, input, context, createTaskId);
+            result = await createApplicationTask(dependencies, input, context, prepareApplicationTarget);
             break;
           }
         }
@@ -246,12 +246,15 @@ async function createApplicationTask(
   dependencies: ConversationToolDependencies,
   input: z.infer<typeof CreateApplicationTaskInputSchema>,
   context: ConversationToolContext,
-  createTaskId: (conversationId: string, resultId: string) => string
+  prepareApplicationTarget: (rawUrl: string, identity: string) => Promise<PreparedApplicationTarget>
 ): Promise<ConversationToolResult> {
   if ("applicationUrl" in input) {
+    const prepared = await prepareApplicationTarget(input.applicationUrl, `conversation:${context.conversationId}`);
+    const existing = dependencies.applicationTasks.get(prepared.id);
+    if (existing !== undefined) return { cards: [taskCard(dependencies, existing)], task: existing };
     const task = dependencies.applicationTasks.createFromJob({
-      id: createTaskId(context.conversationId, input.applicationUrl),
-      applicationUrl: input.applicationUrl
+      id: prepared.id,
+      applicationUrl: prepared.applicationUrl
     });
     startApplicationTask(dependencies, task);
     return { cards: [taskCard(dependencies, task)], task };
@@ -275,6 +278,7 @@ async function createApplicationTask(
     postingContentHash: input.postingContentHash
   };
   let task: StoredApplicationTask;
+  let shouldStartTask = false;
   if (dependencies.jobMatchService !== undefined) {
     if (aggregate.selectedResultId !== result.id) {
       dependencies.jobMatchService.select(input.sessionId, selection);
@@ -286,14 +290,21 @@ async function createApplicationTask(
       sessionVersion: selected.version
     });
   } else {
-    task = dependencies.applicationTasks.createFromJob({
-      id: createTaskId(context.conversationId, result.id),
-      name: posting.title,
-      applicationUrl: posting.canonicalUrl
-    });
+    const prepared = await prepareApplicationTarget(posting.canonicalUrl, `conversation:${context.conversationId}`);
+    const existing = dependencies.applicationTasks.get(prepared.id);
+    if (existing !== undefined) {
+      task = existing;
+    } else {
+      task = dependencies.applicationTasks.createFromJob({
+        id: prepared.id,
+        name: posting.title,
+        applicationUrl: prepared.applicationUrl
+      });
+      shouldStartTask = true;
+    }
   }
 
-  startApplicationTask(dependencies, task);
+  if (shouldStartTask) startApplicationTask(dependencies, task);
 
   return {
     cards: [taskCard(dependencies, task)],
@@ -482,20 +493,3 @@ function isAlreadyStarted(error: unknown): boolean {
   );
 }
 
-const CONVERSATION_APPLICATION_NAMESPACE = Buffer.from(
-  "6ba7b8119dad11d180b400c04fd430c8",
-  "hex"
-);
-
-function defaultTaskId(conversationId: string, resultId: string): string {
-  const name = Buffer.from(`${conversationId}\u0000${resultId}`, "utf8");
-  const bytes = createHash("sha1")
-    .update(CONVERSATION_APPLICATION_NAMESPACE)
-    .update(name)
-    .digest()
-    .subarray(0, 16);
-  bytes[6] = (bytes[6]! & 0x0f) | 0x50;
-  bytes[8] = (bytes[8]! & 0x3f) | 0x80;
-  const hex = bytes.toString("hex");
-  return `${hex.slice(0, 8)}-${hex.slice(8, 12)}-${hex.slice(12, 16)}-${hex.slice(16, 20)}-${hex.slice(20)}`;
-}

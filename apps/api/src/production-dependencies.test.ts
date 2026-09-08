@@ -83,6 +83,32 @@ function fullConfig() {
 }
 
 describe("production dependency composition", () => {
+  it("records a query-free audit event when preparing an application target", async () => {
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      resolveHostname: async () => ["220.181.7.203"]
+    });
+    const polluted = "https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&userId=125079440%E8%BF%99%E4%B8%AA%E9%A1%B5%E9%9D%A2%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97";
+
+    const target = await dependencies.prepareApplicationTarget!(polluted, "direct");
+    const row = dependencies.database.prepare(
+      "SELECT payload_json FROM agent_trace_events WHERE task_id = ?"
+    ).get(target.id) as { payload_json: string };
+    const event = JSON.parse(row.payload_json) as Record<string, unknown>;
+
+    expect(event).toMatchObject({
+      taskId: target.id,
+      node: "application_target_direct",
+      kind: "checkpoint",
+      outcome: "prepared",
+      reasonCode: "recovered_encoded_suffix",
+      candidateIds: ["wondersharecampus.zhiye.com"]
+    });
+    expect(row.payload_json).not.toContain("fromPage");
+    expect(row.payload_json).not.toContain("userId");
+    expect(row.payload_json).not.toContain("%E8%BF%99");
+    await dependencies.close?.();
+  });
+
   it("uses an unparsed current resume for application file fields", () => {
     const current = {
       id: "document-current",
@@ -1419,7 +1445,8 @@ describe("production dependency composition", () => {
       }
     }));
     const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
-      browserClient: { open, observe, execute: vi.fn(), stop: vi.fn() }
+      browserClient: { open, observe, execute: vi.fn(), stop: vi.fn() },
+      resolveHostname: async () => ["220.181.7.203"]
     });
     const app = await createApp(dependencies);
 
@@ -1462,7 +1489,10 @@ describe("production dependency composition", () => {
       execute,
       stop: vi.fn()
     };
-    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), { browserClient });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient,
+      resolveHostname: async () => ["220.181.7.203"]
+    });
     const app = await createApp(dependencies);
 
     const response = await app.inject({
@@ -1602,7 +1632,10 @@ describe("production dependency composition", () => {
       onActivity,
       stop: vi.fn()
     };
-    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), { browserClient });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient,
+      resolveHostname: async () => ["220.181.7.203"]
+    });
     expect(onActivity).not.toHaveBeenCalled();
     const app = await createApp(dependencies);
 
@@ -1962,7 +1995,10 @@ describe("production dependency composition", () => {
       }),
       stop: vi.fn()
     };
-    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), { browserClient });
+    const dependencies = createProductionDependencies(loadConfig({ DATABASE_FILE: ":memory:" }), {
+      browserClient,
+      resolveHostname: async () => ["220.181.7.203"]
+    });
     dependencies.profileRepository.createExtracted({
       id: "self-profile",
       fieldPath: "selfEvaluation",

@@ -17,6 +17,9 @@ import type { ApplicationService } from "./application-service.js";
 import type { TaskEventBus } from "./task-events.js";
 import type { ProfileRepository } from "../profile/profile-repository.js";
 import type { ApplicationTaskRepository, StoredApplicationTask } from "./application-task-repository.js";
+import { ApplicationTargetError, prepareApplicationTarget as prepareTarget } from "./application-target.js";
+
+export type PrepareApplicationTarget = typeof prepareTarget;
 
 const TaskParamsSchema = z.object({ id: ApplicationTaskIdSchema }).strict();
 const RecoveryCommandSchema = z.object({
@@ -28,6 +31,7 @@ export interface ApplicationRouteDependencies {
   taskEvents: TaskEventBus;
   tasks: ApplicationTaskRepository;
   profileRepository: ProfileRepository;
+  prepareApplicationTarget?: PrepareApplicationTarget;
   sseHeartbeatMs?: number;
 }
 
@@ -100,6 +104,17 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     const body = ApplicationTaskInputSchema.safeParse(request.body);
     if (!body.success) return sendError(reply, 400, "Invalid request", "invalid_application_task_input");
 
+    let prepared: Awaited<ReturnType<PrepareApplicationTarget>>;
+    try {
+      prepared = await (dependencies.prepareApplicationTarget ?? prepareTarget)(body.data.applicationUrl, "direct");
+    } catch (error) {
+      const code = error instanceof ApplicationTargetError ? error.code : "invalid_application_url";
+      return sendError(reply, 400, "投递网址无效或不是公网 HTTPS 地址", code);
+    }
+
+    const existing = dependencies.tasks.get(prepared.id);
+    if (existing !== undefined) return reply.code(200).send(taskResponse(existing));
+
     const activeTaskId = dependencies.applicationService.activeBrowserTaskId();
     if (activeTaskId !== undefined) {
       return sendError(
@@ -111,12 +126,12 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       );
     }
 
-    const name = body.data.name ?? suggestApplicationTaskName(body.data.applicationUrl);
-    const taskInput = { id: randomUUID(), name, applicationUrl: body.data.applicationUrl };
+    const name = body.data.name ?? suggestApplicationTaskName(prepared.applicationUrl);
+    const taskInput = { id: prepared.id, name, applicationUrl: prepared.applicationUrl };
     let serviceStarted = false;
     let task: StoredApplicationTask | undefined;
     try {
-      task = dependencies.tasks.create(taskInput);
+      task = dependencies.tasks.createFromJob(taskInput);
       dependencies.applicationService.start({ taskId: taskInput.id, applicationUrl: taskInput.applicationUrl });
       serviceStarted = true;
       emitState(task.id);

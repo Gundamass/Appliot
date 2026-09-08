@@ -18,6 +18,7 @@ import type {
   ApplicationTaskRepository,
   StoredApplicationTask
 } from "../applications/application-task-repository.js";
+import { prepareApplicationTarget as prepareTarget, type PreparedApplicationTarget } from "../applications/application-target.js";
 import type { BrowserOwnershipLease } from "../browser/browser-ownership-lease.js";
 import type { JobMatchTraceSink } from "../observability/job-match-trace.js";
 import type { JobMatchAggregate, JobMatchRepository, StoredJobMatchSession } from "./job-match-repository.js";
@@ -51,6 +52,7 @@ interface JobMatchServiceDependencies {
   trace?: JobMatchTraceSink;
   createId?: (kind: "session" | "application") => string;
   prepareApplicationTask?: (input: { taskId: string; applicationUrl: string }) => void;
+  prepareApplicationTarget?: (rawUrl: string, identity: string) => Promise<PreparedApplicationTarget>;
   submissionCount?: () => number;
 }
 
@@ -63,6 +65,7 @@ export type JobMatchCreateResult = PresentedJobMatchSession | {
 
 export function createJobMatchService(dependencies: JobMatchServiceDependencies) {
   const createId = dependencies.createId ?? (() => randomUUID());
+  const prepareApplicationTarget = dependencies.prepareApplicationTarget ?? prepareTarget;
   const adapterBySource = new Map(dependencies.adapters.map((adapter) => [adapter.source, adapter]));
 
   const present = (aggregate: JobMatchAggregate): PresentedJobMatchSession => {
@@ -279,12 +282,15 @@ export function createJobMatchService(dependencies: JobMatchServiceDependencies)
         throw new Error("job_match_posting_changed");
       }
       if ((dependencies.submissionCount?.() ?? 0) !== 0) throw new Error("job_match_submission_invariant_violated");
-      const applicationId = `job-application-${hash(`${sessionId}\u0000${base.idempotencyKey}`).slice(0, 32)}`;
-      const existing = dependencies.applicationTasks.get(applicationId);
+      const prepared = await prepareApplicationTarget(
+        selectedPosting.canonicalUrl,
+        `job-match:${sessionId}:${base.idempotencyKey}`
+      );
+      const existing = dependencies.applicationTasks.get(prepared.id);
       const application = dependencies.applicationTasks.createFromJob({
-        id: applicationId,
+        id: prepared.id,
         name: selectedPosting.title,
-        applicationUrl: selectedPosting.canonicalUrl
+        applicationUrl: prepared.applicationUrl
       });
       if (existing === undefined) {
         dependencies.prepareApplicationTask?.({ taskId: application.id, applicationUrl: application.applicationUrl });

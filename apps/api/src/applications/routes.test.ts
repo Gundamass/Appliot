@@ -13,6 +13,7 @@ import { createApplicationService } from "./application-service.js";
 import { createApplicationTaskRepository } from "./application-task-repository.js";
 import { createCheckpointRepository } from "./checkpoint-repository.js";
 import { createTaskEventBus } from "./task-events.js";
+import { prepareApplicationTarget } from "./application-target.js";
 const fixtureNodeRef = {
   documentId: "document-fixture-00000001",
   nodeId: "node-fixture-000000000001",
@@ -102,6 +103,7 @@ async function buildApp(options: {
     extractFacts: async () => [],
     applicationService,
     taskEvents: eventBus,
+    prepareApplicationTarget: (rawUrl, identity) => prepareApplicationTarget(rawUrl, identity, async () => ["220.181.7.203"]),
     ...(options.sseHeartbeatMs === undefined ? {} : { applicationSseHeartbeatMs: options.sseHeartbeatMs })
   });
   resources.push({ app, database, storageRoot });
@@ -174,6 +176,7 @@ async function buildQuestionApp() {
     extractPdf: async () => ({ fingerprint: "a".repeat(64), pages: [] }),
     extractFacts: async () => [],
     applicationService,
+    prepareApplicationTarget: (rawUrl, identity) => prepareApplicationTarget(rawUrl, identity, async () => ["220.181.7.203"]),
     taskEvents: createTaskEventBus(database)
   });
   resources.push({ app, database, storageRoot });
@@ -253,6 +256,7 @@ async function buildContentReviewApp(reviewStatus: "needs_review" | "blocked" | 
     extractPdf: async (bytes) => ({ fingerprint: createHash("sha256").update(bytes).digest("hex"), pages: [] }),
     extractFacts: async () => [],
     applicationService: service,
+    prepareApplicationTarget: (rawUrl, identity) => prepareApplicationTarget(rawUrl, identity, async () => ["220.181.7.203"]),
     taskEvents: eventBus
   });
   resources.push({ app, database, storageRoot });
@@ -260,6 +264,44 @@ async function buildContentReviewApp(reviewStatus: "needs_review" | "blocked" | 
 }
 
 describe("application task routes", () => {
+  it("canonicalizes the polluted Wondershare target and replays it idempotently", async () => {
+    const { app, database, applicationService } = await buildApp();
+    const start = vi.spyOn(applicationService, "start");
+    const openBrowser = vi.spyOn(applicationService, "openBrowser");
+    const polluted = "https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440%E8%BF%99%E4%B8%AA%E9%A1%B5%E9%9D%A2%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97";
+    const clean = "https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440";
+
+    const first = await app.inject({ method: "POST", url: "/api/applications", payload: { applicationUrl: polluted } });
+    expect(first.statusCode).toBe(201);
+    expect(first.json()).toMatchObject({ applicationUrl: clean, id: expect.stringMatching(/^[0-9a-f-]{36}$/u) });
+    expect(database.prepare("SELECT application_url FROM application_tasks WHERE id = ?").get(first.json().id))
+      .toEqual({ application_url: clean });
+    expect(start).toHaveBeenCalledWith({ taskId: first.json().id, applicationUrl: clean });
+    expect(openBrowser).toHaveBeenCalledWith(first.json().id);
+
+    const replay = await app.inject({ method: "POST", url: "/api/applications", payload: { applicationUrl: clean } });
+    expect(replay.statusCode).toBe(200);
+    expect(replay.json().id).toBe(first.json().id);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM application_tasks").get()).toEqual({ count: 1 });
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(openBrowser).toHaveBeenCalledTimes(1);
+  });
+
+  it.each(["http://jobs.example.com/apply", "https://localhost/apply"])(
+    "rejects unsafe targets before task creation: %s",
+    async (applicationUrl) => {
+      const { app, database, applicationService } = await buildApp();
+      const start = vi.spyOn(applicationService, "start");
+      const openBrowser = vi.spyOn(applicationService, "openBrowser");
+      const response = await app.inject({ method: "POST", url: "/api/applications", payload: { applicationUrl } });
+      expect(response.statusCode).toBe(400);
+      expect(response.json().code).toMatch(/^(?:invalid|unsafe)_application_url$/u);
+      expect(database.prepare("SELECT COUNT(*) AS count FROM application_tasks").get()).toEqual({ count: 0 });
+      expect(start).not.toHaveBeenCalled();
+      expect(openBrowser).not.toHaveBeenCalled();
+    }
+  );
+
   it("lists and loads strict legacy conversation task ids without accepting arbitrary ids", async () => {
     const { app, database, applicationService } = await buildApp();
     const legacyTaskId = "conversation-application-c655eb3bfb0dd5a53bb138b78c1e4377";

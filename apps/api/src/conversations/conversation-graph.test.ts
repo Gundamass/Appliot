@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import { MemorySaver } from "@langchain/langgraph-checkpoint";
 import type { ConversationContext, ConversationTurnResponse, RecruitmentSiteSearchResult, VerifiedRecruitmentSite } from "@resume/contracts";
 import type { JobMatchAggregate, JobMatchRepository } from "../job-matching/job-match-repository.js";
+import { prepareApplicationTarget } from "../applications/application-target.js";
 import { createConversationToolRegistry } from "./conversation-tools.js";
 import {
   createConversationGraph,
@@ -111,6 +112,8 @@ function fakeDependencies(): ConversationGraphDependencies & {
     applicationService: {
       start: startApplication
     },
+    prepareApplicationTarget: (rawUrl, identity) =>
+      prepareApplicationTarget(rawUrl, identity, async () => ["220.181.7.203"]),
     startApplication,
     traceRecord,
     traceSink: {

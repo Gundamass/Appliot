@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from "vitest";
 import type { JobMatchResult, JobPosting, RecruitmentSiteSearchResult, VerifiedRecruitmentSite } from "@resume/contracts";
 import type { JobMatchAggregate, JobMatchRepository } from "../job-matching/job-match-repository.js";
+import { prepareApplicationTarget } from "../applications/application-target.js";
+import type { StoredApplicationTask } from "../applications/application-task-repository.js";
 import {
   createConversationToolRegistry,
   type ConversationToolDependencies
@@ -78,6 +80,7 @@ function dependencies(overrides: Partial<ConversationToolDependencies> = {}): Co
       get: vi.fn(),
       createFromJob: vi.fn()
     },
+    prepareApplicationTarget: (rawUrl, identity) => prepareApplicationTarget(rawUrl, identity, async () => ["220.181.7.203"]),
     ...overrides
   };
 }
@@ -187,8 +190,18 @@ describe("conversation recruitment tools", () => {
     expect(created.cards.filter((card) => card.type === "recommendation")).toHaveLength(6);
   });
 
-  it("creates and starts an idempotent controlled application task from a direct URL", async () => {
-    const createFromJob = vi.fn((input: { id: string; name?: string; applicationUrl: string }) => ({
+  it("canonicalizes, creates, and starts an idempotent controlled application task from a direct URL", async () => {
+    let stored: StoredApplicationTask | undefined;
+    const createFromJob = vi.fn((input: { id: string; name?: string; applicationUrl: string }): StoredApplicationTask => ({
+      ...input,
+      name: input.name ?? "example.com 申请",
+      createdAt: "2026-09-07T00:00:00.000Z",
+      updatedAt: "2026-09-07T00:00:00.000Z",
+      orchestrator: "agent-runtime" as const,
+      profileRevisionApplied: 0,
+      profileSyncStatus: "current" as const
+    }));
+    createFromJob.mockImplementation((input) => stored ??= ({
       ...input,
       name: input.name ?? "example.com 申请",
       createdAt: "2026-09-07T00:00:00.000Z",
@@ -199,27 +212,27 @@ describe("conversation recruitment tools", () => {
     }));
     const start = vi.fn();
     const registry = createConversationToolRegistry(dependencies({
-      applicationTasks: { list: vi.fn(() => []), get: vi.fn(), createFromJob },
+      applicationTasks: { list: vi.fn(() => stored ? [stored] : []), get: vi.fn(() => stored), createFromJob },
       applicationService: { start }
     }));
-    const input = { applicationUrl: "https://jobs.example.com/apply/123" };
+    const polluted = "https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440%E8%BF%99%E4%B8%AA%E9%A1%B5%E9%9D%A2%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97";
+    const clean = "https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440";
 
-    const first = await registry.invoke("create_application_task", input, context);
-    await registry.invoke("create_application_task", input, context);
+    const first = await registry.invoke("create_application_task", { applicationUrl: polluted }, context);
+    await registry.invoke("create_application_task", { applicationUrl: clean }, context);
 
-    expect(createFromJob).toHaveBeenCalledTimes(2);
+    expect(createFromJob).toHaveBeenCalledTimes(1);
     const firstTaskId = createFromJob.mock.calls[0]![0].id;
-    const secondTaskId = createFromJob.mock.calls[1]![0].id;
-    expect(firstTaskId).toBe(secondTaskId);
     expect(firstTaskId).toMatch(
       /^[0-9a-f]{8}-[0-9a-f]{4}-5[0-9a-f]{3}-[89ab][0-9a-f]{3}-[0-9a-f]{12}$/u
     );
-    expect(createFromJob).toHaveBeenCalledWith(expect.objectContaining(input));
-    expect(start).toHaveBeenCalledWith(expect.objectContaining(input));
+    expect(createFromJob).toHaveBeenCalledWith(expect.objectContaining({ applicationUrl: clean }));
+    expect(start).toHaveBeenCalledTimes(1);
+    expect(start).toHaveBeenCalledWith(expect.objectContaining({ applicationUrl: clean }));
     expect(first.cards[0]).toMatchObject({
       type: "application_task",
       taskId: firstTaskId,
-      ...input
+      applicationUrl: clean
     });
   });
 

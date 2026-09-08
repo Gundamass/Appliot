@@ -32,6 +32,7 @@ import type { ConversationJobMatchService } from "./conversations/conversation-j
 import type { AgentRuntime } from "./agent/runtime/agent-runtime.js";
 import { registerAgentRuntimeRoutes } from "./agent/events/routes.js";
 import type { AgentEventTraceSink } from "./agent/events/trace-sink.js";
+import type { PrepareApplicationTarget } from "./applications/routes.js";
 
 export type { AdapterHealthRegistry } from "./health/adapter-health.js";
 
@@ -59,6 +60,7 @@ export interface AppDependencies {
   agentEventTraceSink?: AgentEventTraceSink;
   taskEvents?: TaskEventBus;
   applicationSseHeartbeatMs?: number;
+  prepareApplicationTarget?: PrepareApplicationTarget;
   close?(): void | Promise<void>;
 }
 
@@ -103,6 +105,9 @@ export async function createApp(dependencies: CreateAppDependencies) {
       taskEvents: dependencies.taskEvents,
       tasks: createApplicationTaskRepository(dependencies.database),
       profileRepository: dependencies.profileRepository,
+      ...(dependencies.prepareApplicationTarget === undefined ? {} : {
+        prepareApplicationTarget: dependencies.prepareApplicationTarget
+      }),
       ...(dependencies.applicationSseHeartbeatMs === undefined
         ? {}
         : { sseHeartbeatMs: dependencies.applicationSseHeartbeatMs })
