@@ -4,6 +4,7 @@ import { basename } from "node:path";
 import type { FastifyInstance, FastifyReply, FastifyRequest } from "fastify";
 import { z } from "zod";
 import {
+  CurrentProfileDocumentSummarySchema,
   DocumentResponseSchema,
   JsonValueSchema,
   LatestProfileDocumentResponseSchema,
@@ -21,9 +22,13 @@ import {
   InvalidPdfError,
   MAX_PDF_BYTES,
   ProfileImportUnavailableError,
+  CurrentDocumentChangedError,
+  DocumentImportInProgressError,
   importProfileDocument,
+  parseCurrentProfileDocument,
   type ProfileImportDependencies
 } from "./import-service.js";
+import { retainCurrentProfileDocument } from "./current-document-service.js";
 import type { ProfileRepository } from "./profile-repository.js";
 import { createDocumentRepository } from "./document-repository.js";
 import { findEvidenceGrounding } from "./evidence-grounding.js";
@@ -32,6 +37,7 @@ import { calculateProfileCompleteness } from "./profile-completeness.js";
 const FactIdParamsSchema = z.object({ id: z.string().min(1).max(128) });
 const DocumentFingerprintParamsSchema = z.object({ fingerprint: z.string().regex(/^[a-f0-9]{64}$/) });
 const DocumentPageParamsSchema = DocumentFingerprintParamsSchema.extend({ page: z.coerce.number().int().positive() });
+const DocumentIdParamsSchema = z.object({ documentId: z.string().uuid() }).strict();
 const GroundingQuerySchema = z.object({ text: z.string().min(1).max(12_000) });
 const CorrectionBodySchema = z.object({
   value: JsonValueSchema
@@ -67,6 +73,16 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
       // Profile persistence has already succeeded; refresh is best effort.
     }
   };
+  const currentSummary = (document: NonNullable<ReturnType<typeof documents.findCurrent>>) =>
+    CurrentProfileDocumentSummarySchema.parse({
+      documentId: document.id,
+      filename: document.filename,
+      importedAt: document.createdAt,
+      importStatus: document.importStatus,
+      extractedFactCount: dependencies.profileRepository.listActive().filter((fact) =>
+        fact.scope === "profile" && fact.evidence.some((evidence) => evidence.documentId === document.fingerprint)
+      ).length
+    });
 
   app.post("/api/documents", async (request, reply) => {
     if (!request.isMultipart()) return sendError(reply, 400, "Invalid request");
@@ -92,6 +108,58 @@ export function registerProfileRoutes(app: FastifyInstance, dependencies: Profil
           error.publicMessage,
           error.publicMessage === "Invalid PDF upload" ? "invalid_pdf_upload" : "invalid_request"
         );
+      }
+      throw error;
+    }
+  });
+
+  app.post("/api/profile/documents/current", async (request, reply) => {
+    if (!request.isMultipart()) return sendError(reply, 400, "Invalid request", "invalid_request");
+    try {
+      const upload = await readMultipartUpload(request);
+      if (!hasPdfSignature(upload.bytes)) return sendError(reply, 400, "Invalid PDF upload", "invalid_pdf_upload");
+      const document = await retainCurrentProfileDocument(dependencies, upload.filename, upload.bytes);
+      return reply.code(201).send(currentSummary(document));
+    } catch (error) {
+      if (error instanceof MultipartInputError) {
+        return sendError(
+          reply,
+          400,
+          error.publicMessage,
+          error.publicMessage === "Invalid PDF upload" ? "invalid_pdf_upload" : "invalid_request"
+        );
+      }
+      throw error;
+    }
+  });
+
+  app.get("/api/profile/documents/current", async (_request, reply) => {
+    const document = documents.findCurrent();
+    return reply.code(200).send({ document: document === undefined ? null : currentSummary(document) });
+  });
+
+  app.post("/api/profile/documents/:documentId/parse", async (request, reply) => {
+    const params = DocumentIdParamsSchema.safeParse(request.params);
+    if (!params.success) return sendError(reply, 400, "Invalid request", "invalid_request");
+    try {
+      await parseCurrentProfileDocument(dependencies, params.data.documentId);
+      const document = documents.findById(params.data.documentId);
+      if (document === undefined) return sendError(reply, 404, "Document not found", "document_not_found");
+      notifyProfileUpdated();
+      return reply.code(200).send(currentSummary(document));
+    } catch (error) {
+      if (error instanceof CurrentDocumentChangedError) {
+        return sendError(reply, 409, "Current document changed", "current_document_changed");
+      }
+      if (error instanceof DocumentImportInProgressError) {
+        return sendError(reply, 409, "Document import is in progress", "document_import_in_progress");
+      }
+      if (error instanceof InvalidPdfError) return sendError(reply, 400, "Invalid PDF upload", "invalid_pdf_upload");
+      if (error instanceof ProfileImportUnavailableError) {
+        return sendError(reply, 503, "Profile import is temporarily unavailable", "profile_import_unavailable");
+      }
+      if (error instanceof Error && error.message === "document_not_found") {
+        return sendError(reply, 404, "Document not found", "document_not_found");
       }
       throw error;
     }

@@ -1,4 +1,5 @@
-import { createHash, randomUUID } from "node:crypto";
+import { randomUUID } from "node:crypto";
+import { readFile } from "node:fs/promises";
 import { ProfileFactSchema, type ProfileFact } from "@resume/contracts";
 import { InvalidPdfDocumentError } from "@resume/profile-domain/src/pdf/extract-pdf.js";
 import type { ExtractedDocument } from "@resume/profile-domain/src/pdf/types.js";
@@ -7,6 +8,10 @@ import type { ProfileRepository } from "./profile-repository.js";
 import { createDocumentRepository } from "./document-repository.js";
 import type { OriginalDocumentStore } from "./original-document-store.js";
 import type { SqliteDatabase } from "../db/client.js";
+import {
+  ImportPersistenceError,
+  retainCurrentProfileDocument
+} from "./current-document-service.js";
 
 export const MAX_PDF_BYTES = 15 * 1024 * 1024;
 
@@ -22,7 +27,17 @@ export class DuplicateDocumentError extends Error {}
 export class InvalidPdfError extends Error {}
 export class ProfileImportUnavailableError extends Error {}
 export class InvalidExtractionOutputError extends Error {}
-export class ImportPersistenceError extends Error {}
+export class CurrentDocumentChangedError extends Error {
+  constructor() {
+    super("current_document_changed");
+  }
+}
+export class DocumentImportInProgressError extends Error {
+  constructor() {
+    super("document_import_in_progress");
+  }
+}
+export { ImportPersistenceError } from "./current-document-service.js";
 
 export interface ImportedDocument {
   documentId: string;
@@ -63,43 +78,36 @@ export async function importProfileDocument(
   bytes: Uint8Array
 ): Promise<ImportedDocument> {
   const snapshot = Uint8Array.from(bytes);
-  const fingerprint = createHash("sha256").update(snapshot).digest("hex");
+  const retained = await retainCurrentProfileDocument(dependencies, filename, snapshot);
+  return parseCurrentProfileDocument(dependencies, retained.id, snapshot);
+}
+
+export async function parseCurrentProfileDocument(
+  dependencies: ProfileImportDependencies,
+  documentId: string,
+  retainedBytes?: Uint8Array
+): Promise<ImportedDocument> {
   const documents = createDocumentRepository(dependencies.database);
-  let retainedDocument = documents.findByFingerprint(fingerprint);
+  const retainedDocument = documents.findById(documentId);
+  if (retainedDocument === undefined) throw new Error("document_not_found");
+  if (!retainedDocument.isCurrent) throw new CurrentDocumentChangedError();
+  const imported = ImportedDocumentSchema.parse({
+    documentId: retainedDocument.id,
+    fingerprint: retainedDocument.fingerprint
+  });
+  if (retainedDocument.importStatus === "completed") return imported;
+  if (!documents.claimImport(retainedDocument.id)) throw new DocumentImportInProgressError();
 
-  if (retainedDocument?.importStatus === "completed") throw new DuplicateDocumentError();
-
-  if (!retainedDocument) {
-    const retainedOriginal = await dependencies.originalDocumentStore.retain(fingerprint, snapshot);
-    try {
-      retainedDocument = documents.createRetained({
-        id: randomUUID(),
-        fingerprint,
-        filename,
-        sourcePath: retainedOriginal.path,
-        createdAt: new Date().toISOString()
-      });
-    } catch (error) {
-      retainedDocument = documents.findByFingerprint(fingerprint);
-      if (!retainedDocument) {
-        await dependencies.originalDocumentStore.discardCreated(retainedOriginal);
-        throw new ImportPersistenceError();
-      }
-    }
-  }
-
-  retainedDocument = documents.setCurrent(retainedDocument.id);
-
-  if (retainedDocument.importStatus === "completed" || !documents.claimImport(retainedDocument.id)) {
-    throw new DuplicateDocumentError();
-  }
+  const snapshot = retainedBytes === undefined
+    ? Uint8Array.from(await readFile(retainedDocument.sourcePath))
+    : Uint8Array.from(retainedBytes);
 
   let document: ExtractedDocument;
   try {
     document = ExtractedDocumentSchema.parse(await dependencies.extractPdf(snapshot));
-    if (document.fingerprint !== fingerprint) throw new InvalidExtractionOutputError();
+    if (document.fingerprint !== retainedDocument.fingerprint) throw new InvalidExtractionOutputError();
   } catch (error) {
-    documents.releaseImport(retainedDocument.id);
+    failImportClaim(documents, retainedDocument.id);
     if (error instanceof InvalidPdfError || error instanceof ProfileImportUnavailableError) throw error;
     if (error instanceof InvalidPdfDocumentError) throw new InvalidPdfError();
     if (error instanceof z.ZodError || error instanceof InvalidExtractionOutputError) throw new InvalidExtractionOutputError();
@@ -111,17 +119,17 @@ export async function importProfileDocument(
     facts = z.array(ExtractedFactSchema).parse(await dependencies.extractFacts(document));
     validateFactEvidence(document, facts);
   } catch (error) {
-    documents.releaseImport(retainedDocument.id);
+    failImportClaim(documents, retainedDocument.id);
     if (error instanceof ProfileImportUnavailableError) throw error;
     if (!(error instanceof z.ZodError) && !(error instanceof InvalidExtractionOutputError)) throw error;
     throw new InvalidExtractionOutputError();
   }
 
-  const imported = ImportedDocumentSchema.parse({ documentId: retainedDocument.id, fingerprint });
   const createdAt = new Date().toISOString();
 
   try {
     return dependencies.database.transaction(() => {
+      if (!documents.completeCurrentImport(retainedDocument.id)) throw new CurrentDocumentChangedError();
       const insertChunk = dependencies.database.prepare(
         "INSERT INTO document_chunks (id, document_id, page, content, created_at) VALUES (?, ?, ?, ?, ?)"
       );
@@ -129,14 +137,28 @@ export async function importProfileDocument(
         insertChunk.run(randomUUID(), imported.documentId, page.page, page.text, createdAt);
       }
       for (const fact of facts) dependencies.profileRepository.createExtracted(fact);
-      if (!documents.completeCurrentImport(retainedDocument.id)) throw new Error("current_document_changed");
 
       return imported;
     })();
   } catch (error) {
-    documents.releaseImport(retainedDocument.id);
+    if (error instanceof CurrentDocumentChangedError) {
+      documents.releaseImport(retainedDocument.id);
+      throw error;
+    }
+    failImportClaim(documents, retainedDocument.id);
     throw new ImportPersistenceError();
   }
+}
+
+function failImportClaim(
+  documents: ReturnType<typeof createDocumentRepository>,
+  documentId: string
+): void {
+  if (documents.findCurrent()?.id !== documentId) {
+    documents.releaseImport(documentId);
+    throw new CurrentDocumentChangedError();
+  }
+  documents.markFailed(documentId);
 }
 
 function validateFactEvidence(document: ExtractedDocument, facts: ProfileFact[]): void {

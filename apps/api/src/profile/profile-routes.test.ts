@@ -248,6 +248,59 @@ describe("profile routes", () => {
     expect(response.json()).toEqual({ document: null });
   });
 
+  it("updates the current resume without parsing or changing profile facts", async () => {
+    const extractPdf = vi.fn(async (bytes: Uint8Array) => ({
+      fingerprint: createHash("sha256").update(bytes).digest("hex"),
+      pages: [{ page: 1, text: "unused", source: "pdf_text" as const }]
+    }));
+    const extractFacts = vi.fn(async () => []);
+    const { app, database } = await buildTestContext({ extractPdf, extractFacts });
+    const before = await app.inject({ method: "GET", url: "/api/profile/facts" });
+    const bytes = pdfBytes(128);
+
+    const upload = await app.inject({
+      method: "POST",
+      url: "/api/profile/documents/current",
+      ...multipartPdf(bytes, "application/pdf", "仅更新.pdf")
+    });
+
+    expect(upload.statusCode).toBe(201);
+    expect(upload.json()).toMatchObject({
+      documentId: expect.any(String),
+      filename: "仅更新.pdf",
+      importStatus: "retained",
+      extractedFactCount: 0
+    });
+    expect(extractPdf).not.toHaveBeenCalled();
+    expect(extractFacts).not.toHaveBeenCalled();
+    expect((await app.inject({ method: "GET", url: "/api/profile/facts" })).body).toBe(before.body);
+    expect(database.prepare("SELECT COUNT(*) AS count FROM documents WHERE is_current = 1").get())
+      .toEqual({ count: 1 });
+
+    const current = await app.inject({ method: "GET", url: "/api/profile/documents/current" });
+    expect(current.statusCode).toBe(200);
+    expect(current.json().document).toEqual(upload.json());
+  });
+
+  it("parses the current resume later and refreshes profile facts", async () => {
+    const onProfileUpdated = vi.fn();
+    const { app } = await buildTestContext({ onProfileUpdated });
+    const upload = await app.inject({
+      method: "POST",
+      url: "/api/profile/documents/current",
+      ...multipartPdf(pdfBytes(128))
+    });
+
+    const parsed = await app.inject({
+      method: "POST",
+      url: `/api/profile/documents/${upload.json().documentId}/parse`
+    });
+
+    expect(parsed.statusCode).toBe(200);
+    expect(parsed.json()).toMatchObject({ importStatus: "completed", extractedFactCount: 1 });
+    expect(onProfileUpdated).toHaveBeenCalledOnce();
+  });
+
   it("returns the latest imported resume summary without exposing its local path", async () => {
     const { app } = await buildTestContext();
     const upload = await app.inject({
@@ -291,7 +344,7 @@ describe("profile routes", () => {
     })]);
   });
 
-  it("rejects a duplicate document without duplicating its extracted facts", async () => {
+  it("accepts a duplicate document idempotently without duplicating its extracted facts", async () => {
     const extractPdf = vi.fn(async (bytes: Uint8Array) => ({
       fingerprint: createHash("sha256").update(bytes).digest("hex"),
       pages: [{ page: 1, text: "Ada Lovelace ada@example.com", source: "pdf_text" as const }]
@@ -301,8 +354,8 @@ describe("profile routes", () => {
 
     expect((await app.inject(request)).statusCode).toBe(202);
     const duplicate = await app.inject(request);
-    expect(duplicate.statusCode).toBe(409);
-    expect(duplicate.json()).toMatchObject({ code: "document_already_imported" });
+    expect(duplicate.statusCode).toBe(202);
+    expect(duplicate.json()).toMatchObject({ documentId: expect.any(String) });
     expect((await app.inject({ method: "GET", url: "/api/profile/facts" })).json()).toHaveLength(1);
     expect(extractPdf).toHaveBeenCalledOnce();
   });
@@ -431,7 +484,7 @@ describe("profile routes", () => {
     expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) })).statusCode).toBe(500);
     const row = database.prepare("SELECT source_path, import_status FROM documents").get() as { source_path: string; import_status: string };
 
-    expect(row.import_status).toBe("retained");
+    expect(row.import_status).toBe("failed");
     expect(await readFile(row.source_path)).toEqual(Buffer.from(bytes));
   });
 
@@ -723,14 +776,13 @@ describe("profile routes", () => {
         extractPdf: async () => valid ? validDocument : malformed.document as unknown as ExtractedDocument,
         extractFacts
       });
-      const transaction = vi.spyOn(database, "transaction");
-
       const rejected = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(bytes) });
       expect(rejected.statusCode).toBe(500);
       expect(rejected.json()).toEqual({ error: "Internal server error" });
-      expect(transaction).not.toHaveBeenCalled();
       expect(tableCount(database, "documents")).toBe(1);
-      expect((database.prepare("SELECT import_status FROM documents").get() as { import_status: string }).import_status).toBe("retained");
+      expect(tableCount(database, "document_chunks")).toBe(0);
+      expect(tableCount(database, "profile_facts")).toBe(0);
+      expect((database.prepare("SELECT import_status FROM documents").get() as { import_status: string }).import_status).toBe("failed");
       expect(extractFacts).not.toHaveBeenCalled();
 
       valid = true;
@@ -753,13 +805,12 @@ describe("profile routes", () => {
         revision: 1
       }]
     });
-    const transaction = vi.spyOn(database, "transaction");
-
     const rejected = await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) });
     expect(rejected.statusCode).toBe(500);
-    expect(transaction).not.toHaveBeenCalled();
     expect(tableCount(database, "documents")).toBe(1);
-    expect((database.prepare("SELECT import_status FROM documents").get() as { import_status: string }).import_status).toBe("retained");
+    expect(tableCount(database, "document_chunks")).toBe(0);
+    expect(tableCount(database, "profile_facts")).toBe(0);
+    expect((database.prepare("SELECT import_status FROM documents").get() as { import_status: string }).import_status).toBe("failed");
 
     valid = true;
     expect((await app.inject({ method: "POST", url: "/api/documents", ...multipartPdf(pdfBytes()) })).statusCode).toBe(202);
@@ -818,12 +869,12 @@ describe("profile routes", () => {
     expect(tableCount(database, "documents")).toBe(0);
   });
 
-  it("atomically rejects concurrent duplicate imports", async () => {
+  it("handles concurrent duplicate imports idempotently", async () => {
     const app = await buildTestApp();
     const request = { method: "POST" as const, url: "/api/documents", ...multipartPdf(pdfBytes()) };
     const responses = await Promise.all([app.inject(request), app.inject(request)]);
 
-    expect(responses.map((response) => response.statusCode).sort()).toEqual([202, 409]);
+    expect(responses.map((response) => response.statusCode).sort()).toEqual([202, 202]);
   });
 
   it("closes only explicitly owned resources", async () => {
