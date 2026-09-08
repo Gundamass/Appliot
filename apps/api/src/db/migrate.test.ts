@@ -626,4 +626,53 @@ describe("migrateDatabase", () => {
       .toEqual({ import_status: "retained" });
     database.close();
   });
+
+  it("upgrades legacy documents to a unique current four-state lifecycle", () => {
+    const database = new Database(":memory:");
+    database.exec(`
+      PRAGMA foreign_keys = ON;
+      CREATE TABLE documents (
+        id TEXT PRIMARY KEY,
+        fingerprint TEXT NOT NULL UNIQUE,
+        filename TEXT NOT NULL,
+        source_path TEXT NOT NULL,
+        import_status TEXT NOT NULL CHECK (import_status IN ('retained', 'importing', 'completed')),
+        created_at TEXT NOT NULL
+      );
+      CREATE TABLE document_chunks (
+        id TEXT PRIMARY KEY,
+        document_id TEXT NOT NULL REFERENCES documents(id),
+        page INTEGER NOT NULL,
+        content TEXT NOT NULL,
+        created_at TEXT NOT NULL
+      );
+      INSERT INTO documents VALUES
+        ('old', '${"a".repeat(64)}', 'old.pdf', 'C:/old.pdf', 'completed', '2026-09-01T00:00:00.000Z'),
+        ('new', '${"b".repeat(64)}', 'new.pdf', 'C:/new.pdf', 'completed', '2026-09-02T00:00:00.000Z'),
+        ('interrupted', '${"c".repeat(64)}', 'interrupted.pdf', 'C:/interrupted.pdf', 'importing', '2026-09-03T00:00:00.000Z');
+      INSERT INTO document_chunks VALUES
+        ('chunk-old', 'old', 1, 'old content', '2026-09-01T00:00:00.000Z');
+    `);
+
+    migrateDatabase(database);
+    migrateDatabase(database);
+
+    expect(database.prepare(`
+      SELECT id, import_status, is_current FROM documents ORDER BY created_at, id
+    `).all()).toEqual([
+      { id: "old", import_status: "completed", is_current: 0 },
+      { id: "new", import_status: "completed", is_current: 1 },
+      { id: "interrupted", import_status: "retained", is_current: 0 }
+    ]);
+    expect(() => database.prepare("UPDATE documents SET import_status = 'failed' WHERE id = 'new'").run())
+      .not.toThrow();
+    expect(() => database.prepare("UPDATE documents SET is_current = 1 WHERE id = 'old'").run())
+      .toThrow();
+    expect(database.prepare("PRAGMA foreign_key_list(document_chunks)").all())
+      .toContainEqual(expect.objectContaining({ from: "document_id", table: "documents" }));
+    expect(database.prepare("SELECT content FROM document_chunks WHERE id = 'chunk-old'").get())
+      .toEqual({ content: "old content" });
+    expect(database.pragma("quick_check", { simple: true })).toBe("ok");
+    database.close();
+  });
 });

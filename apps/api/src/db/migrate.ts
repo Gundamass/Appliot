@@ -16,7 +16,8 @@ export function migrateDatabase(database: SqliteDatabase): void {
       fingerprint TEXT NOT NULL UNIQUE,
       filename TEXT NOT NULL,
       source_path TEXT NOT NULL,
-      import_status TEXT NOT NULL CHECK (import_status IN ('retained', 'importing', 'completed')),
+      import_status TEXT NOT NULL CHECK (import_status IN ('retained', 'importing', 'completed', 'failed')),
+      is_current INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
       created_at TEXT NOT NULL
     );
 
@@ -653,6 +654,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
   if (!documentColumns.some((column) => column.name === "import_status")) {
     database.exec("ALTER TABLE documents ADD COLUMN import_status TEXT NOT NULL DEFAULT 'completed' CHECK (import_status IN ('retained', 'importing', 'completed'))");
   }
+  upgradeDocumentLifecycle(database);
   database.prepare("UPDATE documents SET import_status = 'retained' WHERE import_status = 'importing'").run();
 
   database.exec(`
@@ -832,6 +834,57 @@ function tableSql(database: SqliteDatabase, table: string): string {
   const row = database.prepare("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = ?")
     .get(table) as { sql?: string } | undefined;
   return row?.sql ?? "";
+}
+
+function upgradeDocumentLifecycle(database: SqliteDatabase): void {
+  const sql = tableSql(database, "documents");
+  const columns = database.prepare("PRAGMA table_info(documents)").all() as Array<{ name: string }>;
+  const hasCurrent = columns.some(({ name }) => name === "is_current");
+  const needsRebuild = !sql.includes("'failed'") || !hasCurrent;
+
+  if (needsRebuild) {
+    const foreignKeysWereEnabled = database.pragma("foreign_keys", { simple: true }) === 1;
+    if (foreignKeysWereEnabled) database.pragma("foreign_keys = OFF");
+    try {
+      database.transaction(() => {
+        database.exec(`
+          DROP INDEX IF EXISTS documents_one_current_idx;
+          CREATE TABLE documents_lifecycle_new (
+            id TEXT PRIMARY KEY,
+            fingerprint TEXT NOT NULL UNIQUE,
+            filename TEXT NOT NULL,
+            source_path TEXT NOT NULL,
+            import_status TEXT NOT NULL CHECK (import_status IN ('retained', 'importing', 'completed', 'failed')),
+            is_current INTEGER NOT NULL DEFAULT 0 CHECK (is_current IN (0, 1)),
+            created_at TEXT NOT NULL
+          );
+          INSERT INTO documents_lifecycle_new (
+            id, fingerprint, filename, source_path, import_status, is_current, created_at
+          )
+          SELECT id, fingerprint, filename, source_path,
+                 CASE WHEN import_status = 'importing' THEN 'retained' ELSE import_status END,
+                 ${hasCurrent ? "is_current" : "0"}, created_at
+          FROM documents;
+          DROP TABLE documents;
+          ALTER TABLE documents_lifecycle_new RENAME TO documents;
+        `);
+      })();
+    } finally {
+      if (foreignKeysWereEnabled) database.pragma("foreign_keys = ON");
+    }
+  }
+
+  database.exec(`
+    CREATE UNIQUE INDEX IF NOT EXISTS documents_one_current_idx
+      ON documents(is_current) WHERE is_current = 1;
+  `);
+  database.prepare(`
+    UPDATE documents SET is_current = 1
+    WHERE id = (
+      SELECT id FROM documents WHERE import_status = 'completed'
+      ORDER BY created_at DESC, id DESC LIMIT 1
+    ) AND NOT EXISTS (SELECT 1 FROM documents WHERE is_current = 1)
+  `).run();
 }
 
 function upgradeFactForeignKeys(database: SqliteDatabase): void {

@@ -16,6 +16,16 @@ export const LatestProfileDocumentResponseSchema = z.object({
   document: ProfileDocumentSummarySchema.nullable()
 }).strict();
 
+export const DocumentImportStatusSchema = z.enum(["retained", "importing", "completed", "failed"]);
+
+export const CurrentProfileDocumentSummarySchema = ProfileDocumentSummarySchema.extend({
+  importStatus: DocumentImportStatusSchema
+}).strict();
+
+export const CurrentProfileDocumentResponseSchema = z.object({
+  document: CurrentProfileDocumentSummarySchema.nullable()
+}).strict();
+
 export const ErrorResponseSchema = z.object({
   error: z.string().min(1),
   code: z.string().regex(/^[a-z][a-z0-9_]*$/).optional(),
@@ -25,4 +35,7 @@ export const ErrorResponseSchema = z.object({
 export type DocumentResponse = z.infer<typeof DocumentResponseSchema>;
 export type ProfileDocumentSummary = z.infer<typeof ProfileDocumentSummarySchema>;
 export type LatestProfileDocumentResponse = z.infer<typeof LatestProfileDocumentResponseSchema>;
+export type DocumentImportStatus = z.infer<typeof DocumentImportStatusSchema>;
+export type CurrentProfileDocumentSummary = z.infer<typeof CurrentProfileDocumentSummarySchema>;
+export type CurrentProfileDocumentResponse = z.infer<typeof CurrentProfileDocumentResponseSchema>;
 export type ErrorResponse = z.infer<typeof ErrorResponseSchema>;

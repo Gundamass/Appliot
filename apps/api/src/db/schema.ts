@@ -1,5 +1,5 @@
 import { sql } from "drizzle-orm";
-import { check, index, integer, primaryKey, real, sqliteTable, text, unique } from "drizzle-orm/sqlite-core";
+import { check, index, integer, primaryKey, real, sqliteTable, text, unique, uniqueIndex } from "drizzle-orm/sqlite-core";
 
 const factStatuses = sql`('extracted', 'user_confirmed', 'user_corrected', 'superseded')`;
 const factScopes = sql`('profile', 'application')`;
@@ -9,10 +9,12 @@ export const documents = sqliteTable("documents", {
   fingerprint: text("fingerprint").notNull().unique(),
   filename: text("filename").notNull(),
   sourcePath: text("source_path").notNull(),
-  importStatus: text("import_status", { enum: ["retained", "importing", "completed"] }).notNull(),
+  importStatus: text("import_status", { enum: ["retained", "importing", "completed", "failed"] }).notNull(),
+  isCurrent: integer("is_current", { mode: "boolean" }).notNull().default(false),
   createdAt: text("created_at").notNull()
 }, (table) => [
-  check("documents_import_status_valid", sql`${table.importStatus} IN ('retained', 'importing', 'completed')`)
+  check("documents_import_status_valid", sql`${table.importStatus} IN ('retained', 'importing', 'completed', 'failed')`),
+  uniqueIndex("documents_one_current_idx").on(table.isCurrent).where(sql`${table.isCurrent} = 1`)
 ]);
 
 export const documentChunks = sqliteTable("document_chunks", {

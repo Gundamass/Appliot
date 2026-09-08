@@ -1,5 +1,7 @@
 import { describe, expect, it } from "vitest";
 import {
+  CurrentProfileDocumentResponseSchema,
+  CurrentProfileDocumentSummarySchema,
   DocumentResponseSchema,
   ErrorResponseSchema,
   LatestProfileDocumentResponseSchema
@@ -40,5 +42,20 @@ describe("HTTP response contracts", () => {
     expect(LatestProfileDocumentResponseSchema.parse({ document: null })).toEqual({ document: null });
     expect(LatestProfileDocumentResponseSchema.safeParse({ document: { ...document, sourcePath: "secret" } }).success)
       .toBe(false);
+  });
+
+  it("accepts all current document parsing states and nullable reads", () => {
+    const document = {
+      documentId: "0f8fad5b-d9cb-469f-a165-70867728950e",
+      filename: "resume.pdf",
+      importedAt: "2026-09-08T00:00:00.000Z",
+      extractedFactCount: 0
+    };
+
+    for (const importStatus of ["retained", "importing", "completed", "failed"] as const) {
+      expect(CurrentProfileDocumentSummarySchema.parse({ ...document, importStatus }).importStatus)
+        .toBe(importStatus);
+    }
+    expect(CurrentProfileDocumentResponseSchema.parse({ document: null })).toEqual({ document: null });
   });
 });
