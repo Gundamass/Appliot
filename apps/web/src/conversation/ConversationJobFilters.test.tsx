@@ -69,6 +69,7 @@ describe("ConversationJobFilters", () => {
       sessionId: session.id,
       action: "confirm_filters",
       sessionVersion: session.version,
+      idempotencyKey: "inline-job-match:session-filter-fixture:confirm_filters:8",
       expectation: session.expectation
     }));
   });

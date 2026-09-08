@@ -1,4 +1,4 @@
-import { randomUUID } from "node:crypto";
+import { createHash, randomUUID } from "node:crypto";
 import { Command, END, START, StateGraph, interrupt } from "@langchain/langgraph";
 import { MemorySaver, type BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import { z } from "zod";
@@ -7,6 +7,7 @@ import {
   AgentRunResultSchema,
   CanonicalIntentSchema,
   EvidenceRefSchema,
+  FinalSubmitApprovalSchema,
   IntentResolutionSchema,
   PlanStateSchema,
   PlanStepSchema,
@@ -19,6 +20,8 @@ import {
   type ClarificationRequest,
   type EvidenceRef,
   type JsonValue,
+  type AgentEventType,
+  type AgentEventActor,
   type PlanState,
   type PlanStep,
   type RuntimeHumanInterrupt,
@@ -32,6 +35,8 @@ import { BudgetExceededError, createBudgetManager, type BudgetManager } from "./
 import type { CancellationManager } from "./cancellation-manager.js";
 import { CHECKPOINT_VERSION, type RuntimeCheckpointStore } from "./checkpoint-store.js";
 import type { CallerAttestationToken } from "../policy/caller-attestation.js";
+import type { ApprovalBinding, ApprovalGate } from "../policy/approval-gate.js";
+import type { AgentEventTraceSink } from "../events/trace-sink.js";
 import {
   RuntimeGraphStateAnnotation,
   RuntimeGraphStateSchema,
@@ -61,12 +66,17 @@ export interface RuntimeExecutorInput {
   humanResume?: RuntimeHumanResume | undefined;
   signal: AbortSignal;
   executionEpoch: number;
+  /** Original request context, retained for trusted specialist routing. */
+  request?: AgentRunInput | undefined;
+  /** Redacted request context restored from the durable artifact store. */
+  requestContext?: import("./runtime-state.js").RuntimeRequestContext | undefined;
   /** Issued by the trusted composition root for the Runtime caller. */
   callerAttestation?: CallerAttestationToken;
 }
 
 export interface RuntimeExecutorResult {
-  status: "completed" | "blocked" | "failed";
+  status: "completed" | "blocked" | "failed" | "interrupted";
+  pendingInterrupt?: RuntimeHumanInterrupt | undefined;
   outputRef?: string | undefined;
   evidenceRefs?: EvidenceRef[] | undefined;
   toolCallsUsed?: number | undefined;
@@ -76,14 +86,22 @@ export interface RuntimeExecutorResult {
 }
 
 export const RuntimeExecutorResultSchema = z.object({
-  status: z.enum(["completed", "blocked", "failed"]),
+  status: z.enum(["completed", "blocked", "failed", "interrupted"]),
+  pendingInterrupt: RuntimeHumanInterruptSchema.optional(),
   outputRef: z.string().min(1).max(256).optional(),
   evidenceRefs: z.array(EvidenceRefSchema).max(500).optional(),
   toolCallsUsed: z.number().int().nonnegative().optional(),
   tokensUsed: z.number().int().nonnegative().optional(),
   errorCode: z.string().regex(/^[a-z0-9_:-]{1,120}$/u).optional(),
   retryable: z.boolean().optional()
-}).strict();
+}).strict().superRefine((result, context) => {
+  if (result.status === "interrupted" && result.pendingInterrupt === undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "runtime_executor_interrupt_missing" });
+  }
+  if (result.status !== "interrupted" && result.pendingInterrupt !== undefined) {
+    context.addIssue({ code: z.ZodIssueCode.custom, message: "runtime_executor_interrupt_unexpected" });
+  }
+});
 
 export interface RuntimeExecutor {
   execute(input: RuntimeExecutorInput): Promise<RuntimeExecutorResult> | RuntimeExecutorResult;
@@ -109,6 +127,10 @@ export interface ExecutionLoopDependencies {
   cancellationManager: CancellationManager;
   /** Opaque Runtime caller token; never derived from model output. */
   callerAttestation?: CallerAttestationToken;
+  /** Trusted gate for irreversible human approvals. */
+  approvalGate?: ApprovalGate;
+  /** Authoritative append-only Runtime event log. */
+  eventSink?: AgentEventTraceSink;
   supervisor?: RuntimeSupervisor;
   langGraphCheckpointer?: BaseCheckpointSaver;
   clarificationManager?: ReturnType<typeof createClarificationManager>;
@@ -126,6 +148,16 @@ export interface ExecutionLoop {
 }
 
 const terminalStatuses = new Set(["completed", "blocked", "failed", "cancelled", "expired"]);
+const RuntimeApprovalBindingSchema = z.object({
+  runId: z.string().min(1).max(128),
+  stepId: z.string().min(1).max(128),
+  kind: z.literal("final_submit"),
+  planRevision: z.number().int().positive(),
+  executionEpoch: z.number().int().nonnegative(),
+  snapshotId: z.string().min(1).max(256),
+  targetFingerprint: z.string().min(1).max(256),
+  payloadHash: z.string().regex(/^[a-f0-9]{64}$/iu)
+});
 
 class ExecutionSupersededError extends Error {
   constructor() {
@@ -143,6 +175,7 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
   const running = new Map<string, Promise<RuntimeState>>();
   const locks = new Map<string, Promise<void>>();
   const resumeInFlight = new Set<string>();
+  const terminalEvents = new Set<string>();
   // LangGraph persists Command resume values as pending writes. Keep the
   // actual human answer outside the graph and pass only a one-shot opaque
   // reference through the checkpointer.
@@ -175,10 +208,12 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
       state.intent = intent;
       state.intentRef = dependencies.artifactStore.saveIntent(intent);
       state.evidenceRefs = [...intent.evidenceRefs];
+      recordEvent("intent_resolved", state, "runtime", `intent:${intent.intentId}`);
       if (resolution.type === "needs_clarification") {
         state.pendingInterrupt = clarificationInterrupt(intent, resolution.question, now, idFactory);
         state.status = "interrupted";
         state.phase = "human_gate";
+        recordEvent("clarification_requested", state, "runtime", `clarification:${resolution.question.questionId}`);
         return persist(state);
       }
       state.status = "running";
@@ -204,6 +239,7 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
       }
       state.plan = plan;
       state.planRef = dependencies.artifactStore.savePlan(plan);
+      recordEvent("plan_created", state, "runtime", `plan:${plan.planId}`);
       state.phase = "dispatch";
       state.status = "running";
       return persist(state);
@@ -244,6 +280,7 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
         state.pendingInterrupt = pending;
         state.status = "interrupted";
         state.phase = "human_gate";
+        recordEvent("human_interrupt", state, "supervisor", `interrupt:${pending.interruptId}`, readyStep.id);
         return persist(state);
       }
       if (decision.type === "finish") {
@@ -257,6 +294,13 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
       if (decision.type === "dispatch_agent" || decision.type === "invoke_tool") {
         markStepRunning(state.plan, readyStep.id);
         savePlan(state);
+        recordEvent(
+          decision.type === "dispatch_agent" ? "agent_dispatched" : "capability_called",
+          state,
+          "supervisor",
+          decision.type === "dispatch_agent" ? `agent:${decision.agent}` : `capability:${decision.capability}`,
+          readyStep.id
+        );
         state.phase = "wait";
         state.status = "running";
         return persist(state);
@@ -287,6 +331,8 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
           intent: state.intent,
           plan: state.plan,
           decision,
+          ...(state.input === undefined ? {} : { request: state.input }),
+          ...(state.requestContext === undefined ? {} : { requestContext: state.requestContext }),
           ...(state.transientHumanResume === undefined ? {} : { humanResume: state.transientHumanResume }),
           signal: deadline.signal,
           executionEpoch: runtimeContext.executionEpoch,
@@ -336,6 +382,23 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
         budget.consume("tokens", result.tokensUsed);
         state.budget = budget.snapshot();
       }
+      if (result.status === "interrupted") {
+        if (result.pendingInterrupt?.reason === "final_submit"
+          && !approvalBindingMatches(result.pendingInterrupt, state, step)) {
+          return fail(state, "runtime_approval_binding_invalid", "wait");
+        }
+        state.pendingInterrupt = result.pendingInterrupt;
+        state.status = "interrupted";
+        state.phase = "human_gate";
+        state.transientHumanResume = undefined;
+        if (result.pendingInterrupt !== undefined) {
+          recordEvent("human_interrupt", state, "agent", `interrupt:${result.pendingInterrupt.interruptId}`, step.id);
+        }
+        return persist(state);
+      }
+      if (result.evidenceRefs !== undefined && result.evidenceRefs.length > 0) {
+        recordEvent("observation_received", state, "agent", `evidence:${result.evidenceRefs[0]!.id}`, step.id);
+      }
       if (result.status === "completed") {
         if (result.outputRef !== undefined) step.outputRefs = appendRefs(step.outputRefs, [result.outputRef]);
         state.transientHumanResume = undefined;
@@ -361,6 +424,7 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
         consumeRetry(state);
         markStepPending(state.plan, step.id);
         savePlan(state);
+        recordEvent("retry_scheduled", state, "runtime", `retry:${step.id}`, step.id);
         state.phase = "dispatch";
         return persist(state);
       }
@@ -436,8 +500,33 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
           return fail(state, "runtime_approval_binding_invalid", "human_gate");
         }
         if (answer.action !== "approve") return fail(state, "runtime_approval_action_invalid", "human_gate");
+        if (isExpired(pending.expiresAt, now())) {
+          state.pendingInterrupt = undefined;
+          state.transientHumanResume = undefined;
+          state.status = "expired";
+          state.phase = "fail";
+          state.summary = "人工确认已过期";
+          return persist(state);
+        }
+        const binding = approvalBinding(pending, state, step);
+        if (binding === undefined) return fail(state, "runtime_approval_binding_invalid", "human_gate");
+        if (dependencies.approvalGate === undefined) {
+          return fail(state, "runtime_approval_gate_missing", "human_gate");
+        }
+        const verification = dependencies.approvalGate.verify(
+          readFinalSubmitApproval(answer.values),
+          binding
+        );
+        if (!verification.valid) return fail(state, `runtime_${verification.reason}`, "human_gate");
+        if (!dependencies.approvalGate.consume(verification.approvalId)) {
+          return fail(state, "runtime_approval_replayed", "human_gate");
+        }
+        recordEvent("approval_granted", state, "user", `approval:${verification.approvalId}`, step.id);
       }
-      if (isExpired(pending.expiresAt, now())) {
+      if (pending.reason !== "final_submit") {
+        recordEvent("clarification_received", state, "user", `clarification:${pending.interruptId}`);
+      }
+      if (pending.reason !== "final_submit" && isExpired(pending.expiresAt, now())) {
         state.pendingInterrupt = undefined;
         state.transientHumanResume = undefined;
         state.status = "expired";
@@ -465,7 +554,8 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
         } catch {
           return fail(state, "runtime_clarification_answer_invalid", "human_gate");
         }
-        state.intentRef = dependencies.artifactStore.saveIntent(state.intent);
+          state.intentRef = dependencies.artifactStore.saveIntent(state.intent);
+          recordEvent("clarification_received", state, "user", `clarification:${pending.interruptId}`);
         state.status = "running";
         state.phase = "plan";
       } else if (state.plan !== undefined && state.currentStepId !== undefined) {
@@ -496,8 +586,62 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
     state.updatedAt = now();
     state.stateHash = stateHash(state);
     await dependencies.checkpointStore.save(toCheckpoint(state));
+    recordEvent("checkpoint_saved", state, "runtime", `checkpoint:${state.runId}`);
+    if (terminalStatuses.has(state.status)) recordTerminalEvent(state);
     return state;
   };
+
+  function recordEvent(
+    type: AgentEventType,
+    state: RuntimeState,
+    actor: AgentEventActor,
+    payloadRef?: string,
+    stepId?: string
+  ): void {
+    if (dependencies.eventSink === undefined) return;
+    dependencies.eventSink.record({
+      runId: state.runId,
+      ...(state.intent?.intentId === undefined ? {} : { intentId: state.intent.intentId }),
+      ...(state.plan?.planId === undefined ? {} : { planId: state.plan.planId }),
+      ...(state.plan?.revision === undefined ? {} : { planRevision: state.plan.revision }),
+      ...(stepId === undefined ? {} : { stepId }),
+      type,
+      actor,
+      ...(payloadRef === undefined ? {} : { payloadRef }),
+      redactionVersion: "v1"
+    });
+  }
+
+  function recordEventOnce(
+    type: AgentEventType,
+    state: RuntimeState,
+    actor: AgentEventActor,
+    payloadRef?: string,
+    stepId?: string
+  ): void {
+    const key = `${state.runId}:${type}`;
+    if (terminalEvents.has(key)) return;
+    if (dependencies.eventSink?.list(state.runId).some((event) => event.type === type)) {
+      terminalEvents.add(key);
+      return;
+    }
+    terminalEvents.add(key);
+    recordEvent(type, state, actor, payloadRef, stepId);
+  }
+
+  function recordTerminalEvent(state: RuntimeState): void {
+    const type = state.status === "completed"
+      ? "run_completed"
+      : state.status === "failed"
+        ? "run_failed"
+        : state.status === "cancelled"
+          ? "run_cancelled"
+          : state.status === "expired"
+            ? "run_expired"
+            : state.status === "blocked" ? "run_blocked" : undefined;
+    if (type === undefined) return;
+    recordEventOnce(type, state, "runtime", state.error?.code === undefined ? undefined : `error:${state.error.code}`);
+  }
 
   const runGraph = async (state: RuntimeState, command?: Command): Promise<RuntimeState> => {
     states.set(state.runId, state);
@@ -567,6 +711,7 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
       const existing = running.get(state.runId);
       if (existing !== undefined) return existing;
       dependencies.cancellationManager.register(state.runId, state.executionEpoch);
+      recordEventOnce("run_started", state, "runtime");
       return schedule(state);
     },
     async resume(runId, input) {
@@ -738,6 +883,7 @@ export function createExecutionLoop(dependencies: ExecutionLoopDependencies): Ex
       ...(state.currentStepId === undefined ? {} : { currentStepId: state.currentStepId }),
       ...(state.intentRef === undefined ? {} : { intentRef: state.intentRef }),
       ...(state.planRef === undefined ? {} : { planRef: state.planRef }),
+      ...(state.requestContextRef === undefined ? {} : { requestContextRef: state.requestContextRef }),
       memoryRefs: state.memoryRefs,
       evidenceRefs: state.evidenceRefs,
       ...(state.pendingInterrupt === undefined ? {} : { pendingInterrupt: state.pendingInterrupt }),
@@ -825,16 +971,21 @@ function createDefaultSupervisor(options: { idFactory: () => string; now: () => 
     decide({ state, readyStep }) {
       if (readyStep === undefined) return { type: "finish", outcome: "completed", summary: "没有待执行步骤" };
       if (readyStep.risk === "irreversible") {
+        const binding = readyStep.approvalBinding ?? defaultApprovalBinding(state, readyStep);
         const interruptValue: RuntimeHumanInterrupt = {
           interruptId: `interrupt:${options.idFactory()}`,
           reason: "final_submit",
           summary: "最终提交前需要人工确认",
           evidenceRefs: state.evidenceRefs.map((ref) => ref.id),
           proposedAction: {
+            runId: state.runId,
             stepId: readyStep.id,
             kind: "final_submit",
             planRevision: state.plan?.revision ?? 0,
-            executionEpoch: state.executionEpoch
+            executionEpoch: state.executionEpoch,
+            snapshotId: binding.snapshotId,
+            targetFingerprint: binding.targetFingerprint,
+            payloadHash: binding.payloadHash
           },
           expiresAt: new Date(Date.parse(options.now()) + 15 * 60 * 1_000).toISOString()
         };
@@ -984,14 +1135,56 @@ function approvalBindingMatches(
   state: RuntimeState,
   step: PlanStep
 ): boolean {
-  if (interruptValue.reason !== "final_submit") return false;
+  return approvalBinding(interruptValue, state, step) !== undefined;
+}
+
+function approvalBinding(
+  interruptValue: RuntimeHumanInterrupt,
+  state: RuntimeState,
+  step: PlanStep
+): ApprovalBinding | undefined {
+  if (interruptValue.reason !== "final_submit") return undefined;
   const proposedAction = interruptValue.proposedAction;
-  if (typeof proposedAction !== "object" || proposedAction === null || Array.isArray(proposedAction)) return false;
-  const record = proposedAction as Record<string, unknown>;
-  return record.stepId === step.id
-    && record.kind === "final_submit"
-    && record.planRevision === state.plan?.revision
-    && record.executionEpoch === state.executionEpoch;
+  if (typeof proposedAction !== "object" || proposedAction === null || Array.isArray(proposedAction)) return undefined;
+  const parsed = RuntimeApprovalBindingSchema.safeParse(proposedAction);
+  if (!parsed.success) return undefined;
+  const value = parsed.data;
+  if (value.runId !== state.runId
+    || value.stepId !== step.id
+    || value.kind !== "final_submit"
+    || value.planRevision !== state.plan?.revision
+    || value.executionEpoch !== state.executionEpoch) {
+    return undefined;
+  }
+  if (step.approvalBinding !== undefined
+    && (step.approvalBinding.snapshotId !== value.snapshotId
+      || step.approvalBinding.targetFingerprint !== value.targetFingerprint
+      || step.approvalBinding.payloadHash !== value.payloadHash)) {
+    return undefined;
+  }
+  return {
+    runId: value.runId,
+    planRevision: value.planRevision,
+    executionEpoch: value.executionEpoch,
+    snapshotId: value.snapshotId,
+    targetFingerprint: value.targetFingerprint,
+    payloadHash: value.payloadHash
+  };
+}
+
+function readFinalSubmitApproval(values: RuntimeHumanResume["values"]): unknown {
+  const nested = values.approval ?? values.finalSubmitApproval;
+  if (typeof nested === "object" && nested !== null && !Array.isArray(nested)) return nested;
+  return typeof values.approvalId === "string" || typeof values.token === "string" ? values : undefined;
+}
+
+function defaultApprovalBinding(state: RuntimeState, step: PlanStep): Omit<ApprovalBinding, "runId" | "planRevision" | "executionEpoch"> {
+  const identity = `${state.runId}\u0000${step.id}\u0000${state.plan?.revision ?? 0}`;
+  return {
+    snapshotId: `planning:${state.runId}:${step.id}`,
+    targetFingerprint: `planning:${state.runId}:${step.id}`,
+    payloadHash: createHash("sha256").update(identity, "utf8").digest("hex")
+  };
 }
 
 function clarificationRelatedFields(interruptValue: RuntimeHumanInterrupt): string[] {

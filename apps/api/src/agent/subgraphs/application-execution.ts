@@ -5,8 +5,13 @@ import type {
   ApplicationExecutionState,
   ExecutableCommand,
   FormSnapshot,
-  HumanInterrupt
+  HumanInterrupt,
+  ApplicationFieldSemantic,
+  SkillBinding,
+  SkillDirective,
+  SkillTraceDimensions
 } from "@resume/contracts";
+import { SkillBindingSchema, SkillDirectiveSchema } from "@resume/contracts";
 import {
   applicationCommandId,
   type ApplicationTools,
@@ -16,12 +21,15 @@ import {
 } from "../application-tools.js";
 import type { SubgraphPort, SubgraphPortInput, SubgraphPortResult } from "../main-graph.js";
 import type { TraceSink } from "../trace-sink.js";
+import type { FieldCoverageStore } from "../../applications/field-coverage.js";
 
 const MAX_TRACKED_IDS = 100;
 
 export interface ApplicationExecutionSubgraphDependencies {
   tools: ApplicationTools;
   traceSink: TraceSink;
+  fieldCoverage?: FieldCoverageStore;
+  skillRuntime?: ApplicationSkillRuntimePort;
   now?: () => Date;
   onInterrupt?: (interrupt: HumanInterrupt) => void;
   onContentReview?: (input: {
@@ -29,6 +37,25 @@ export interface ApplicationExecutionSubgraphDependencies {
     interrupt: HumanInterrupt;
     review: ContentReviewDraft;
   }) => void | Promise<void>;
+}
+
+export interface ApplicationSkillRuntimePort {
+  resolve(input: {
+    runId: string;
+    taskId: string;
+    snapshot: FormSnapshot;
+    binding?: SkillBinding;
+  }): Promise<
+    | {
+        kind: "selected";
+        binding: SkillBinding;
+        pageVariantId?: string;
+        allocation?: "champion" | "challenger";
+        directives: readonly SkillDirective[];
+      }
+    | { kind: "observe_only_handoff"; reason: "page_unmatched" | "safe_version_unavailable" }
+    | { kind: "not_applicable" }
+  >;
 }
 
 export type ContentReviewDraft = Omit<ApplicationContentReview, "id">;
@@ -164,6 +191,7 @@ async function executeApplication(
     return failed(initial, "application_observe_failed", "observe_page");
   }
   let application = withSnapshot(initial, observed);
+  syncUserCoverage(dependencies.fieldCoverage, state.taskId, observed);
   record(dependencies, state, "observe_page", "tool_call", "completed", "snapshot_observed", {
     counts: { fields: observed.fields.length, actions: observed.actions.length }
   });
@@ -179,18 +207,82 @@ async function executeApplication(
     return failed(application, "application_normalization_failed", "normalize_fields");
   }
   application = withSnapshot(application, snapshot);
+  syncUserCoverage(dependencies.fieldCoverage, state.taskId, snapshot);
   record(dependencies, state, "normalize_fields", "node", "completed", "fields_normalized", {
     counts: { fields: snapshot.fields.length }
   });
 
-  return resolveAndExecute(dependencies, state, application, snapshot);
+  let skillSemanticOrder: ApplicationFieldSemantic[] | undefined;
+  if (dependencies.skillRuntime !== undefined) {
+    let selection: Awaited<ReturnType<ApplicationSkillRuntimePort["resolve"]>>;
+    try {
+      selection = await dependencies.skillRuntime.resolve({
+        runId: state.runId,
+        taskId: state.taskId,
+        snapshot,
+        ...(application.skillBinding === undefined ? {} : { binding: application.skillBinding })
+      });
+    } catch {
+      selection = { kind: "observe_only_handoff", reason: "safe_version_unavailable" };
+    }
+    if (selection.kind === "observe_only_handoff") {
+      return interruptResult(dependencies, state, application, "select_application_skill", {
+        kind: "field_semantics",
+        reasonCode: selection.reason === "page_unmatched"
+          ? "application_skill_page_unmatched"
+          : "application_skill_unavailable",
+        questionIds: [],
+        evidenceIds: []
+      });
+    }
+    if (selection.kind === "selected") {
+      const parsedBinding = SkillBindingSchema.safeParse(selection.binding);
+      const parsedDirectives = selection.directives.map((directive) => SkillDirectiveSchema.safeParse(directive));
+      if (!parsedBinding.success || parsedDirectives.some((directive) => !directive.success)) {
+        return interruptResult(dependencies, state, application, "select_application_skill", {
+          kind: "field_semantics",
+          reasonCode: "application_skill_unavailable",
+          questionIds: [],
+          evidenceIds: []
+        });
+      }
+      if (application.skillBinding !== undefined && !sameSkillBinding(application.skillBinding, parsedBinding.data)) {
+        return failed(application, "application_skill_binding_changed", "select_application_skill");
+      }
+      const directives = parsedDirectives.map((directive) => directive.data!);
+      const skillTrace = selection.pageVariantId === undefined || selection.allocation === undefined
+        ? undefined
+        : {
+            skillId: parsedBinding.data.skillId,
+            skillVersion: parsedBinding.data.version,
+            pageFingerprintHash: parsedBinding.data.pageFingerprintHash,
+            pageVariantId: selection.pageVariantId,
+            allocation: selection.allocation
+          } satisfies SkillTraceDimensions;
+      application = {
+        ...application,
+        skillBinding: parsedBinding.data,
+        ...(skillTrace === undefined ? {} : { skillTrace })
+      };
+      skillSemanticOrder = directives
+        .filter((directive): directive is Extract<SkillDirective, { kind: "resolve-field" }> => directive.kind === "resolve-field")
+        .map((directive) => directive.semantic);
+      record(dependencies, state, "select_application_skill", "node", "completed", "application_skill_bound", {
+        counts: { directives: directives.length },
+        ...(skillTrace === undefined ? {} : { skill: skillTrace })
+      });
+    }
+  }
+
+  return resolveAndExecute(dependencies, state, application, snapshot, skillSemanticOrder);
 }
 
 async function resolveAndExecute(
   dependencies: ApplicationExecutionSubgraphDependencies,
   state: AgentGraphState,
   application: ApplicationExecutionState,
-  snapshot: FormSnapshot
+  snapshot: FormSnapshot,
+  skillSemanticOrder?: readonly ApplicationFieldSemantic[]
 ): Promise<SubgraphPortResult> {
   let deterministic: FieldResolutionBatch;
   try {
@@ -207,6 +299,7 @@ async function resolveAndExecute(
     candidateIds: fieldIds(deterministic.resolutions),
     counts: resolutionCounts(deterministic)
   });
+  recordCoverage(dependencies.fieldCoverage, state.taskId, deterministic.resolutions);
 
   const deterministicInterrupt = findResolutionInterrupt(deterministic.resolutions, "deterministic");
   if (deterministicInterrupt !== undefined) {
@@ -245,6 +338,7 @@ async function resolveAndExecute(
       candidateIds: fieldIds(resolutions.resolutions),
       counts: resolutionCounts(resolutions)
     });
+    recordCoverage(dependencies.fieldCoverage, state.taskId, resolutions.resolutions);
     const semanticInterrupt = findResolutionInterrupt(resolutions.resolutions, "semantic");
     if (semanticInterrupt !== undefined) {
       return await interruptResult(
@@ -277,7 +371,8 @@ async function resolveAndExecute(
       taskId: state.taskId,
       snapshot,
       resolutions,
-      executionEpoch: nextEpoch
+      executionEpoch: nextEpoch,
+      ...(skillSemanticOrder === undefined ? {} : { skillSemanticOrder })
     });
   } catch {
     return failed(application, "application_fill_plan_failed", "build_fill_plan");
@@ -365,6 +460,7 @@ async function runCommands(
   try {
     result = await dependencies.tools.execute(authorized[0]!);
   } catch {
+    markCommandFailures(dependencies.fieldCoverage, authorized, "application_execution_failed");
     return invalidateAndFail(
       dependencies,
       state,
@@ -398,12 +494,17 @@ async function runCommands(
     return interruptForChallenge(dependencies, state, application, executionSnapshot, "execute_plan");
   }
   if (result.status !== "applied") {
+    markCommandFailures(dependencies.fieldCoverage, authorized, result.errors[0] ?? "application_execution_not_applied");
     return invalidateAndFail(dependencies, state, application, "application_execution_not_applied", "execute_plan");
   }
 
   const readback = await verifyReadback(dependencies, state, application, authorized);
   if (readback.status === "stopped") return readback.result;
   application = readback.application;
+  if (readback.snapshot !== undefined) {
+    markCommandsFilled(dependencies.fieldCoverage, authorized, result.warnings ?? []);
+    syncUserCoverage(dependencies.fieldCoverage, state.taskId, readback.snapshot);
+  }
 
   if (auditReason === "field_applied") {
     const audit = await verifyFullPageAudit(
@@ -448,6 +549,9 @@ async function verifyFullPageAudit(
     counts: { mismatches: audit.mismatches.length }
   });
   if (audit.mismatches.length > 0) {
+    for (const mismatch of audit.mismatches) {
+      dependencies.fieldCoverage?.markFailed(state.taskId, mismatch.fieldId, "FULL_PAGE_AUDIT_MISMATCH");
+    }
     return {
       status: "stopped",
       result: await invalidateAndFail(dependencies, state, auditedApplication, "FULL_PAGE_AUDIT_MISMATCH", "full_page_audit")
@@ -533,6 +637,9 @@ async function handleReadbackResult(
   }
 
   const retriedApplication = { ...current, retryCount: 1 };
+  for (const mismatch of readback.mismatches) {
+    dependencies.fieldCoverage?.markFailed(state.taskId, mismatch.fieldId, readback.code);
+  }
   record(dependencies, state, "double_readback", "safety_block", "blocked", readback.code, {
     candidateIds: expected.map(applicationCommandId),
     counts: { observation: readback.observation, mismatches: readback.mismatches.length }
@@ -799,6 +906,66 @@ function withSnapshot(
   };
 }
 
+function syncUserCoverage(
+  store: FieldCoverageStore | undefined,
+  taskId: string,
+  snapshot: FormSnapshot
+): void {
+  if (store === undefined) return;
+  store.retain(taskId, new Set(snapshot.fields.map((field) => field.id)));
+  for (const field of snapshot.fields) {
+    if (!hasUserValue(field.currentValue)) continue;
+    store.markUserFilled(taskId, {
+      fieldId: field.id,
+      label: field.label,
+      ...(field.semanticHint === undefined ? {} : { semantic: field.semanticHint })
+    });
+  }
+}
+
+function recordCoverage(
+  store: FieldCoverageStore | undefined,
+  taskId: string,
+  resolutions: readonly ResolvedApplicationField[]
+): void {
+  if (store === undefined) return;
+  for (const resolution of resolutions) {
+    const assessment = resolution.assessment;
+    if (assessment !== undefined) store.record(taskId, assessment);
+  }
+}
+
+function markCommandsFilled(
+  store: FieldCoverageStore | undefined,
+  commands: readonly ExecutableCommand[],
+  warnings: readonly string[]
+): void {
+  if (store === undefined) return;
+  for (const command of commands) {
+    if (command.type === "click_intermediate") continue;
+    store.markFilled(command.taskId, command.fieldId, [...warnings]);
+  }
+}
+
+function markCommandFailures(
+  store: FieldCoverageStore | undefined,
+  commands: readonly ExecutableCommand[],
+  reason: string
+): void {
+  if (store === undefined) return;
+  for (const command of commands) {
+    if (command.type === "click_intermediate") continue;
+    store.markFailed(command.taskId, command.fieldId, reason);
+  }
+}
+
+function hasUserValue(value: unknown): boolean {
+  if (value === undefined || value === null) return false;
+  if (typeof value === "string") return value.trim().length > 0;
+  if (Array.isArray(value)) return value.length > 0;
+  return true;
+}
+
 function resolvableCount(batch: FieldResolutionBatch): number {
   return batch.resolutions.filter((resolution) =>
     resolution.status === "verified" && !resolution.requiresContentReview && resolution.value !== undefined
@@ -890,6 +1057,14 @@ function failed(
   };
 }
 
+function sameSkillBinding(left: SkillBinding, right: SkillBinding): boolean {
+  return left.skillId === right.skillId
+    && left.version === right.version
+    && left.site === right.site
+    && left.pageFingerprintHash === right.pageFingerprintHash
+    && left.allocationId === right.allocationId;
+}
+
 function record(
   dependencies: ApplicationExecutionSubgraphDependencies,
   state: AgentGraphState,
@@ -901,6 +1076,7 @@ function record(
     candidateIds?: string[];
     evidenceIds?: string[];
     counts?: Record<string, number>;
+    skill?: SkillTraceDimensions;
   } = {}
 ): void {
   dependencies.traceSink.record({
@@ -912,7 +1088,8 @@ function record(
     reasonCode,
     ...(extra.candidateIds === undefined ? {} : { candidateIds: uniqueIds(extra.candidateIds).slice(0, 100) }),
     ...(extra.evidenceIds === undefined ? {} : { evidenceIds: uniqueIds(extra.evidenceIds).slice(0, 100) }),
-    ...(extra.counts === undefined ? {} : { counts: extra.counts })
+    ...(extra.counts === undefined ? {} : { counts: extra.counts }),
+    ...(extra.skill === undefined ? {} : { skill: extra.skill })
   });
 }
 

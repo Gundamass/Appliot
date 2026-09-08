@@ -11,6 +11,7 @@ import {
   type IntentValueSource
 } from "@resume/contracts";
 import { JsonValueSchema } from "@resume/contracts";
+import type { StructuredModelProvider } from "@resume/model-provider";
 import type { IntentContext, IntentDraft, UserMessage } from "./intent-context.js";
 import type { IntentResolutionRuntimeContext } from "./intent-resolver.js";
 
@@ -46,28 +47,40 @@ export interface IntentUnderstanding {
 
 export interface IntentUnderstandingOptions {
   extractor?: IntentExtractor;
+  /** Optional structured model used for nuanced multi-step intent parsing. */
+  structuredProvider?: StructuredModelProvider;
 }
 
 export function createIntentUnderstanding(options: IntentUnderstandingOptions = {}): IntentUnderstanding {
   return {
     async extract(input, context = emptyContext(), runtime) {
-      const raw = options.extractor === undefined
-        ? deterministicExtraction(input.text)
-        : await options.extractor(input, context, runtime);
+      const deterministic = deterministicExtraction(input.text);
+      const raw = options.extractor !== undefined
+        ? await options.extractor(input, context, runtime)
+        : options.structuredProvider === undefined
+          ? deterministic
+          : await structuredExtraction(options.structuredProvider, input, context, deterministic, runtime);
       const parsed = IntentExtractionSchema.safeParse(raw);
       if (!parsed.success) throw new Error("intent_extraction_invalid");
 
+      const allowedEvidenceIds = new Set((context.evidenceRefs ?? []).map((ref) => ref.id));
       const entities = Object.fromEntries(Object.entries(parsed.data.entities).map(([key, field]) => [
         key,
-        normalizeField(field)
+        normalizeField(field, allowedEvidenceIds)
       ])) as IntentDraft["entities"];
 
       return {
         ...(parsed.data.primaryGoal === undefined ? {} : { primaryGoal: parsed.data.primaryGoal }),
         subGoals: parsed.data.subGoals ?? [],
         entities,
-        constraints: parsed.data.constraints,
-        preferences: parsed.data.preferences,
+        constraints: parsed.data.constraints.map((constraint) => ({
+          ...constraint,
+          evidenceRefs: sanitizeEvidenceRefs(constraint.evidenceRefs, allowedEvidenceIds)
+        })),
+        preferences: parsed.data.preferences.map((preference) => ({
+          ...preference,
+          evidenceRefs: sanitizeEvidenceRefs(preference.evidenceRefs, allowedEvidenceIds)
+        })),
         successCriteria: parsed.data.successCriteria,
         confidence: parsed.data.confidence,
         ...(parsed.data.autonomyLevel === undefined ? {} : { autonomyLevel: parsed.data.autonomyLevel }),
@@ -79,23 +92,98 @@ export function createIntentUnderstanding(options: IntentUnderstandingOptions = 
   };
 }
 
-function normalizeField(field: ExtractedField): IntentField {
+async function structuredExtraction(
+  provider: StructuredModelProvider,
+  input: UserMessage,
+  context: IntentContext,
+  fallback: z.input<typeof IntentExtractionSchema>,
+  runtime?: IntentResolutionRuntimeContext
+): Promise<unknown> {
+  if (runtime?.signal.aborted) return fallback;
+  try {
+    const result = await provider.generateStructured({
+      system: INTENT_SYSTEM_PROMPT,
+      user: JSON.stringify({
+        message: input.text,
+        context: projectIntentContext(context),
+        runtime: { executionEpoch: runtime?.executionEpoch ?? 0 }
+      }),
+      schema: IntentExtractionSchema,
+      jsonExample: INTENT_JSON_EXAMPLE
+    });
+    return IntentExtractionSchema.safeParse(result).success ? result : fallback;
+  } catch {
+    return fallback;
+  }
+}
+
+const INTENT_SYSTEM_PROMPT = [
+  "你是招聘申请工作台的意图理解器。",
+  "把用户消息转换成严格 JSON；只选择给定的 primaryGoal/subGoals 枚举。",
+  "区分分析、匹配、准备、填写、核验和提交意图；如果用户要求提交，仍必须保留人工确认约束。",
+  "实体、约束和偏好只能引用用户消息或 context 中的候选 ID；无法确认的内容使用 model_inference 且 requiresConfirmation=true。",
+  "evidenceRefs 只能使用 context.evidenceRefs 中的 id；不要输出凭证、token、DOM、HTML 或表单值。",
+  "只返回 JSON，不要解释。"
+].join("\n");
+
+const INTENT_JSON_EXAMPLE = {
+  primaryGoal: "fill_application",
+  subGoals: ["prepare_application", "fill_application", "verify_application", "request_human_approval"],
+  entities: {
+    company: {
+      value: "company-id-or-name",
+      source: "user_explicit",
+      confidence: 1,
+      evidenceRefs: [],
+      requiresConfirmation: false
+    }
+  },
+  constraints: [],
+  preferences: [],
+  successCriteria: [{ id: "application_ready", description: "完成填写并在提交前复核", required: true }],
+  confidence: 0.8,
+  autonomyLevel: "execute_with_approval",
+  evidenceRefs: []
+};
+
+function projectIntentContext(context: IntentContext): Record<string, unknown> {
+  return {
+    availableJobs: context.availableJobs.slice(0, 100).map(({ id, label }) => ({ id, label })),
+    availableResumes: context.availableResumes.slice(0, 100).map(({ id, label }) => ({ id, label })),
+    evidenceRefs: (context.evidenceRefs ?? []).slice(0, 100).map(({ id, kind }) => ({ id, kind })),
+    externalContent: (context.externalContent ?? []).slice(0, 10).map((content) => content.slice(0, 4_000)),
+    previousIntent: context.previousIntent === undefined
+      ? undefined
+      : {
+          primaryGoal: context.previousIntent.primaryGoal,
+          subGoals: context.previousIntent.subGoals,
+          confidence: context.previousIntent.confidence
+        }
+  };
+}
+
+function normalizeField(field: ExtractedField, allowedEvidenceIds: ReadonlySet<string>): IntentField {
   const source: IntentValueSource = field.source ?? "model_inference";
   return {
     value: field.value,
     source,
     confidence: field.confidence ?? (source === "user_explicit" ? 1 : 0.7),
-    evidenceRefs: field.evidenceRefs ?? [],
+    evidenceRefs: sanitizeEvidenceRefs(field.evidenceRefs ?? [], allowedEvidenceIds),
     requiresConfirmation: field.requiresConfirmation ?? source === "model_inference"
   };
 }
 
+function sanitizeEvidenceRefs(values: readonly string[], allowedEvidenceIds: ReadonlySet<string>): string[] {
+  return [...new Set(values.filter((value) => allowedEvidenceIds.has(value)))].slice(0, 100);
+}
+
 function deterministicExtraction(text: string): z.input<typeof IntentExtractionSchema> {
   const normalized = text.trim();
-  const isApplication = /投|申请|应聘|投递/u.test(normalized);
+  const isFill = /填写|填表|申请表/u.test(normalized);
+  const isApplication = /投|申请|应聘|投递/u.test(normalized) || isFill;
   const isSubmit = /提交|直接投/u.test(normalized) && !/提交前.*确认|确认.*提交/u.test(normalized);
   const primaryGoal = isApplication
-    ? (isSubmit ? "submit_application" : "prepare_application")
+    ? (isSubmit ? "submit_application" : isFill && !/投|申请|应聘|投递/u.test(normalized) ? "fill_application" : "prepare_application")
     : /简历.*(分析|解析)|分析.*简历/u.test(normalized)
       ? "analyze_resume"
       : /岗位.*(分析|理解)|分析.*岗位/u.test(normalized)

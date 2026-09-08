@@ -4,6 +4,13 @@
 
 **Goal:** 将岗位推荐和受控投递统一到桌面端对话首页，同时保留岗位匹配、投递审核和任务详情页作为可深入操作的工作台。
 
+## Execution Note (2026-09-01)
+
+- 根据后续产品确认，左侧导航不再提供独立的“岗位推荐/我的岗位”入口；岗位推荐和受控投递从对话内触发，岗位匹配深链仍保留。
+- Task 7 的实现补充了 Tavily Remote MCP 招聘入口发现，以及百度官方根入口到校招岗位列表的归一化。
+- 企业账号绑定、企业招聘状态跟踪、状态轮询、Webhook、通知和状态推送仍明确排除在本期范围之外。
+- 计划中的任务提交步骤已由当前分支历史中的 chat-first 实现提交完成；本次入口修复和回归报告修正保留在当前工作区，未单独创建提交。
+
 **Architecture:** 新增 Conversation Graph 作为对话入口，负责加载结构化上下文、解析受限意图、解析真实岗位/任务 ID、执行权限检查并调用已有岗位匹配和投递服务。对话消息保存到 Conversation Store，流程中间状态保存到 LangGraph Checkpoint，脱敏决策路径通过现有 TraceSink 和 LangSmith outbox 记录；三者不互相替代。前端以 ChatHome 为主入口，通过 typed card 连接 JobMatchSession 和 ApplicationTask，副作用操作必须经过显式确认，最终提交工具始终不可用。
 
 **Tech Stack:** React 19, React Router, Fastify, TypeScript, SQLite/better-sqlite3, Zod, LangGraph, LangGraph SQLite Checkpoint, TraceSink, LangSmith outbox, Vitest, Testing Library, Playwright.
@@ -66,7 +73,7 @@ Modify:
 - `ConversationIntent.kind` is one of `list_recommendations`, `show_recommendation`, `start_application`, `show_application_task`, `list_application_tasks`, `start_application_and_show_status`, `help`, `unknown`.
 - `ConversationTarget` is `{ kind: "recommendation" | "task" | "job_match_session"; id?: string; ordinal?: number }`.
 
-- [ ] **Step 1: Write the failing contract tests**
+- [x] **Step 1: Write the failing contract tests**
 
 ```typescript
 it("accepts only bounded conversation intents", () => {
@@ -87,13 +94,13 @@ it("rejects unbounded message input", () => {
 });
 ```
 
-- [ ] **Step 2: Run the contract test and verify it fails**
+- [x] **Step 2: Run the contract test and verify it fails**
 
 Run: `corepack pnpm --filter @resume/contracts test -- conversation.test.ts`
 
 Expected: FAIL because `conversation.ts` and the schemas do not exist.
 
-- [ ] **Step 3: Implement strict schemas and tables**
+- [x] **Step 3: Implement strict schemas and tables**
 
 Implement `ConversationCardSchema` as a discriminated union with only these card types:
 
@@ -117,13 +124,13 @@ conversationContexts: sessionId, version, contextJson, updatedAt
 
 Use foreign keys, unique `(sessionId, sequence)`, JSON validity checks and indexes on `sessionId`.
 
-- [ ] **Step 4: Run the tests and typecheck**
+- [x] **Step 4: Run the tests and typecheck**
 
 Run: `corepack pnpm --filter @resume/contracts test -- conversation.test.ts` and `corepack pnpm --filter @resume/contracts typecheck`
 
 Expected: PASS with no schema type errors.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add packages/contracts/src/conversation.ts packages/contracts/src/index.ts apps/api/src/db/schema.ts packages/contracts/src/conversation.test.ts
@@ -146,7 +153,7 @@ git commit -m "feat: add conversation contracts and persistence schema"
 - `getContext(id: string): ConversationContext`
 - `updateContext(id: string, expectedVersion: number, next: ConversationContext): ConversationContext`
 
-- [ ] **Step 1: Write failing repository tests**
+- [x] **Step 1: Write failing repository tests**
 
 ```typescript
 it("appends messages in sequence and rejects stale writers", () => {
@@ -166,17 +173,17 @@ it("updates structured context with optimistic versioning", () => {
 });
 ```
 
-- [ ] **Step 2: Run the repository tests and verify failure**
+- [x] **Step 2: Run the repository tests and verify failure**
 
 Run: `corepack pnpm --filter @resume/api test -- conversation-repository.test.ts`
 
 Expected: FAIL because the repository factory and typed methods do not exist.
 
-- [ ] **Step 3: Add the migration DDL and implement transactional repository methods**
+- [x] **Step 3: Add the migration DDL and implement transactional repository methods**
 
 Add the three `CREATE TABLE IF NOT EXISTS` statements and indexes to `apps/api/src/db/migrate.ts`. Add a `migrateDatabase(database); migrateDatabase(database);` assertion to `apps/api/src/db/migrate.test.ts`. Use prepared statements and a single SQLite transaction for message append plus session `updated_at`. Read the next sequence from the database, compare it to `expectedSequence`, and throw `conversation_sequence_conflict` on mismatch. Update context only when `expectedVersion` equals the stored version. Parse all JSON through the contracts before returning it.
 
-- [ ] **Step 4: Verify restart semantics**
+- [x] **Step 4: Verify restart semantics**
 
 Extend the test to close and reopen the same SQLite file, then assert that messages and context are still readable and sequence continues from the stored value.
 
@@ -184,7 +191,7 @@ Run: `corepack pnpm --filter @resume/api test -- conversation-repository.test.ts
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
   git add apps/api/src/conversations/conversation-repository.ts apps/api/src/conversations/conversation-repository.test.ts apps/api/src/db/migrate.ts apps/api/src/db/migrate.test.ts
@@ -206,7 +213,7 @@ git commit -m "feat: persist conversation history and structured context"
 - `createConversationGraph(dependencies): CompiledStateGraph`
 - Graph nodes: `load_context`, `classify_intent`, `resolve_target`, `policy_gate`, `execute_read`, `prepare_side_effect`, `persist_turn`.
 
-- [ ] **Step 1: Write failing tool and graph tests**
+- [x] **Step 1: Write failing tool and graph tests**
 
 ```typescript
 it("does not expose arbitrary browser operations", () => {
@@ -232,17 +239,17 @@ it("executes a read-only status query without confirmation", async () => {
 });
 ```
 
-- [ ] **Step 2: Run the graph tests and verify failure**
+- [x] **Step 2: Run the graph tests and verify failure**
 
 Run: `corepack pnpm --filter @resume/api test -- conversation-graph.test.ts`
 
 Expected: FAIL because the registry and graph are not present.
 
-- [ ] **Step 3: Implement the bounded tool registry**
+- [x] **Step 3: Implement the bounded tool registry**
 
 Register only typed read and task-creation tools. `create_application_task` may create a task and hand it to the existing application service, but no tool may invoke a final submit command, arbitrary Playwright method, arbitrary URL, or raw SQL. Tool inputs must be parsed by Zod before execution; tool outputs must be converted to `ConversationCard` references.
 
-- [ ] **Step 4: Implement the LangGraph nodes and policy gate**
+- [x] **Step 4: Implement the LangGraph nodes and policy gate**
 
 `classify_intent` calls the existing structured model provider when configured and validates its output. On provider failure, use a deterministic fallback for the supported Chinese command patterns and return `unknown` for anything else. `resolve_target` maps `ordinal` to `recentPostingIds` and loads the actual `JobMatchResult` or `ApplicationTask`; missing or ambiguous targets become a user-facing clarification response. `policy_gate` routes reads directly and turns `start_application` into an interrupt/confirmation state.
 
@@ -258,17 +265,17 @@ The combined command is handled as one intent envelope:
 
 After confirmation, create the task idempotently, update `activeApplicationTaskId`, and return the task card. The existing application graph remains responsible for observation, filling, readback, challenge interruption and review lock.
 
-- [ ] **Step 5: Emit local trace and LangSmith-safe events**
+- [x] **Step 5: Emit local trace and LangSmith-safe events**
 
 For each node and tool call, write `traceId`, `conversationId`, `nodeName`, `toolName`, `decision`, `confidence`, `durationMs`, `errorCode` and bounded reason codes to `TraceSink`. Reuse the existing LangSmith outbox projector; never export text, prompts, evidence quotes, DOM, form values, URLs or secrets.
 
-- [ ] **Step 6: Run focused tests and typecheck**
+- [x] **Step 6: Run focused tests and typecheck**
 
 Run: `corepack pnpm --filter @resume/api test -- conversation-graph.test.ts agent/graph-service.test.ts agent/langsmith-exporter.test.ts` and `corepack pnpm --filter @resume/api typecheck`
 
 Expected: PASS; a LangSmith timeout or exporter failure does not change the graph response.
 
-- [ ] **Step 7: Commit**
+- [x] **Step 7: Commit**
 
 ```bash
 git add apps/api/src/conversations apps/api/src/agent/state.ts
@@ -289,7 +296,7 @@ git commit -m "feat: route bounded conversation intents through LangGraph"
 - `POST /api/conversations/:id/messages` body `{ text: string }` -> `ConversationTurnResponse`
 - `POST /api/conversations/:id/confirm` body `{ confirmationId: string; approved: boolean }` -> `ConversationTurnResponse`
 
-- [ ] **Step 1: Write failing Fastify route tests**
+- [x] **Step 1: Write failing Fastify route tests**
 
 ```typescript
 it("rejects oversized and malformed message bodies", async () => {
@@ -312,17 +319,17 @@ it("requires the confirmation token for task creation", async () => {
 });
 ```
 
-- [ ] **Step 2: Run route tests and verify failure**
+- [x] **Step 2: Run route tests and verify failure**
 
 Run: `corepack pnpm --filter @resume/api test -- conversation-routes.test.ts`
 
 Expected: FAIL because the routes are not registered.
 
-- [ ] **Step 3: Implement service and routes**
+- [x] **Step 3: Implement service and routes**
 
 Register the repository, graph and existing domain services in `AppDependencies`. Route handlers validate bodies with contracts, return `400` for schema violations, `404` for unknown conversations, `409` for stale confirmation/context versions and `503` only when a required domain service is unavailable. Do not expose raw model errors.
 
-- [ ] **Step 4: Verify idempotency and recovery**
+- [x] **Step 4: Verify idempotency and recovery**
 
 Use a request id or graph thread id derived from `conversationId` plus message sequence. Replaying the same message sequence returns the stored response rather than creating a second application task. A confirmation resumes the same checkpoint and cannot be replayed after it is consumed.
 
@@ -330,7 +337,7 @@ Run: `corepack pnpm --filter @resume/api test -- conversation-routes.test.ts con
 
 Expected: PASS.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/api/src/conversations apps/api/src/app.ts
@@ -355,7 +362,7 @@ git commit -m "feat: expose conversation session APIs"
 - `ConversationApi.send(id: string, text: string): Promise<ConversationTurnResponse>`
 - `ConversationApi.confirm(id: string, confirmationId: string, approved: boolean): Promise<ConversationTurnResponse>`
 
-- [ ] **Step 1: Write failing UI tests**
+- [x] **Step 1: Write failing UI tests**
 
 ```tsx
 it("renders history and sends a bounded message", async () => {
@@ -375,29 +382,29 @@ it("requires explicit approval before creating a task", async () => {
 });
 ```
 
-- [ ] **Step 2: Run UI tests and verify failure**
+- [x] **Step 2: Run UI tests and verify failure**
 
 Run: `corepack pnpm --filter @resume/web test -- conversation/api.test.ts conversation/ChatHome.test.tsx`
 
 Expected: FAIL because the conversation components do not exist.
 
-- [ ] **Step 3: Implement API parsing and chat components**
+- [x] **Step 3: Implement API parsing and chat components**
 
 On first load create or reuse a conversation session, then load messages and context summary. Keep `messages`, `pendingConfirmation`, `sending` and `error` as separate local states. Render recommendation cards with “查看匹配依据”和“开始投递”; render task cards with “打开投递任务”. The card callbacks only navigate or call the typed conversation API.
 
 The composer must set `maxLength={500}`, show the remaining count, disable send for blank text or while a request is in flight, and display server validation errors without echoing raw model output.
 
-- [ ] **Step 4: Implement blue-white desktop layout**
+- [x] **Step 4: Implement blue-white desktop layout**
 
 Add a fixed-width left navigation column, flexible center message column and optional right context column. Use stable card dimensions, existing Lucide icons, restrained blue/white/gray colors and no mobile-specific layout. Confirmation cards must be visually distinct from ordinary assistant messages and must expose accessible button names.
 
-- [ ] **Step 5: Run focused tests and build**
+- [x] **Step 5: Run focused tests and build**
 
 Run: `corepack pnpm --filter @resume/web test -- conversation/api.test.ts conversation/ChatHome.test.tsx` and `corepack pnpm --filter @resume/web build`
 
 Expected: PASS and a successful Vite build.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add apps/web/src/conversation apps/web/src/styles.css
@@ -418,7 +425,7 @@ git commit -m "feat: add desktop conversation home"
 - Legacy query values `apply` and `reviews` normalize to `jobs` and `applications`.
 - Existing deep routes remain unchanged.
 
-- [ ] **Step 1: Write failing navigation tests**
+- [x] **Step 1: Write failing navigation tests**
 
 ```tsx
 it("opens chat as the default and keeps domain workbenches accessible", async () => {
@@ -436,25 +443,25 @@ it("maps legacy views without breaking old links", async () => {
 });
 ```
 
-- [ ] **Step 2: Run tests and verify failure**
+- [x] **Step 2: Run tests and verify failure**
 
 Run: `corepack pnpm --filter @resume/web test -- workspace/ProfileApplicationWorkspace.test.tsx router.test.tsx`
 
 Expected: FAIL because the default view and navigation labels are still the old workspace layout.
 
-- [ ] **Step 3: Implement navigation normalization and composition**
+- [x] **Step 3: Implement navigation normalization and composition**
 
 Make `/` render `ChatHome` by default. The “我的岗位” view contains the existing matching entry and deep session route. The “投递进度” view contains the existing review inbox and links to `/applications/:taskId`. The “我的简历” view renders `ProfilePage`. Keep `/applications/new?` redirecting to the jobs/application entry as it currently does.
 
 Add `conversationApi` injection to `AppRouter` with a default `createConversationApi()`. Pass card callbacks from `ChatHome` to `navigate(`/job-match-sessions/${sessionId}`)` and `navigate(`/applications/${taskId}`)`.
 
-- [ ] **Step 4: Verify old and new routes**
+- [x] **Step 4: Verify old and new routes**
 
 Run: `corepack pnpm --filter @resume/web test -- workspace/ProfileApplicationWorkspace.test.tsx router.test.tsx apps/web/src/applications/ApplicationTaskPage.test.tsx`
 
 Expected: PASS; the old deep task/session routes still render their existing pages and event streams.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/web/src/workspace apps/web/src/router.tsx apps/web/src/workspace/*.test.tsx apps/web/src/router.test.tsx
@@ -476,7 +483,7 @@ git commit -m "feat: make conversation the primary workspace entry"
 - The task card carries `taskId`, display state and target URL only after the domain service validates the URL.
 - Confirmation response carries a consumed `confirmationId` and cannot be reused.
 
-- [ ] **Step 1: Write failing integration tests**
+- [x] **Step 1: Write failing integration tests**
 
 ```typescript
 it("resolves the first recommendation to a real result before creating a task", async () => {
@@ -499,27 +506,27 @@ it("returns a retryable card when the browser worker is unavailable", async () =
 });
 ```
 
-- [ ] **Step 2: Run integration tests and verify failure**
+- [x] **Step 2: Run integration tests and verify failure**
 
 Run: `corepack pnpm --filter @resume/api test -- conversation-e2e.test.ts`
 
 Expected: FAIL until conversation context, existing job result conversion and application task creation are wired together.
 
-- [ ] **Step 3: Implement result-to-task handoff**
+- [x] **Step 3: Implement result-to-task handoff**
 
 Use the existing job-match selection guard and `createFromJob` idempotency path. Store only the selected result ID, posting content hash and resulting task ID in context. Do not reconstruct a job from assistant text. A stale result returns a conflict card linking to the existing job match session for refresh.
 
-- [ ] **Step 4: Implement failure mapping**
+- [x] **Step 4: Implement failure mapping**
 
 Map domain errors to bounded Chinese messages and recovery actions: missing context -> open jobs, stale result -> refresh matching, worker unavailable -> open task/retry, challenge -> open manual takeover, policy rejection -> explain that submission is locked. Preserve the original error code in TraceSink only.
 
-- [ ] **Step 5: Run browser-level verification**
+- [x] **Step 5: Run browser-level verification**
 
 Run: `corepack pnpm test:e2e -- --grep "conversation|job match|application task"`
 
 Expected: the browser opens on the chat home, creates a recommendation session through the existing flow, shows a confirmation card for task creation, and opens the existing task workbench after confirmation. No test may click an automatic final-submit control because none is exposed.
 
-- [ ] **Step 6: Commit**
+- [x] **Step 6: Commit**
 
 ```bash
 git add apps/api/src/conversations apps/web/src/conversation
@@ -534,7 +541,7 @@ git commit -m "feat: connect chat recommendations to controlled application task
 - Create: `apps/api/src/conversations/conversation-observability.test.ts`
 - Modify: `docs/testing/` with a short chat flow regression report.
 
-- [ ] **Step 1: Write failing privacy tests**
+- [x] **Step 1: Write failing privacy tests**
 
 ```typescript
 it("rejects conversation content and secrets from LangSmith projection", () => {
@@ -548,17 +555,17 @@ it("rejects conversation content and secrets from LangSmith projection", () => {
 });
 ```
 
-- [ ] **Step 2: Run privacy tests and verify failure**
+- [x] **Step 2: Run privacy tests and verify failure**
 
 Run: `corepack pnpm --filter @resume/api test -- conversation-observability.test.ts`
 
 Expected: FAIL if the projector accepts fields outside the existing safe allowlist.
 
-- [ ] **Step 3: Implement observability assertions**
+- [x] **Step 3: Implement observability assertions**
 
 Record node/tool parentage, intent kind, target kind, confidence bucket, result count, task state, duration and bounded error code. Keep message body and model prompt local. Ensure LangSmith exporter remains asynchronous and its timeout, rate limit, duplicate delivery and dead-letter paths do not alter the conversation response.
 
-- [ ] **Step 4: Run the complete verification gate**
+- [x] **Step 4: Run the complete verification gate**
 
 Run:
 
@@ -571,7 +578,7 @@ corepack pnpm test:e2e -- --grep "conversation|job match|application task"
 
 Expected: all commands exit with code 0. Record the actual test counts and any environment-dependent skips in `docs/testing/2026-08-22-chat-first-workspace-regression.md`; do not invent performance or accuracy metrics.
 
-- [ ] **Step 5: Commit**
+- [x] **Step 5: Commit**
 
 ```bash
 git add apps/api/src/conversations apps/api/src/agent apps/web/src/conversation docs/testing

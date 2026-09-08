@@ -10,7 +10,7 @@ import { z } from "zod";
 import type { TavilyRemoteMcpConfig } from "../config.js";
 import { validatePublicHttpsUrl, type HostnameResolver } from "./public-https-url.js";
 
-const TAVILY_SEARCH_TOOL = "tavily-search" as const;
+const TAVILY_SEARCH_TOOL = "tavily_search" as const;
 const MAX_REMOTE_RESULTS = 5;
 const MAX_SAFE_CANDIDATES = 3;
 const MAX_TEXT_CONTENT_BYTES = 256 * 1024;

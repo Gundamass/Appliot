@@ -1,5 +1,6 @@
 import type { ConversationJobMatchAction } from "@resume/contracts";
 import type { JobMatchSession } from "../job-matching/api.js";
+import { createJobMatchActionKey } from "./job-match-action-key.js";
 
 export interface ConversationJobFiltersProps {
   conversationId?: string;
@@ -73,7 +74,7 @@ export function ConversationJobFilters({ conversationId, session, onAction, onAd
             sessionId: session.id,
             action: "confirm_filters",
             sessionVersion: session.version,
-            idempotencyKey: actionKey("confirm_filters", session.version),
+            idempotencyKey: createJobMatchActionKey(session.id, "confirm_filters", session.version),
             expectation
           })}
         >
@@ -87,7 +88,7 @@ export function ConversationJobFilters({ conversationId, session, onAction, onAd
             sessionId: session.id,
             action: "adjust_filters",
             sessionVersion: session.version,
-            idempotencyKey: actionKey("adjust_filters", session.version),
+            idempotencyKey: createJobMatchActionKey(session.id, "adjust_filters", session.version),
             expectation
           })}
         >
@@ -96,10 +97,6 @@ export function ConversationJobFilters({ conversationId, session, onAction, onAd
       </div>
     </section>
   );
-}
-
-function actionKey(action: string, version: number): string {
-  return `inline-job-match:${action}:${version}`;
 }
 
 function criterionLabel(kind: string): string {

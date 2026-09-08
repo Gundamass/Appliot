@@ -13,7 +13,7 @@ const config: TavilyRemoteMcpConfig = {
 };
 
 describe("Tavily Remote MCP recruitment search", () => {
-  it("calls only tavily-search with fixed privacy-preserving parameters", async () => {
+  it("calls only tavily_search with fixed privacy-preserving parameters", async () => {
     const callTool = vi.fn(async () => ({ content: [{
       type: "text",
       text: JSON.stringify({
@@ -35,7 +35,7 @@ describe("Tavily Remote MCP recruitment search", () => {
         query: "百度 校园招聘 招聘 官网",
         candidates: [{ source: "tavily", domain: "talent.baidu.com" }]
       });
-    expect(callTool).toHaveBeenCalledWith("tavily-search", {
+    expect(callTool).toHaveBeenCalledWith("tavily_search", {
       query: "百度 校园招聘 招聘 官网",
       search_depth: "basic",
       topic: "general",

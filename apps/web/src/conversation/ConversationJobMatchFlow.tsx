@@ -3,6 +3,7 @@ import type { JobMatchSession } from "../job-matching/api.js";
 import { ConversationJobCards } from "./ConversationJobCards.js";
 import { ConversationJobFilters } from "./ConversationJobFilters.js";
 import type { ConversationProcessGroup } from "./conversation-process-model.js";
+import { createJobMatchActionKey } from "./job-match-action-key.js";
 
 export interface ConversationJobMatchFlowProps {
   conversationId?: string;
@@ -109,7 +110,7 @@ function pauseAction(conversationId: string, session: JobMatchSession): Conversa
     sessionId: session.id,
     action: "pause",
     sessionVersion: session.version,
-    idempotencyKey: actionKey("pause", session.version)
+    idempotencyKey: createJobMatchActionKey(session.id, "pause", session.version)
   };
 }
 
@@ -119,12 +120,8 @@ function continueAction(conversationId: string, session: JobMatchSession): Conve
     sessionId: session.id,
     action: "continue",
     sessionVersion: session.version,
-    idempotencyKey: actionKey("continue", session.version)
+    idempotencyKey: createJobMatchActionKey(session.id, "continue", session.version)
   };
-}
-
-function actionKey(action: string, version: number): string {
-  return `inline-job-match:${action}:${version}`;
 }
 
 function dispatch(onAction: ConversationJobMatchFlowProps["onAction"], action: ConversationJobMatchAction): void {

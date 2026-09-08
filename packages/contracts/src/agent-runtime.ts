@@ -133,6 +133,8 @@ export const RuntimeCheckpointSchema = z.object({
   currentStepId: z.string().min(1).max(128).optional(),
   intentRef: z.string().min(1).max(256).optional(),
   planRef: z.string().min(1).max(256).optional(),
+  /** Opaque reference to the redacted request context kept outside the checkpoint. */
+  requestContextRef: z.string().min(1).max(256).optional(),
   phase: z.enum(["intent", "plan", "dispatch", "wait", "inspect", "human_gate", "complete", "blocked", "fail", "cancelled"]).optional(),
   memoryRefs: z.array(MemoryRefSchema).max(200),
   evidenceRefs: z.array(EvidenceRefSchema).max(500),

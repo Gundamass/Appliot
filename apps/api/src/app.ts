@@ -27,6 +27,9 @@ import type { ConversationService } from "./conversations/conversation-service.j
 import type { ConversationProcessEventBus } from "./conversations/conversation-events.js";
 import { registerConversationJobMatchRoutes } from "./conversations/conversation-job-match-routes.js";
 import type { ConversationJobMatchService } from "./conversations/conversation-job-match-service.js";
+import type { AgentRuntime } from "./agent/runtime/agent-runtime.js";
+import { registerAgentRuntimeRoutes } from "./agent/events/routes.js";
+import type { AgentEventTraceSink } from "./agent/events/trace-sink.js";
 
 export type { AdapterHealthRegistry } from "./health/adapter-health.js";
 
@@ -49,6 +52,8 @@ export interface AppDependencies {
   conversationJobMatchService?: ConversationJobMatchService;
   conversationProcessEvents?: ConversationProcessEventBus;
   conversationSseHeartbeatMs?: number;
+  agentRuntime?: AgentRuntime;
+  agentEventTraceSink?: AgentEventTraceSink;
   taskEvents?: TaskEventBus;
   applicationSseHeartbeatMs?: number;
   close?(): void | Promise<void>;
@@ -112,6 +117,12 @@ export async function createApp(dependencies: CreateAppDependencies) {
   }
   if (dependencies.conversationJobMatchService) {
     registerConversationJobMatchRoutes(app, { service: dependencies.conversationJobMatchService });
+  }
+  if (dependencies.agentRuntime && dependencies.agentEventTraceSink) {
+    registerAgentRuntimeRoutes(app, {
+      runtime: dependencies.agentRuntime,
+      events: dependencies.agentEventTraceSink
+    });
   }
   return app;
 }

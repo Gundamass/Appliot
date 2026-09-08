@@ -287,6 +287,20 @@ describe("BrowserSessionManager 页面生命周期", () => {
     await manager.stop();
   });
 
+  it("creates a fresh job observer for a new task after releasing the previous task", async () => {
+    const manager = createManager(new FakeContext(new FakePage("initial")));
+    await manager.start(approvalKey);
+    await manager.observeJob("jm-1");
+    const observersBeforeRelease = runtime.jobObserverPages.length;
+
+    await manager.releaseTask("jm-1");
+    await manager.open("jm-2", "https://jobs.example.test/list");
+    await expect(manager.observeJob("jm-2")).resolves.toMatchObject({ ownerId: "jm-2" });
+
+    expect(runtime.jobObserverPages).toHaveLength(observersBeforeRelease + 1);
+    await manager.stop();
+  });
+
   it("advances the task epoch before invalidating executor state", async () => {
     const initial = new FakePage("initial");
     const manager = createManager(new FakeContext(initial));

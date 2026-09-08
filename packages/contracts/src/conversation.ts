@@ -13,6 +13,13 @@ import {
 
 const IdentifierSchema = z.string().min(1).max(256);
 const TimestampSchema = z.string().datetime({ offset: true });
+const ApplicationHttpsUrlSchema = z.string().url().max(2_048).refine((value) => {
+  try {
+    return new URL(value).protocol === "https:";
+  } catch {
+    return false;
+  }
+}, "https_url_required");
 
 export const ConversationIntentKindSchema = z.enum([
   "list_recommendations",
@@ -31,7 +38,8 @@ export const ConversationTargetKindSchema = z.enum([
   "recommendation",
   "task",
   "job_match_session",
-  "recruitment_site"
+  "recruitment_site",
+  "application_url"
 ]);
 
 export const ConversationTargetSchema = z.object({
@@ -39,14 +47,22 @@ export const ConversationTargetSchema = z.object({
   id: IdentifierSchema.optional(),
   ordinal: z.number().int().positive().max(100).optional(),
   company: RecruitmentCompanySchema.optional(),
-  recruitmentType: RecruitmentSearchTypeSchema.optional()
+  recruitmentType: RecruitmentSearchTypeSchema.optional(),
+  url: ApplicationHttpsUrlSchema.optional()
 }).strict().superRefine((target, context) => {
   const hasRecruitmentFields = target.company !== undefined || target.recruitmentType !== undefined;
+  const hasApplicationUrl = target.url !== undefined;
   if (target.kind === "recruitment_site" && (target.company === undefined || target.recruitmentType === undefined)) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["company"], message: "recruitment_company_required" });
   }
   if (target.kind !== "recruitment_site" && hasRecruitmentFields) {
     context.addIssue({ code: z.ZodIssueCode.custom, path: ["company"], message: "recruitment_fields_not_allowed" });
+  }
+  if (target.kind === "application_url" && !hasApplicationUrl) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["url"], message: "application_url_required" });
+  }
+  if (target.kind !== "application_url" && hasApplicationUrl) {
+    context.addIssue({ code: z.ZodIssueCode.custom, path: ["url"], message: "application_url_not_allowed" });
   }
 });
 
@@ -82,6 +98,11 @@ const RecommendationConfirmationTargetSchema = z.object({
   postingContentHash: z.string().max(256).optional()
 }).strict();
 
+const ApplicationUrlTargetSchema = z.object({
+  kind: z.literal("application_url"),
+  url: ApplicationHttpsUrlSchema
+}).strict();
+
 const RecruitmentSiteChoicesTargetSchema = z.object({
   kind: z.literal("recruitment_site_choices"),
   company: RecruitmentCompanySchema,
@@ -114,6 +135,7 @@ const ConfirmationCardSchema = z.object({
   action: z.enum(["start_application", "confirm_recruitment_site", "request_job_recommendations"]),
   target: z.union([
     RecommendationConfirmationTargetSchema,
+    ApplicationUrlTargetSchema,
     RecruitmentSiteChoicesTargetSchema,
     RecruitmentSiteTargetSchema
   ])
@@ -127,7 +149,7 @@ export const ConversationCardSchema = z.union([
   ConfirmationCardSchema
 ]).superRefine((card, context) => {
   if (card.type !== "confirmation") return;
-  if (card.action === "start_application" && card.target.kind !== "recommendation") {
+  if (card.action === "start_application" && card.target.kind !== "recommendation" && card.target.kind !== "application_url") {
     context.addIssue({
       code: z.ZodIssueCode.custom,
       path: ["target", "kind"],
@@ -154,7 +176,7 @@ const StartApplicationConfirmationSchema = z.object({
   confirmationId: IdentifierSchema,
   action: z.literal("start_application"),
   sourceTurnSequence: z.number().int().positive().optional(),
-  target: RecommendationConfirmationTargetSchema
+  target: z.union([RecommendationConfirmationTargetSchema, ApplicationUrlTargetSchema])
 }).strict();
 
 const RecruitmentSiteChoicesConfirmationSchema = z.object({

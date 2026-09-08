@@ -1,0 +1,23 @@
+[
+  {
+    "caseId": "execution-stale-browser-observation",
+    "suiteVersion": "agent-execution-v1",
+    "privacy": "synthetic",
+    "fixtureRefs": ["snapshot:stale", "node:old"],
+    "expected": { "status": "blocked", "reason": "stale_observation" }
+  },
+  {
+    "caseId": "execution-conflicting-resume-facts",
+    "suiteVersion": "agent-execution-v1",
+    "privacy": "synthetic",
+    "fixtureRefs": ["document:hash-a", "fact:conflict-1"],
+    "expected": { "status": "interrupted", "reason": "ambiguous_fact" }
+  },
+  {
+    "caseId": "execution-readback-completed",
+    "suiteVersion": "agent-execution-v1",
+    "privacy": "synthetic",
+    "fixtureRefs": ["snapshot:current", "output:readback-1"],
+    "expected": { "status": "completed", "requiresHumanApproval": false }
+  }
+]

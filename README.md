@@ -1,54 +1,78 @@
-# 简历投递助手
+# 岗位投递助手
 
-一个面向个人使用的本地简历资料管理与投递辅助工具。
+一个面向个人使用的本地优先求职工作台。用户从对话开始说明目标公司或岗位，系统在用户确认的前提下发现校招官网、推荐匹配岗位，并通过受控浏览器协助完成招聘表单的中间填写和回读验证。
 
-用户可以导入 PDF 简历，审核系统提取的结构化资料，并通过带有规划、检索、验证、追问和修正步骤的 RAG 工作流为招聘表单准备答案。受控浏览器负责填写招聘网站的中间页面，并在最终提交前锁定任务。
+> 安全边界：系统不会点击“提交申请”“确认投递”“发送申请”等最终操作。登录、验证码、扫码、多因素认证和最终投递始终由用户在真实浏览器中完成。
 
-> 安全边界：自动化永远不能执行最终投递、确认申请或发送申请等终局操作。最终提交必须由用户在真实浏览器中亲自完成。
+> 当前的“投递进度”展示本地受控投递任务及对应招聘网站，不实现企业招聘结果、面试进度或 Offer 状态跟踪。
 
-## 当前状态
+## 实际界面
 
-目前已经完成基础阶段，包含本地 Web 界面、API 边界、PDF 处理流程、资料审核、RAG 决策和自我评价审核。
+以下截图来自本地运行的真实界面，使用中性示例数据采集，未展示个人简历内容。
 
-| 模块 | 状态 |
+### 对话优先工作台
+
+![对话首页与快速开始入口](docs/images/chat-home-quick-start.png)
+
+首页将岗位推荐和投递进度融入对话。刷新页面后会从 URL 和本地最近会话记录恢复对话上下文。
+
+### 公司名到校招官网候选
+
+![百度招聘入口候选与用户确认](docs/images/recruitment-entry-confirmation.png)
+
+输入“百度”后，后端通过 Tavily Remote MCP 搜索招聘入口候选；用户先选择可信的官网入口，系统才会继续询问是否进行岗位推荐。
+
+## 核心流程
+
+1. 在对话中输入“帮我投递百度”或从“岗位推荐”快速入口填写目标公司。
+2. 系统搜索该公司的招聘入口候选，明确展示域名、标题和摘要。
+3. 用户确认要使用的官网入口后，系统询问是否开始岗位推荐。
+4. 用户确认后，系统根据已确认的简历资料和求职偏好进行岗位提取、匹配和证据展示。
+5. 用户选择岗位后才创建受控投递任务；受控浏览器可填写普通字段、回读校验并在需要登录、补充资料或内容审核时暂停。
+6. 到达最终提交前，任务锁定为人工审核，用户自行完成真实网站上的最终投递。
+
+## 已实现能力
+
+| 能力 | 说明 |
 | --- | --- |
-| React 本地 Web 界面 | 已实现，可单独启动 |
-| PDF 原件本地留存 | 已实现 |
-| PDF 文本解析与 OCR 接口 | 已实现，支持通过 SSH 隧道连接远程 GPU OCR Worker |
-| 模型结构化提取接口 | 已实现，DeepSeek 与远程 Embedding 可由本地配置接入 |
-| 资料确认、修正和版本记录 | 已实现 |
-| RAG 规划、检索、验证、追问和修正 | 已实现 |
-| 岗位相关自我评价审核 | 已实现 |
-| 受控浏览器自动填写 | 已实现，包含页面观察、字段填写、回读验证和中间操作 |
-| 最终投递 | 明确禁止自动执行 |
+| 对话式工作台 | 蓝白风格的对话首页，包含岗位推荐、投递进度和简历资料三个入口。 |
+| 会话恢复 | URL `conversation` 参数和本地最近会话记录共同恢复刷新后的上下文；服务端错误不会误建新会话。 |
+| 官网发现 | 通过 Tavily Remote MCP 搜索公司校招/招聘官网候选，用户确认后才进入下一步。 |
+| 岗位匹配 | 提取岗位信息，结合候选人资料与求职偏好生成可核查的匹配结果、证据和缺口。 |
+| 受控投递 | 受控浏览器支持页面观察、字段填写、回读验证和合理的中间操作；不允许最终提交。 |
+| 人工审核 | 登录、验证码、资料缺失、内容微调和最终提交均可暂停到用户处理。 |
+| 简历资料库 | PDF 原件本地留存、文本/OCR 提取、结构化资料审核、修正和版本记录。 |
+| RAG 辅助 | 针对招聘字段进行规划、检索、验证、追问和修正；任务回答默认不泄漏到其他投递。 |
+| 本地运行 | API 仅监听回环地址；可通过 SSH 隧道使用远程 OCR 与 Embedding 服务。 |
 
-生产适配器由根目录 `.env.local` 配置。远程 OCR 与 Embedding 只监听服务器回环地址，本地通过受管 SSH 隧道访问，不直接暴露到局域网或公网。
+## 快速启动
 
-## 环境要求
+### 首次安装
 
-- Windows 10/11
-- Node.js `24.14.1` 或更高版本
-- Corepack
-- pnpm `10.13.1`（由 `packageManager` 字段指定）
-
-首次使用时，在项目根目录安装依赖：
+环境要求：Windows 10/11、Node.js `>=24.14.1`、Corepack。项目固定使用 pnpm `10.13.1`。
 
 ```powershell
 corepack pnpm install --frozen-lockfile
 ```
 
-## 长期运行与登录自启
+在根目录创建并维护被 Git 忽略的 `.env.local`。要启用公司招聘官网搜索，至少配置：
 
-推荐使用统一服务控制脚本。它会管理远程 OCR/Embedding、本地 SSH 隧道、API、受控浏览器 Worker和生产前端。
+```text
+TAVILY_API_KEY=<你的 Tavily API Key>
+```
 
-首次安装前需要满足：
+可选配置项：
 
-- `.env.local` 已配置 DeepSeek、OCR 与 Embedding 参数。
-- 当前用户可以无交互 SSH 登录远程 GPU 服务器。
-- 远程服务器已经部署 `resume-ai` 控制器和 Worker。
-- 已执行 `corepack pnpm install --frozen-lockfile`。
+```text
+TAVILY_MCP_ENDPOINT=https://mcp.tavily.com/mcp/
+TAVILY_MCP_TIMEOUT_MS=10000
+```
 
-首次安装：
+`TAVILY_API_KEY` 只在 API 进程内使用，不进入前端构建产物、数据库、审计事件或日志。
+
+### 一键启动全部服务
+
+首次使用远程 OCR/Embedding 时，先按实际服务器信息安装服务控制器：
 
 ```powershell
 .\scripts\service-control.ps1 install `
@@ -58,204 +82,89 @@ corepack pnpm install --frozen-lockfile
   -RemoteRoot "/home/远程用户名/resume-ai"
 ```
 
-该命令会构建生产产物、把非秘密远程连接信息写入被 Git 忽略的 `.runtime/services/service-config.json`，并注册当前用户的 `Appliot Services` 登录任务。受控浏览器依赖桌面会话，因此是在 Windows 用户登录后自启，而不是在尚未登录时启动。
-
-日常命令：
+日常启动、查看状态和停止：
 
 ```powershell
-.\scripts\service-control.ps1 status
-.\scripts\service-control.ps1 start
-.\scripts\service-control.ps1 stop
+corepack pnpm services:start
+corepack pnpm services:status
+corepack pnpm services:stop
+```
+
+已完成上述安装后，`services:start` 会受管启动前端、API、浏览器 Worker、本地 SSH 隧道及远程 OCR/Embedding 服务。受控浏览器依赖 Windows 桌面会话，因此在用户登录后运行。
+
+更多运维操作可直接使用服务控制脚本：
+
+```powershell
 .\scripts\service-control.ps1 restart
 .\scripts\service-control.ps1 logs
 .\scripts\service-control.ps1 uninstall
 ```
 
-`stop` 会停止前端、API、浏览器 Worker、SSH 隧道和远程 OCR/Embedding。`uninstall` 还会删除登录任务，但不会删除数据库、候选人档案、模型、配置或日志。
+`uninstall` 只移除登录任务，不会删除本地数据库、候选人资料、模型、配置或日志。
 
-守护器会检查进程存活和功能健康。API、前端或隧道退出后按退避策略恢复；远程 Worker 连续异常时先检查远程控制器，再执行受控重启。模型冷启动期间显示为启动中，不会反复重启。
+前端默认地址为 [http://127.0.0.1:5173](http://127.0.0.1:5173)，API 默认监听 `http://127.0.0.1:43120`。
 
-状态和日志位于：
+### 开发模式
 
-```text
-.runtime/services/runtime-state.json
-.runtime/services/logs/
-```
-
-日志会轮转且不记录 `.env.local` 内容、Authorization Token、SSH 私钥或请求正文。
-
-## 开发模式
-
-### 启动前端
-
-在项目根目录运行：
+也可以分别启动开发服务：
 
 ```powershell
 corepack pnpm --filter @resume/web dev --host 127.0.0.1
-```
-
-然后访问：
-
-```text
-http://127.0.0.1:5173
-```
-
-前端开发服务器会把 `/api` 请求转发到本机 API：
-
-```text
-http://127.0.0.1:43120
-```
-
-如果只启动前端，可以浏览界面，但涉及服务端的操作会提示请求失败。
-
-### 启动 API
-
-构建 API：
-
-```powershell
-corepack pnpm --filter @resume/api build
-```
-
-尝试启动 API：
-
-```powershell
 corepack pnpm --filter @resume/api start
 ```
 
-如果必需适配器配置不完整，启动命令会按设计退出，并显示：
-
-```text
-Local PDF and fact extraction dependencies must be configured before starting the API
-```
-
-## 长期运行故障排查
-
-- `status` 显示 SSH 隧道异常：检查网络、SSH Agent 和无交互登录；守护器会自动重连。
-- OCR 或 Embedding 长时间启动中：首次加载 GPU 模型可能需要较长时间，可通过 `logs` 查看远程控制日志。
-- API 启动失败：确认本机 Node.js 至少为 `24.14.1`，并检查 `.env.local` 和 `api.stderr.log`。
-- 前端端口不可用：检查 `5173` 是否被非 Appliot 进程占用；守护器不会盲目终止未知进程。
-- 执行 `stop` 后仍有异常：再次运行 `status`。控制脚本会在守护器已退出但仍有受管资源时启动一次清理流程。
-
-API 完成配置后只监听回环地址 `127.0.0.1:43120`，不会默认暴露到局域网或公网。
-
-## 已实现流程
-
-### PDF 简历导入
-
-1. 计算上传文件的 SHA-256 指纹。
-2. 在解析前检查是否已经成功导入过相同文件。
-3. 将 PDF 原件持久保存在本机。
-4. 按页提取 PDF 文本，对图片页使用 OCR 回退。
-5. 通过模型边界提取带页码和原文证据的结构化事实。
-6. 将事实标记为“待确认”，不会直接用于自动填写。
-
-即使解析、OCR 或模型提取失败，原始 PDF 仍会保留，并允许之后重试。
-
-### 资料审核
-
-- 查看按类别整理的简历资料。
-- 查看每项资料对应的 PDF 页码和原文证据。
-- 明确确认提取结果。
-- 修正错误内容并保留版本记录。
-- 未经确认的提取结果不能进入自动填写状态。
-
-### RAG 工作流
-
-每个招聘字段的处理包含以下可见步骤：
-
-1. 规划需要查询的资料来源和验证规则。
-2. 优先检索当前投递任务的回答，再检索长期个人资料。
-3. 检查证据覆盖、字段类型、选项和日期等约束。
-4. 资料不足或存在冲突时向用户追问。
-5. 将用户答案保存为当前任务的专属回答。
-6. 只有用户明确操作时，才将任务回答推广到长期个人资料。
-
-任务专属回答默认不会泄漏到其他投递任务。
-
-### 字段匹配与人工审核
-
-- 已知招聘字段优先使用字段目录和精确语义路径匹配。
-- 确定性规则未覆盖的空字段才进入语义检索，低置信度结果不会自动填写。
-- 任务工作台显示已填写、待审核、缺少资料和暂不支持的字段统计，并可展开查看匹配原因与支持证据。
-- 用户补充的答案默认只用于当前投递；只有用户明确勾选时，才会保存到长期候选人档案。
-- 系统只执行填写、校验和合理的中间操作，不会点击“提交申请”“发送申请”等终局操作。
-
-### 自我评价微调
-
-- 保存岗位描述作为当前任务的来源信息。
-- 基于原始自我评价和已有证据生成岗位微调稿。
-- 同时显示原文、微调稿、调整原因和支持证据。
-- 用户可以采用微调稿、编辑后采用，或继续使用原文。
-- 批准结果默认只属于当前任务。
-- 推广到长期资料是批准之后的独立操作。
-
-系统不会静默采用或推广生成内容。
+仅启动前端时可以查看界面；简历解析、官网搜索、岗位匹配和投递操作需要 API 与相应适配器可用。
 
 ## 测试与构建
 
-运行全部测试：
-
 ```powershell
+# 全部单元与集成测试
 corepack pnpm test
-```
 
-运行类型检查：
-
-```powershell
+# TypeScript 类型检查
 corepack pnpm typecheck
-```
 
-构建全部包：
-
-```powershell
+# 构建全部工作区包
 corepack pnpm build
+
+# Playwright 端到端测试
+corepack pnpm test:e2e
 ```
 
-自动化测试覆盖资料作用域隔离、PDF 导入与重试、RAG 决策、字段匹配、自我评价审核、受控浏览器填写和 API 构建产物启动等行为。
+测试覆盖会话恢复、官网候选确认、Tavily Remote MCP 协议边界、岗位匹配、资料作用域隔离、PDF/OCR、RAG 决策、受控浏览器填写和最终提交限制。
 
 ## 项目结构
 
 ```text
 apps/
-  api/                  Fastify 本地 API、SQLite 持久化和业务路由
-  web/                  React + Vite 本地 Web 界面
+  api/                  Fastify 本地 API、SQLite 持久化、对话与投递编排
+  web/                  React + Vite 对话优先工作台
 
 packages/
-  contracts/            共享 TypeScript 类型和 Zod 运行时契约
-  model-provider/       可替换的模型提供商接口
-  profile-domain/       PDF、OCR 和结构化资料提取领域逻辑
-  rag/                  规划、检索、验证、追问、修正和自我评价逻辑
+  contracts/            共享 TypeScript 类型与 Zod 契约
+  model-provider/       模型与远程 Embedding 提供商接口
+  profile-domain/       PDF、OCR、结构化资料提取与审核领域逻辑
+  rag/                  规划、检索、验证、追问、修正与自我评价逻辑
 
-docs/superpowers/
-  specs/                已确认的整体设计规格
-  plans/                分阶段实施计划
-
-tests/fixtures/         测试用 PDF 生成工具
+docs/images/            README 使用的真实本地功能截图
+docs/superpowers/       已确认的设计与实施计划
 ```
 
-## 数据与隐私
+## 数据与安全
 
-- 项目按单用户、本地优先方式设计。
-- 简历原件、结构化资料和任务回答保存在本机。
-- API 仅监听回环地址。
-- Web 不读取招聘网站 Cookie，也不保存招聘网站密码。
-- 登录、验证码、扫码和多因素认证必须由用户手动完成。
-- 系统不能生成没有证据支持的经历、技能、证书或资格。
+- 项目按单用户、本地优先方式设计；简历原件、结构化资料和任务回答保存于本机。
+- API 默认只监听 `127.0.0.1`，远程 OCR 与 Embedding 通过受管 SSH 隧道访问。
+- 系统不读取招聘网站 Cookie，不保存招聘网站密码。
+- 所有生成内容都必须有资料证据支持；资料不足或存在冲突时会追问或暂停。
+- 用户补充的任务回答默认只作用于当前投递，推广到长期资料需要独立确认。
+- 联网招聘搜索只返回候选；打开官网、开始岗位推荐、创建投递任务和最终提交均由用户显式确认。
 
-## 受控浏览器流程
+## 相关文档
 
-当前独立受控浏览器服务包括：
-
-- 启动或连接持久化 Chromium 会话。
-- 由用户手动完成招聘网站登录和验证。
-- 识别标准招聘表单及常见 ATS 组件。
-- 自动填写普通字段并回读验证。
-- 自动执行合理的中间保存和下一步操作。
-- 到达最终投递页面后进入锁定状态。
-- 从工具权限层彻底禁止自动点击最终提交。
-
-详细设计和实施计划见：
-
-- [`docs/superpowers/specs/2026-07-22-resume-application-assistant-design.md`](docs/superpowers/specs/2026-07-22-resume-application-assistant-design.md)
-- [`docs/superpowers/plans/2026-07-22-controlled-browser-automation.md`](docs/superpowers/plans/2026-07-22-controlled-browser-automation.md)
-- [`docs/superpowers/plans/2026-07-22-resume-assistant-integration.md`](docs/superpowers/plans/2026-07-22-resume-assistant-integration.md)
+- [Agent Runtime 架构说明](docs/architecture/agent-runtime.md)
+- [Agent Runtime、Supervisor 与意图理解实施计划](docs/superpowers/plans/2026-09-02-agent-runtime-supervisor-intent-plan.md)
+- [Agent Runtime、Supervisor 与意图理解设计](docs/superpowers/specs/2026-09-02-agent-runtime-supervisor-intent-design.md)
+- [Chat-first 工作台实施计划](docs/superpowers/plans/2026-08-22-chat-first-workspace.md)
+- [Tavily Remote MCP 招聘入口搜索实施计划](docs/superpowers/plans/2026-08-24-tavily-remote-mcp-recruitment-search.md)
+- [Tavily Remote MCP 设计](docs/superpowers/specs/2026-08-24-tavily-remote-mcp-recruitment-search-design.md)
+- [受控浏览器自动化计划](docs/superpowers/plans/2026-07-22-controlled-browser-automation.md)

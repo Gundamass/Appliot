@@ -1,6 +1,7 @@
 import { createHash } from "node:crypto";
 import {
   ConversationCardSchema,
+  JOB_RECOMMENDATION_LIMIT,
   RecruitmentSearchRequestSchema,
   RecruitmentSiteSearchResultSchema,
   VerifiedRecruitmentSiteSchema,
@@ -19,6 +20,7 @@ import type {
   JobMatchAggregate,
   JobMatchRepository
 } from "../job-matching/job-match-repository.js";
+import type { ConversationRepository } from "./conversation-repository.js";
 import { z } from "zod";
 
 const IdentifierSchema = z.string().min(1).max(256);
@@ -63,6 +65,7 @@ export interface ConversationToolResult {
 }
 
 export interface ConversationToolDependencies {
+  conversations: Pick<ConversationRepository, "linkJobMatchSession">;
   jobMatchRepository: Pick<JobMatchRepository, "get">;
   applicationTasks: Pick<ApplicationTaskRepository, "list" | "get" | "createFromJob">;
   applicationService?: Pick<ApplicationService, "start"> & Partial<Pick<ApplicationService, "state">>;
@@ -104,11 +107,22 @@ const ShowApplicationTaskInputSchema = z.object({
   taskId: IdentifierSchema
 }).strict();
 
-const CreateApplicationTaskInputSchema = z.object({
-  sessionId: IdentifierSchema,
-  resultId: IdentifierSchema,
-  postingContentHash: z.string().min(1).max(256)
-}).strict();
+const CreateApplicationTaskInputSchema = z.union([
+  z.object({
+    sessionId: IdentifierSchema,
+    resultId: IdentifierSchema,
+    postingContentHash: z.string().min(1).max(256)
+  }).strict(),
+  z.object({
+    applicationUrl: z.string().url().max(2_048).refine((value) => {
+      try {
+        return new URL(value).protocol === "https:";
+      } catch {
+        return false;
+      }
+    }, "https_url_required")
+  }).strict()
+]);
 
 export const DiscoverRecruitmentSiteInputSchema = z.object({
   company: z.string().trim().min(1).max(80),
@@ -197,7 +211,8 @@ function listRecommendations(
   const results = aggregate.results
     .filter((result) => !result.stale)
     .filter((result) => allowedPostingIds.size === 0 || allowedPostingIds.has(result.postingId))
-    .sort((left, right) => right.rankingScore - left.rankingScore || left.id.localeCompare(right.id));
+    .sort((left, right) => right.rankingScore - left.rankingScore || left.id.localeCompare(right.id))
+    .slice(0, JOB_RECOMMENDATION_LIMIT);
   return {
     cards: results.map((result) => recommendationCard(aggregate, result))
   };
@@ -233,6 +248,14 @@ async function createApplicationTask(
   context: ConversationToolContext,
   createTaskId: (conversationId: string, resultId: string) => string
 ): Promise<ConversationToolResult> {
+  if ("applicationUrl" in input) {
+    const task = dependencies.applicationTasks.createFromJob({
+      id: createTaskId(context.conversationId, input.applicationUrl),
+      applicationUrl: input.applicationUrl
+    });
+    startApplicationTask(dependencies, task);
+    return { cards: [taskCard(dependencies, task)], task };
+  }
   const aggregate = requireAggregate(dependencies, input.sessionId);
   const result = aggregate.results.find((candidate) => candidate.id === input.resultId);
   if (result === undefined) throw new Error("recommendation_not_found");
@@ -270,13 +293,7 @@ async function createApplicationTask(
     });
   }
 
-  if (dependencies.applicationService?.start !== undefined) {
-    try {
-      dependencies.applicationService.start({ taskId: task.id, applicationUrl: task.applicationUrl });
-    } catch (error) {
-      if (!isAlreadyStarted(error)) throw error;
-    }
-  }
+  startApplicationTask(dependencies, task);
 
   return {
     cards: [taskCard(dependencies, task)],
@@ -288,6 +305,15 @@ async function createApplicationTask(
       postingContentHash: result.postingContentHash
     }
   };
+}
+
+function startApplicationTask(dependencies: ConversationToolDependencies, task: StoredApplicationTask): void {
+  if (dependencies.applicationService?.start === undefined) return;
+  try {
+    dependencies.applicationService.start({ taskId: task.id, applicationUrl: task.applicationUrl });
+  } catch (error) {
+    if (!isAlreadyStarted(error)) throw error;
+  }
 }
 
 async function discoverRecruitmentSite(
@@ -318,10 +344,11 @@ async function createJobMatchSession(
     throw new Error("job_match_application_redirect");
   }
   const aggregate = created;
+  dependencies.conversations.linkJobMatchSession(context.conversationId, aggregate.id);
   const resultCards = aggregate.results
     .filter((result) => !result.stale)
     .sort((left, right) => right.rankingScore - left.rankingScore || left.id.localeCompare(right.id))
-    .slice(0, 18)
+    .slice(0, JOB_RECOMMENDATION_LIMIT)
     .map((result) => recommendationCard(aggregate, result));
   return {
     cards: [
@@ -347,7 +374,7 @@ function recommendationCard(aggregate: JobMatchAggregate, result: JobMatchResult
     resultId: result.id,
     title: posting.title,
     company: posting.organization,
-    score: result.rankingScore,
+    score: result.fitScore,
     evidenceCount: result.evidence.length,
     postingContentHash: result.postingContentHash
   });

@@ -67,6 +67,12 @@ export function jobExpectationSnapshot(
   };
 }
 
+export function isUnrestrictedLocationValue(value: string): boolean {
+  return new Set(["全国", "不限", "不限地区", "不限地点", "全国范围"]).has(
+    value.normalize("NFKC").trim().replace(/\s+/g, "")
+  );
+}
+
 export function hasUsableJobExpectation(facts: readonly ProfileFact[]): boolean {
   return projectJobExpectations(facts).some((expectation) => isReviewed(expectation.status));
 }

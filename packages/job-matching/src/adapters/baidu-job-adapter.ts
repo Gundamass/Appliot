@@ -20,6 +20,12 @@ export const baiduJobAdapter: JobAdapter = {
   source: "baidu",
   version: BAIDU_VERSION,
 
+  normalizeEntryUrl(url): URL | undefined {
+    if (url.protocol !== "https:" || url.hostname !== BAIDU_HOST) return undefined;
+    if (url.pathname !== "/" && url.pathname !== "/jobs" && url.pathname !== "/jobs/") return undefined;
+    return new URL("/jobs/list?projectType=1&recruitType=GRADUATE", url.origin);
+  },
+
   identify(snapshot): JobEntryKind | "unsupported" {
     if (snapshot.challenge !== undefined
       || snapshot.boundaries.some((boundary) => boundary.visible && boundary.interactive)) {
@@ -42,19 +48,27 @@ export const baiduJobAdapter: JobAdapter = {
   mapFilters(expectation: JobExpectationSnapshot): FilterPlan {
     const mapped: FilterPlan["mapped"] = [];
     const localOnly: FilterPlan["localOnly"] = [];
-    const filterKeys: Partial<Record<JobExpectationSnapshot["criteria"][number]["kind"], string>> = {
-      target_role: "postType",
-      location: "workPlace",
-      employment_type: "projectType"
-    };
 
     expectation.criteria.forEach((criterion, criterionIndex) => {
-      const key = filterKeys[criterion.kind];
-      if (key === undefined) {
-        localOnly.push({ criterionIndex, reasonCode: `unsupported_${criterion.kind}` });
-      } else {
-        mapped.push({ criterionIndex, key, values: [...criterion.values] });
+      if (criterion.kind === "target_role") {
+        const values = baiduRoleCategories(criterion.values);
+        if (values === undefined) {
+          localOnly.push({ criterionIndex, reasonCode: "unsupported_target_role" });
+        } else {
+          mapped.push({ criterionIndex, key: "postType", values });
+        }
+        return;
       }
+      if (criterion.kind === "location") {
+        const values = baiduLocations(criterion.values);
+        if (values === undefined) {
+          localOnly.push({ criterionIndex, reasonCode: "unsupported_location" });
+        } else {
+          mapped.push({ criterionIndex, key: "workPlace", values });
+        }
+        return;
+      }
+      localOnly.push({ criterionIndex, reasonCode: `unsupported_${criterion.kind}` });
     });
 
     return FilterPlanSchema.parse({
@@ -107,6 +121,55 @@ export const baiduJobAdapter: JobAdapter = {
     }
   }
 };
+
+function baiduRoleCategories(values: readonly string[]): string[] | undefined {
+  const categories = values.map(baiduRoleCategory);
+  if (categories.some((category) => category === undefined)) return undefined;
+  return [...new Set(categories as string[])];
+}
+
+function baiduRoleCategory(value: string): string | undefined {
+  const normalized = value.normalize("NFKC").trim();
+  if (["技术", "产品", "政企", "销售", "综合"].includes(normalized)) return normalized;
+  if (/政企|政府|公共事业|央企|国企/iu.test(normalized)) return "政企";
+  if (/产品/iu.test(normalized)) return "产品";
+  if (/销售|商务|客户经理|渠道/iu.test(normalized)) return "销售";
+  if (/开发|研发|工程|算法|前端|后端|测试|数据|安全|运维|架构|人工智能|\bAI\b/iu.test(normalized)) return "技术";
+  if (/人力|\bHR\b|财务|法务|市场|运营|行政|采购|战略|审计|品牌|公关/iu.test(normalized)) return "综合";
+  return undefined;
+}
+
+const BAIDU_LOCATION_ALIASES: Record<string, string> = {
+  全国: "全国",
+  北京: "北京市",
+  北京市: "北京市",
+  上海: "上海市",
+  上海市: "上海市",
+  深圳: "深圳市",
+  深圳市: "深圳市",
+  广州: "广州市",
+  广州市: "广州市",
+  杭州: "杭州市",
+  杭州市: "杭州市",
+  成都: "成都市",
+  成都市: "成都市",
+  南京: "南京市",
+  南京市: "南京市",
+  苏州: "苏州市",
+  苏州市: "苏州市",
+  郑州: "郑州市",
+  郑州市: "郑州市",
+  大连: "大连市",
+  大连市: "大连市",
+  保定: "保定市",
+  保定市: "保定市"
+};
+
+function baiduLocations(values: readonly string[]): string[] | undefined {
+  const locations = values.map((value) => BAIDU_LOCATION_ALIASES[value.normalize("NFKC").trim()]);
+  if (locations.some((location) => location === undefined)) return undefined;
+  return [...new Set(locations as string[])];
+}
 
 function isBaiduCampusUrl(url: URL): boolean {
   if (url.protocol !== "https:" || url.hostname !== BAIDU_HOST || !BAIDU_CAMPUS_PATH.test(url.pathname)) {

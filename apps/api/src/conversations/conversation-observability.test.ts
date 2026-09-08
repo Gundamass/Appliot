@@ -50,6 +50,7 @@ describe("conversation observability", () => {
   it("records a bounded result count for conversation tool calls", async () => {
     const traceRecord = vi.fn(() => "trace-1");
     const dependencies = {
+      conversations: { linkJobMatchSession: vi.fn() },
       jobMatchRepository: { get: vi.fn() },
       applicationTasks: {
         list: vi.fn(() => [{
@@ -58,7 +59,7 @@ describe("conversation observability", () => {
           applicationUrl: "https://jobs.example.test/apply/frontend",
           createdAt: "2026-08-22T00:00:00.000Z",
           updatedAt: "2026-08-22T00:00:00.000Z",
-          orchestrator: "langgraph-v1" as const,
+          orchestrator: "agent-runtime" as const,
           profileRevisionApplied: 0,
           profileSyncStatus: "current" as const
         }]),

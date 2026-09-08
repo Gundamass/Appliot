@@ -293,7 +293,8 @@ describe("SupervisorGraph", () => {
       planValidator: createPlanValidator(),
       approvalBindingProvider,
       agents: { application_agent: { execute } },
-      checkpointer: new MemorySaver()
+      checkpointer: new MemorySaver(),
+      now: () => "2026-09-03T00:00:00.000Z"
     });
     const config = { configurable: { thread_id: "approval-run" } };
     const first = await graph.invoke({
@@ -733,7 +734,8 @@ describe("SupervisorGraph", () => {
       approvalBindingProvider,
       agents: { application_agent: { execute } },
       replanner: createReplanner({ now: () => "2026-09-03T00:01:00.000Z" }),
-      checkpointer: new MemorySaver()
+      checkpointer: new MemorySaver(),
+      now: () => "2026-09-03T00:00:00.000Z"
     });
     const config = { configurable: { thread_id: "replan-approval-run" } };
     const first = await graph.invoke({

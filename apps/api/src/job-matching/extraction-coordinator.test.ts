@@ -110,6 +110,21 @@ describe("extraction coordinator", () => {
     database.close();
   });
 
+  it("accepts an administrative suffix added by a location filter readback", async () => {
+    const { database, repository } = setup("awaiting_filter_confirmation");
+    const locationWithSuffix = `${expectation.criteria[0]!.values[0]}\u5e02`;
+    const browserPort = browser({
+      applyJobFilters: vi.fn(async () => ({
+        ...page("filtered", "job-1"),
+        filterState: [{ key: "location", values: [locationWithSuffix] }]
+      }))
+    });
+
+    await expect(coordinator(repository, browserPort).confirmFilters("session-1", expectation, guard))
+      .resolves.toMatchObject({ snapshot: { filterState: [{ key: "location", values: [locationWithSuffix] }] } });
+    database.close();
+  });
+
   it("fails a filter readback mismatch without retrying the write", async () => {
     const { database, repository } = setup("awaiting_filter_confirmation");
     const browserPort = browser({

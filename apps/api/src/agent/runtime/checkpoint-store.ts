@@ -9,7 +9,7 @@ const MAX_CHECKPOINT_BYTES = 512 * 1024;
 const TOP_LEVEL_FIELDS = new Set([
   "version", "runId", "intentId", "planId", "planRevision", "executionEpoch", "phase", "status",
   "currentStepId", "intentRef", "planRef", "memoryRefs", "evidenceRefs", "pendingInterrupt",
-  "budget", "budgetLimits", "completedActionIds", "stateHash", "createdAt"
+  "requestContextRef", "budget", "budgetLimits", "completedActionIds", "stateHash", "createdAt"
 ]);
 const SENSITIVE_FIELD = /(?:cookie|password|passwd|token|secret|authorization|credential|raw[_-]?prompt|prompt|playwright|page[_-]?handle|full[_-]?dom|html|binary)/iu;
 

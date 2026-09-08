@@ -31,6 +31,7 @@ import type { PlanValidator } from "./plan-validator.js";
 import type { PlanValidationResult } from "./plan-validator.js";
 import type { Replanner } from "./replanner.js";
 import type { Supervisor } from "./supervisor.js";
+import type { EvidenceStore } from "../observations/evidence-store.js";
 
 export interface SpecialistExecutionInput {
   readonly runId: string;
@@ -120,6 +121,8 @@ export interface SupervisorGraphDependencies {
   readonly traceTaskId?: (state: SupervisorGraphState) => string;
   readonly budgetLimits?: Partial<BudgetLimits>;
   readonly evidenceRefValidator?: (ref: string) => boolean;
+  /** Authoritative action/invocation provenance for completion evidence. */
+  readonly evidenceStore?: EvidenceStore;
   /** Trusted provider for current snapshot/target/payload approval bindings. */
   readonly approvalBindingProvider?: (input: {
     readonly runId: string;
@@ -364,7 +367,7 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
           return failure("plan_incomplete", undefined, "blocked");
         }
         if (decision.outcome === "completed") {
-          const completionError = completionValidation(state, dependencies.evidenceRefValidator);
+          const completionError = completionValidation(state, dependencies.evidenceRefValidator, dependencies.evidenceStore);
           if (completionError !== undefined) {
             emitTrace(dependencies, state, "routing", "safety_block", "blocked", completionError);
             return failure(completionError, undefined, "blocked");
@@ -620,7 +623,13 @@ export function createSupervisorGraph(dependencies: SupervisorGraphDependencies)
           return failure("evidence_ref_validator_missing", undefined, "blocked");
         }
         const evidenceRefs = [...new Set(result.evidenceRefs ?? [])];
-        const evidenceError = validateEvidenceRefs(evidenceRefs, dependencies.evidenceRefValidator);
+        const evidenceError = validateStepEvidenceRefs(
+          evidenceRefs,
+          state,
+          step,
+          dependencies.evidenceRefValidator,
+          dependencies.evidenceStore
+        );
         if (evidenceError !== undefined) return failure(evidenceError, undefined, "blocked");
         if (evidenceRefs.length === 0) return failure("step_evidence_required", undefined, "blocked");
         const satisfiedCriteria = [...new Set(result.satisfiedCriteria ?? [])];
@@ -922,19 +931,41 @@ function validateEvidenceRefs(
   return undefined;
 }
 
+function validateStepEvidenceRefs(
+  refs: readonly string[],
+  state: SupervisorGraphState,
+  step: PlanStep,
+  validator: ((ref: string) => boolean) | undefined,
+  evidenceStore: EvidenceStore | undefined
+): string | undefined {
+  const basicError = validateEvidenceRefs(refs, validator);
+  if (basicError !== undefined) return basicError;
+  if (evidenceStore === undefined) return undefined;
+  for (const ref of refs) {
+    const result = evidenceStore.validate(ref, { runId: state.runId, stepId: step.id });
+    if (!result.valid) return result.reason;
+  }
+  return undefined;
+}
+
 function completionValidation(
   state: SupervisorGraphState,
-  validator: ((ref: string) => boolean) | undefined
+  validator: ((ref: string) => boolean) | undefined,
+  evidenceStore: EvidenceStore | undefined
 ): string | undefined {
   if (state.evidenceRefs.length === 0) return "evidence_required_for_completion";
-  if (validator === undefined) return "evidence_ref_validator_missing";
-  const evidenceError = validateEvidenceRefs(state.evidenceRefs, validator);
+  if (validator === undefined && evidenceStore === undefined) return "evidence_ref_validator_missing";
+  const evidenceError = validator === undefined
+    ? state.evidenceRefs.some((ref) => !evidenceStore!.has(ref)) ? "evidence_not_registered" : undefined
+    : validateEvidenceRefs(state.evidenceRefs, validator);
   if (evidenceError !== undefined) return evidenceError;
   for (const step of state.plan?.steps ?? []) {
     if (step.status !== "completed") continue;
     const refs = step.completionEvidenceRefs ?? [];
     if (refs.length === 0) return "step_evidence_required";
-    const refsError = validateEvidenceRefs(refs, validator);
+    const refsError = evidenceStore === undefined
+      ? validateEvidenceRefs(refs, validator)
+      : validateStepEvidenceRefs(refs, state, step, validator, evidenceStore);
     if (refsError !== undefined) return refsError;
     const criteria = step.satisfiedCriteria ?? [];
     if (!step.acceptanceCriteria.every((criterion) => criteria.includes(criterion))) {

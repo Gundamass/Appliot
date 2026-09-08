@@ -268,7 +268,7 @@ corepack pnpm -r --workspace-concurrency=1 test
 
 Expected: all workspaces PASS. If a pre-existing failure appears, record it separately and do not mask it.
 
-- [ ] **Step 3: Restart supervised local services and verify readiness**
+- [x] **Step 3: Restart local services and verify readiness**
 
 ```powershell
 powershell -NoProfile -ExecutionPolicy Bypass -File scripts/service-control.ps1 restart
@@ -276,6 +276,8 @@ powershell -NoProfile -ExecutionPolicy Bypass -File scripts/service-control.ps1 
 ```
 
 Expected: API/browser worker and web report `就绪`; `http://localhost:5173` and API health return success.
+
+Observed: the service supervisor has a separately tracked degraded-startup defect, so this regression used the newly built API artifact directly and retained the existing Vite process. `http://127.0.0.1:43120/api/health/adapters` returned HTTP 200 and the real UI flow completed at `http://127.0.0.1:5173`.
 
 - [x] **Step 4: Run local browser regression without real submission**
 
@@ -285,7 +287,7 @@ corepack pnpm test:e2e -- tests/browser/conversation-job-match-flow.spec.ts
 
 Expected: PASS. The test must stop before any real application submission.
 
-- [ ] **Step 5: Perform the real Baidu recommendation smoke test**
+- [x] **Step 5: Perform the real Baidu recommendation smoke test**
 
 In the local UI:
 
@@ -297,7 +299,7 @@ In the local UI:
 
 Expected: no generic error, no stale browser lease, and any external Baidu page incompatibility is reported as `unsupported_job_entry` with its dedicated message.
 
-- [ ] **Step 6: Record implementation results**
+- [x] **Step 6: Record implementation results**
 
 Create the regression report with these exact sections and fill them from command output:
 
@@ -332,7 +334,7 @@ git commit -m "docs: record browser lease regression results"
 
 ### Task 5: Align Baidu entry and filter semantics with the live site
 
-**Status:** Design addendum awaiting approval before production-code changes.
+**Status:** Implemented with TDD and verified against the live Baidu site on 2026-09-06.
 
 **Live evidence (2026-09-06):**
 
@@ -359,7 +361,7 @@ git commit -m "docs: record browser lease regression results"
 4. Keep location labels such as `全国` in the filter plan. The worker expands the location control when needed and the observer converts URL codes such as `9000` back to labels before readback validation.
 5. Preserve fail-closed behavior: missing controls, missing values, or mismatched readback still fail and never proceed to selection or application creation.
 
-- [ ] **Step 1: Add failing adapter tests for the live Baidu contract**
+- [x] **Step 1: Add failing adapter tests for the live Baidu contract**
 
 Assert that a generic official entry normalizes to:
 
@@ -379,7 +381,7 @@ localOnly: [
 ]
 ```
 
-- [ ] **Step 2: Run the adapter test and verify RED**
+- [x] **Step 2: Run the adapter test and verify RED**
 
 ```powershell
 corepack pnpm --filter @resume/job-matching test -- src/adapters/baidu-job-adapter.test.ts
@@ -387,34 +389,44 @@ corepack pnpm --filter @resume/job-matching test -- src/adapters/baidu-job-adapt
 
 Expected: FAIL because the current adapter uses `projectType=4`, passes `开发` unchanged, and maps `全职` to `projectType`.
 
-- [ ] **Step 3: Implement the minimal adapter mapping**
+- [x] **Step 3: Implement the minimal adapter mapping**
 
 Add a small deterministic role-category mapper. It must not call a model or infer an unsupported site option. Unrecognized role values remain local-only.
 
-- [ ] **Step 4: Add failing browser-worker tests for Baidu filter expansion and labeled readback**
+- [x] **Step 4: Add failing browser-worker tests for Baidu navigation loss, official API filtering, and pagination**
 
-Use a current-structure Baidu fixture with:
+Start with a current-structure fixture and change it from `history.replaceState` to a real navigation so the test reproduces the live failure:
 
-- category label `技术`;
-- a collapsed location section whose `更多` action reveals `全国`;
-- `window.__INITIAL_DATA__.listData` code/label lists;
-- URL readback values `postType=1`, `workPlace=9000`, `projectType=1`.
+```text
+page.evaluate: Execution context was destroyed, most likely because of a navigation
+```
 
-Assert that applying the semantic plan clicks only `技术` and `全国`, and that observation returns semantic values rather than numeric codes.
+Then require the worker to query Baidu's public job-list endpoint, preserve semantic filter readback, avoid `page.goto`, and advance with an opaque second-page cursor. Mock `globalThis.fetch` only at the network boundary; keep the browser/page lifecycle real.
 
-- [ ] **Step 5: Run the browser-worker test and verify RED**
+- [x] **Step 5: Run the browser-worker test and verify RED**
 
 ```powershell
 corepack pnpm --filter @resume/browser-worker test -- src/job-observer.test.ts
 ```
 
-Expected: FAIL because the current worker does not reveal the collapsed location options and reads raw URL codes.
+Expected and observed RED sequence:
 
-- [ ] **Step 6: Implement filter expansion and labeled readback**
+1. context-destroyed failure after the Baidu page navigates;
+2. failure while the worker still relies on `page.goto`;
+3. failure while the worker does not POST to `getPostListNew`;
+4. empty results while the request uses bracket-array form encoding.
 
-Make the Baidu branch expand only the relevant location container, re-query the container after the UI update, and select the requested label. Convert URL codes through the live initial-data option lists when observing filters.
+- [x] **Step 6: Implement official Baidu list snapshots and labeled readback**
 
-- [ ] **Step 7: Add a service regression proving extraction starts only after verified readback**
+Cache the confirmed Baidu entry and semantic filter state in the worker, then query:
+
+```text
+POST https://talent.baidu.com/httservice/getPostListNew
+```
+
+Use scalar `postType=1`, omit `workPlace` for the `全国` semantic value, omit `projectType=1` for the ordinary graduate list API, and keep `pageSize=10`. Convert the response to the bounded observer snapshot contract and use `curPage` for pagination. The controlled page remains the user-visible official entry, while extraction no longer depends on a page execution context that Baidu destroys during filtering.
+
+- [x] **Step 7: Add a service regression proving extraction starts only after verified readback**
 
 Cover the exact `开发 / 全国 / 全职` expectation and assert that:
 
@@ -424,7 +436,7 @@ Cover the exact `开发 / 全国 / 全职` expectation and assert that:
 - browser ownership is released after `awaiting_job_selection`;
 - no application task or submission is created.
 
-- [ ] **Step 8: Run focused GREEN verification**
+- [x] **Step 8: Run focused GREEN verification**
 
 ```powershell
 corepack pnpm --filter @resume/job-matching test -- src/adapters/baidu-job-adapter.test.ts
@@ -433,9 +445,35 @@ corepack pnpm --filter @resume/api test -- src/job-matching/job-match-service.te
 corepack pnpm --filter @resume/web test -- src/conversation/ConversationCards.test.tsx src/conversation/ChatHome.test.tsx
 ```
 
-- [ ] **Step 9: Repeat the real Baidu smoke test**
+- [x] **Step 9: Repeat the real Baidu smoke test**
 
 Run the same conversation flow through filter confirmation and verify that one to six recommendation cards are shown with percentage labels. Stop before creating an application task.
+
+**Observed result:** the fresh conversation flow selected `talent.baidu.com`, displayed `确认使用此入口` and `开始岗位推荐`, generated exactly six Baidu technical-role cards with 44%/41% labels, and stopped before any application task or submission. The detailed command and live-site evidence is recorded in `docs/testing/2026-09-06-job-recommendation-browser-lease-regression.md`.
+
+- [x] **Step 10: Apply code-review hardening with RED/GREEN coverage**
+
+The completion review identified four valid fail-closed gaps and one lifecycle concern. Add regressions and minimal fixes for:
+
+1. deriving filter readback from URL codes and validating every returned job's `postType`/`workPlace`, instead of echoing the requested plan;
+2. rejecting a response whose `pageNum` differs from the requested cursor;
+3. rejecting malformed entries inside an otherwise valid `data.list`;
+4. normalizing the worker's supported city aliases and retaining unknown locations as `localOnly`;
+5. proving at `BrowserSessionManager` level that `releaseTask` destroys the old `JobObserver` and the next task receives a fresh instance.
+
+Expected and observed: the new adapter and worker assertions fail before implementation, then the focused adapter, job-observer, and session-manager suites pass after the minimal changes.
+
+- [x] **Step 11: Scope conversation action idempotency keys by job-match session**
+
+The final same-conversation smoke test exposed `conversation_idempotency_conflict`: every filter confirmation at session version 0 reused `inline-job-match:confirm_filters:0`, so a second recommendation session in the same conversation was rejected before execution.
+
+Add failing component assertions for filter confirmation, pause/continue/rematch, normal selection and conflict selection. Generate keys as:
+
+```text
+inline-job-match:<sessionId>:<action>:<sessionVersion>[:<resultId>]
+```
+
+Keep the 128-character contract bound without directly truncating the identity: preserve the action/version suffix and use a stable 128-bit digest when the raw key is too long. Rebuild the static web bundle, reload the existing conversation, and repeat the same-session Baidu flow. Expected and observed: the second recommendation reaches `awaiting_job_selection`, reads 93 real technical postings, renders only six percentage cards, and creates no application task.
 
 ---
 

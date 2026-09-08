@@ -361,7 +361,12 @@ async function executeCommand(dependencies: ApplicationRouteDependencies, taskId
       return;
     case "approve_content":
       await service.approveReview(taskId, command.reviewId, command.editedValue);
-      await service.runUntilPause(taskId);
+      // Runtime resumes from the approval itself. The legacy-compatible
+      // service leaves the task at awaiting_content_review and needs the
+      // follow-up run to consume the approved value.
+      if (["observing", "awaiting_content_review", "filling", "validating", "navigating"].includes(service.state(taskId).value)) {
+        await service.runUntilPause(taskId);
+      }
       return;
     case "reject_content":
       await service.rejectReview(taskId, command.reviewId);

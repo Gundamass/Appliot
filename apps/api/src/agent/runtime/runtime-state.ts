@@ -41,6 +41,29 @@ const arraySchema = (schema: ZodTypeAny, max: number) => z.array(schema).max(max
 const enumSchema = <T extends [string, ...string[]]>(schema: z.ZodEnum<T>) => schema;
 type Infer<T extends ZodTypeAny> = z.infer<T>;
 
+const RuntimeRequestMetadataSchema = objectSchema({
+  applicationTaskId: stringSchema().max(128).optional(),
+  applicationUrl: z.string().url().max(2_000).optional(),
+  profileRevision: z.number().int().nonnegative().optional(),
+  taskId: stringSchema().max(128).optional(),
+  jobMatchSessionId: stringSchema().max(128).optional(),
+  conversationId: stringSchema().max(128).optional()
+});
+
+/**
+ * Only the allow-listed routing context survives a process restart. The raw
+ * goal, arbitrary request metadata, credentials and browser values are never
+ * part of this artifact.
+ */
+export const RuntimeRequestContextSchema = objectSchema({
+  requestedBy: z.string().min(1).max(256),
+  contextRefs: arraySchema(z.string().min(1).max(256), 100),
+  autonomyLevel: z.enum(["suggest", "prepare", "execute_with_approval"]).optional(),
+  metadata: RuntimeRequestMetadataSchema
+});
+
+export type RuntimeRequestContext = Infer<typeof RuntimeRequestContextSchema>;
+
 export const RuntimePhaseSchema = zEnum([
   "intent", "plan", "dispatch", "wait", "inspect", "human_gate", "complete", "blocked", "fail", "cancelled"
 ]);
@@ -53,6 +76,7 @@ export const RuntimeStateSchema = objectSchema({
   phase: enumSchema(RuntimePhaseSchema),
   executionEpoch: nonNegativeIntegerSchema(),
   input: AgentRunInputSchema.optional(),
+  requestContextRef: stringSchema().optional(),
   intent: CanonicalIntentSchema.optional(),
   plan: PlanStateSchema.optional(),
   currentStepId: stringSchema().optional(),
@@ -79,6 +103,8 @@ export type RuntimeState = {
   phase: RuntimePhase;
   executionEpoch: number;
   input?: AgentRunInput | undefined;
+  requestContextRef?: string | undefined;
+  requestContext?: RuntimeRequestContext | undefined;
   intent?: CanonicalIntent | undefined;
   plan?: PlanState | undefined;
   currentStepId?: string | undefined;
@@ -107,6 +133,7 @@ export const RuntimeGraphStateSchema = objectSchema({
   currentStepId: stringSchema().optional(),
   intentRef: stringSchema().optional(),
   planRef: stringSchema().optional(),
+  requestContextRef: stringSchema().optional(),
   pendingInterrupt: RuntimeHumanInterruptSchema.optional(),
   budget: BudgetStateSchema,
   memoryRefs: arraySchema(MemoryRefSchema, 200),
@@ -133,6 +160,7 @@ export const RuntimeGraphStateAnnotation = Annotation.Root({
   currentStepId: Annotation<string | undefined>({ reducer: replace, default: () => undefined }),
   intentRef: Annotation<string | undefined>({ reducer: replace, default: () => undefined }),
   planRef: Annotation<string | undefined>({ reducer: replace, default: () => undefined }),
+  requestContextRef: Annotation<string | undefined>({ reducer: replace, default: () => undefined }),
   pendingInterrupt: Annotation<RuntimeHumanInterrupt | undefined>({ reducer: replace, default: () => undefined }),
   budget: Annotation<BudgetState>,
   memoryRefs: Annotation<MemoryRef[]>({ reducer: (_left, right) => right, default: () => [] }),
@@ -148,11 +176,14 @@ export interface RuntimeArtifactStore {
   getIntent(ref: string): CanonicalIntent | undefined;
   savePlan(plan: PlanState): string;
   getPlan(ref: string): PlanState | undefined;
+  saveRequestContext(context: RuntimeRequestContext): string;
+  getRequestContext(ref: string): RuntimeRequestContext | undefined;
 }
 
 export function createInMemoryArtifactStore(): RuntimeArtifactStore {
   const intents = new Map<string, CanonicalIntent>();
   const plans = new Map<string, PlanState>();
+  const requestContexts = new Map<string, RuntimeRequestContext>();
   return {
     saveIntent(intent) {
       const parsed = CanonicalIntentSchema.parse(intent);
@@ -173,6 +204,16 @@ export function createInMemoryArtifactStore(): RuntimeArtifactStore {
     getPlan(ref) {
       const value = plans.get(ref);
       return value === undefined ? undefined : clone(value);
+    },
+    saveRequestContext(context) {
+      const parsed = RuntimeRequestContextSchema.parse(context);
+      const ref = `request-context:${createHash("sha256").update(JSON.stringify(parsed), "utf8").digest("hex")}`;
+      requestContexts.set(ref, clone(parsed));
+      return ref;
+    },
+    getRequestContext(ref) {
+      const value = requestContexts.get(ref);
+      return value === undefined ? undefined : clone(value);
     }
   };
 }
@@ -185,6 +226,11 @@ export function createSqliteRuntimeArtifactStore(database: SqliteDatabase): Runt
       payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
       created_at TEXT NOT NULL
     );
+    CREATE TABLE IF NOT EXISTS agent_runtime_request_contexts (
+      ref TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL
+    );
   `);
   const upsert = database.prepare(`
     INSERT INTO agent_runtime_artifacts (ref, kind, payload_json, created_at)
@@ -192,8 +238,17 @@ export function createSqliteRuntimeArtifactStore(database: SqliteDatabase): Runt
     ON CONFLICT(ref) DO UPDATE SET payload_json = excluded.payload_json, created_at = excluded.created_at
   `);
   const find = database.prepare("SELECT kind, payload_json FROM agent_runtime_artifacts WHERE ref = ?");
+  const contextUpsert = database.prepare(`
+    INSERT INTO agent_runtime_request_contexts (ref, payload_json, created_at)
+    VALUES (?, ?, ?)
+    ON CONFLICT(ref) DO UPDATE SET payload_json = excluded.payload_json, created_at = excluded.created_at
+  `);
+  const contextFind = database.prepare("SELECT payload_json FROM agent_runtime_request_contexts WHERE ref = ?");
   const save = database.transaction((ref: string, kind: "intent" | "plan", payload: string, createdAt: string) => {
     upsert.run(ref, kind, payload, createdAt);
+  });
+  const saveContext = database.transaction((ref: string, payload: string, createdAt: string) => {
+    contextUpsert.run(ref, payload, createdAt);
   });
 
   return {
@@ -218,8 +273,36 @@ export function createSqliteRuntimeArtifactStore(database: SqliteDatabase): Runt
       const row = find.get(ref) as { kind: string; payload_json: string } | undefined;
       if (row === undefined || row.kind !== "plan") return undefined;
       return PlanStateSchema.parse(JSON.parse(row.payload_json));
+    },
+    saveRequestContext(context) {
+      const parsed = RuntimeRequestContextSchema.parse(context);
+      const ref = `request-context:${createHash("sha256").update(JSON.stringify(parsed), "utf8").digest("hex")}`;
+      saveContext(ref, JSON.stringify(parsed), new Date().toISOString());
+      return ref;
+    },
+    getRequestContext(ref) {
+      const row = contextFind.get(ref) as { payload_json: string } | undefined;
+      return row === undefined ? undefined : RuntimeRequestContextSchema.parse(JSON.parse(row.payload_json));
     }
   };
+}
+
+export function toRuntimeRequestContext(input: AgentRunInput): RuntimeRequestContext {
+  const metadata = input.metadata;
+  const allowListedMetadata = {
+    ...(stringMetadata(metadata, "applicationTaskId") === undefined ? {} : { applicationTaskId: stringMetadata(metadata, "applicationTaskId") }),
+    ...(stringMetadata(metadata, "applicationUrl") === undefined ? {} : { applicationUrl: stringMetadata(metadata, "applicationUrl") }),
+    ...(nonNegativeIntegerMetadata(metadata, "profileRevision") === undefined ? {} : { profileRevision: nonNegativeIntegerMetadata(metadata, "profileRevision") }),
+    ...(stringMetadata(metadata, "taskId") === undefined ? {} : { taskId: stringMetadata(metadata, "taskId") }),
+    ...(stringMetadata(metadata, "jobMatchSessionId") === undefined ? {} : { jobMatchSessionId: stringMetadata(metadata, "jobMatchSessionId") }),
+    ...(stringMetadata(metadata, "conversationId") === undefined ? {} : { conversationId: stringMetadata(metadata, "conversationId") })
+  };
+  return RuntimeRequestContextSchema.parse({
+    requestedBy: input.requestedBy,
+    contextRefs: input.contextRefs,
+    ...(input.autonomyLevel === undefined ? {} : { autonomyLevel: input.autonomyLevel }),
+    metadata: allowListedMetadata
+  });
 }
 
 export function createInitialRuntimeState(
@@ -255,6 +338,7 @@ export function toRuntimeGraphState(state: RuntimeState): RuntimeGraphState {
     currentStepId: state.currentStepId,
     intentRef: state.intentRef,
     planRef: state.planRef,
+    requestContextRef: state.requestContextRef,
     pendingInterrupt: state.pendingInterrupt,
     budget: state.budget,
     memoryRefs: state.memoryRefs,
@@ -276,4 +360,14 @@ export function stateHash(state: RuntimeState): string {
 
 function clone<T>(value: T): T {
   return JSON.parse(JSON.stringify(value)) as T;
+}
+
+function stringMetadata(metadata: Record<string, unknown> | undefined, key: string): string | undefined {
+  const value = metadata?.[key];
+  return typeof value === "string" && value.trim().length > 0 ? value.trim() : undefined;
+}
+
+function nonNegativeIntegerMetadata(metadata: Record<string, unknown> | undefined, key: string): number | undefined {
+  const value = metadata?.[key];
+  return typeof value === "number" && Number.isSafeInteger(value) && value >= 0 ? value : undefined;
 }

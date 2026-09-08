@@ -1,4 +1,4 @@
-import type { ConversationCard, ConversationConfirmation, ConversationJobMatchAction } from "@resume/contracts";
+import { JOB_RECOMMENDATION_LIMIT, type ConversationCard, type ConversationConfirmation, type ConversationJobMatchAction } from "@resume/contracts";
 import { ArrowUpRight, BriefcaseBusiness, Check, ExternalLink, FileCheck2, ListChecks, Search, ShieldCheck, X } from "lucide-react";
 import { useState } from "react";
 import { ConversationJobMatchFlow } from "./ConversationJobMatchFlow.js";
@@ -45,8 +45,13 @@ export function QuickStartCards({ onQuickRecommendation, onQuickProgress }: Pick
 }
 
 export function ConversationCards({ cards, conversationId, process, jobMatchApi, onJobMatchAction, pendingConfirmation, onOpenApplication, onStartApplication, onConfirm }: ConversationCardsProps) {
+  let recommendationCount = 0;
   return <div className="conversation-cards">{cards.map((card, index) => {
-    if (card.type === "recommendation") return <RecommendationCard key={`${card.resultId}-${index}`} card={card} onStartApplication={onStartApplication} />;
+    if (card.type === "recommendation") {
+      if (recommendationCount >= JOB_RECOMMENDATION_LIMIT) return null;
+      recommendationCount += 1;
+      return <RecommendationCard key={`${card.resultId}-${index}`} card={card} onStartApplication={onStartApplication} />;
+    }
     if (card.type === "application_task") return <TaskCard key={`${card.taskId}-${index}`} card={card} onOpenApplication={onOpenApplication} />;
     if (card.type === "recruitment_site") return <RecruitmentSiteCard key={`${card.url}-${index}`} card={card} />;
     if (card.type === "job_match_session") return <JobMatchSessionCard
@@ -65,7 +70,7 @@ export function ConversationCards({ cards, conversationId, process, jobMatchApi,
 }
 
 function RecommendationCard({ card, onStartApplication }: { card: Extract<ConversationCard, { type: "recommendation" }>; onStartApplication?: ConversationCardsProps["onStartApplication"] }) {
-  return <article className="conversation-card recommendation-card"><div className="conversation-card-heading"><div><strong>{card.title}</strong><span>{card.company}</span></div><b>{card.score} 分</b></div><div className="conversation-evidence"><span>匹配依据 {card.evidenceCount} 项</span><span>已校验岗位</span></div><div className="conversation-card-actions"><button type="button" className="conversation-button primary" onClick={() => onStartApplication?.(card)}><BriefcaseBusiness aria-hidden="true" size={14} />开始投递</button></div></article>;
+  return <article className="conversation-card recommendation-card"><div className="conversation-card-heading"><div><strong>{card.title}</strong><span>{card.company}</span></div><b>匹配度 {Math.round(card.score)}%</b></div><div className="conversation-evidence"><span>匹配依据 {card.evidenceCount} 项</span><span>已校验岗位</span></div><div className="conversation-card-actions"><button type="button" className="conversation-button primary" onClick={() => onStartApplication?.(card)}><BriefcaseBusiness aria-hidden="true" size={14} />开始投递</button></div></article>;
 }
 
 function TaskCard({ card, onOpenApplication }: { card: Extract<ConversationCard, { type: "application_task" }>; onOpenApplication(taskId: string): void }) {
@@ -142,6 +147,14 @@ function confirmationCopy(card: Extract<ConversationCard, { type: "confirmation"
   decline: string;
 } {
   if (card.action === "start_application") {
+    if (card.target.kind === "application_url") {
+      return {
+        title: "准备开始识别并填写",
+        target: card.target.url,
+        approve: "确认开始填写",
+        decline: "暂不填写"
+      };
+    }
     return {
       title: "准备创建受控投递任务",
       target: `目标岗位：${card.target.kind === "recommendation" ? card.target.resultId : "当前岗位"}`,

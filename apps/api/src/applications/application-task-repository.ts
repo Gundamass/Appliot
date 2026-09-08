@@ -14,7 +14,8 @@ export interface StoredApplicationTask {
 }
 
 export type ProfileSyncStatus = "current" | "pending" | "failed";
-export type ApplicationTaskOrchestrator = "xstate-v1" | "langgraph-v1";
+/** The Runtime is the sole owner of newly created application tasks. */
+export type ApplicationTaskOrchestrator = "agent-runtime";
 
 export interface ApplicationTaskRepository {
   create(input: { id: string; name?: string; applicationUrl: string }): StoredApplicationTask;
@@ -42,7 +43,7 @@ interface TaskRow {
 export function createApplicationTaskRepository(database: SqliteDatabase): ApplicationTaskRepository {
   const insert = database.prepare(`
     INSERT INTO application_tasks (id, name, application_url, created_at, updated_at, orchestrator)
-    VALUES (?, ?, ?, ?, ?, 'langgraph-v1')
+    VALUES (?, ?, ?, ?, ?, 'agent-runtime')
   `);
   const find = database.prepare("SELECT * FROM application_tasks WHERE id = ?");
   const findAll = database.prepare("SELECT * FROM application_tasks ORDER BY created_at DESC, id ASC");
@@ -62,7 +63,7 @@ export function createApplicationTaskRepository(database: SqliteDatabase): Appli
     const name = input.name ?? suggestApplicationTaskName(input.applicationUrl);
     insert.run(input.id, name, input.applicationUrl, timestamp, timestamp);
     return {
-      ...input, name, createdAt: timestamp, updatedAt: timestamp, orchestrator: "langgraph-v1",
+      ...input, name, createdAt: timestamp, updatedAt: timestamp, orchestrator: "agent-runtime",
       profileRevisionApplied: 0, profileSyncStatus: "current"
     };
   };

@@ -142,6 +142,26 @@ describe("conversation contracts", () => {
     })).toThrow();
   });
 
+  it("accepts only HTTPS direct application URL targets", () => {
+    expect(ConversationIntentSchema.parse({
+      kind: "start_application",
+      target: { kind: "application_url", url: "https://jobs.example.com/apply/123" },
+      requiresConfirmation: true
+    })).toMatchObject({ target: { kind: "application_url" } });
+
+    expect(ConversationConfirmationSchema.parse({
+      confirmationId: "confirmation-application-url",
+      action: "start_application",
+      target: { kind: "application_url", url: "https://jobs.example.com/apply/123" }
+    })).toMatchObject({ target: { kind: "application_url" } });
+
+    expect(() => ConversationIntentSchema.parse({
+      kind: "start_application",
+      target: { kind: "application_url", url: "http://jobs.example.com/apply/123" },
+      requiresConfirmation: true
+    })).toThrow();
+  });
+
   it("rejects unbounded message input", () => {
     expect(() => ConversationTurnInputSchema.parse({ text: "x".repeat(501) })).toThrow();
     expect(() => ConversationTurnInputSchema.parse({ text: "   " })).toThrow();

@@ -72,6 +72,37 @@ function renderCards(cards: ConversationCard[], pendingConfirmation?: Conversati
 }
 
 describe("ConversationCards recruitment flow", () => {
+  it("renders recommendation cards as match percentages", () => {
+    renderCards([{
+      type: "recommendation",
+      sessionId: "match-1",
+      resultId: "result-1",
+      title: "Frontend Engineer",
+      company: "Baidu",
+      score: 83,
+      evidenceCount: 2
+    }]);
+
+    expect(screen.getByText("匹配度 83%")).toBeTruthy();
+    expect(screen.queryByText("83 分")).toBeNull();
+  });
+
+  it("caps legacy recommendation cards at six", () => {
+    const cards: ConversationCard[] = Array.from({ length: 7 }, (_value, index) => ({
+      type: "recommendation",
+      sessionId: "match-1",
+      resultId: `result-${index + 1}`,
+      title: `Frontend Engineer ${index + 1}`,
+      company: "Baidu",
+      score: 80 - index,
+      evidenceCount: 1
+    }));
+
+    renderCards(cards);
+
+    expect(screen.getAllByRole("article")).toHaveLength(6);
+  });
+
   it("lets the user choose a recruitment candidate before confirming it", () => {
     const onConfirm = vi.fn();
     const confirmation: ConversationConfirmation = {
@@ -148,6 +179,28 @@ describe("ConversationCards recruitment flow", () => {
     expect(screen.getByRole("button", { name: approveLabel })).toBeTruthy();
     fireEvent.click(screen.getByRole("button", { name: declineLabel }));
     expect(onConfirm).toHaveBeenCalledWith(confirmation.confirmationId, false);
+  });
+
+  it("uses filling-specific confirmation copy for a direct application URL", () => {
+    const onConfirm = vi.fn();
+    const confirmation: ConversationConfirmation = {
+      confirmationId: "confirmation-application-url",
+      action: "start_application",
+      target: { kind: "application_url", url: "https://jobs.example.com/apply/123" }
+    };
+    render(
+      <ConversationCards
+        cards={[{ type: "confirmation", confirmationId: confirmation.confirmationId, action: confirmation.action, target: confirmation.target }]}
+        pendingConfirmation={confirmation}
+        onOpenApplication={vi.fn()}
+        onConfirm={onConfirm}
+      />
+    );
+
+    expect(screen.getByText("准备开始识别并填写")).toBeTruthy();
+    expect(screen.getByText("https://jobs.example.com/apply/123")).toBeTruthy();
+    fireEvent.click(screen.getByRole("button", { name: "确认开始填写" }));
+    expect(onConfirm).toHaveBeenCalledWith("confirmation-application-url", true, undefined);
   });
 
   it("does not attach a newer confirmation token to an older same-action card", () => {

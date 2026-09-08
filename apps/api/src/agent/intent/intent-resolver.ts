@@ -10,6 +10,7 @@ import type { IntentContext, IntentDraft, UserMessage } from "./intent-context.j
 import { createAmbiguityDetector, type AmbiguityDetector } from "./ambiguity-detector.js";
 import { createClarificationManager, type ClarificationManager } from "./clarification-manager.js";
 import { createIntentUnderstanding, type IntentUnderstanding } from "./intent-understanding.js";
+import type { StructuredModelProvider } from "@resume/model-provider";
 
 export interface IntentResolutionRuntimeContext {
   signal: AbortSignal;
@@ -26,6 +27,8 @@ export interface IntentResolver {
 
 export interface IntentResolverOptions {
   understanding?: IntentUnderstanding;
+  /** Optional structured model used when the resolver constructs its understanding layer. */
+  structuredProvider?: StructuredModelProvider;
   ambiguityDetector?: AmbiguityDetector;
   clarificationManager?: ClarificationManager;
   idFactory?: () => string;
@@ -33,7 +36,9 @@ export interface IntentResolverOptions {
 }
 
 export function createIntentResolver(options: IntentResolverOptions = {}): IntentResolver {
-  const understanding = options.understanding ?? createIntentUnderstanding();
+  const understanding = options.understanding ?? createIntentUnderstanding(
+    options.structuredProvider === undefined ? {} : { structuredProvider: options.structuredProvider }
+  );
   const ambiguityDetector = options.ambiguityDetector ?? createAmbiguityDetector();
   const clarificationManager = options.clarificationManager ?? createClarificationManager();
   const idFactory = options.idFactory ?? randomUUID;

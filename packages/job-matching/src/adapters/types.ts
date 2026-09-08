@@ -15,6 +15,7 @@ import {
 export interface JobAdapter {
   readonly source: JobSource;
   readonly version: string;
+  normalizeEntryUrl?(url: URL): URL | undefined;
   identify(snapshot: JobPageSnapshot): JobEntryKind | "unsupported";
   mapFilters(expectation: JobExpectationSnapshot): FilterPlan;
   extractList(snapshot: JobPageSnapshot): ExtractedJobPage;
@@ -25,6 +26,8 @@ interface SnapshotJobAdapterOptions {
   source: JobSource;
   version: string;
   supportsUrl(url: URL): boolean;
+  normalizeEntryUrl?(url: URL): URL | undefined;
+  localOnlyReason?(criterion: JobExpectationSnapshot["criteria"][number]): string | undefined;
   filterKeys: Partial<Record<JobExpectationSnapshot["criteria"][number]["kind"], string>>;
 }
 
@@ -74,12 +77,18 @@ export function createSnapshotJobAdapter(options: SnapshotJobAdapterOptions): Jo
   return {
     source: options.source,
     version: options.version,
+    ...(options.normalizeEntryUrl === undefined ? {} : { normalizeEntryUrl: options.normalizeEntryUrl }),
     identify,
 
     mapFilters(expectation) {
       const mapped: FilterPlan["mapped"] = [];
       const localOnly: FilterPlan["localOnly"] = [];
       expectation.criteria.forEach((criterion, criterionIndex) => {
+        const localReason = options.localOnlyReason?.(criterion);
+        if (localReason !== undefined) {
+          localOnly.push({ criterionIndex, reasonCode: localReason });
+          return;
+        }
         const key = options.filterKeys[criterion.kind];
         if (key === undefined) {
           localOnly.push({ criterionIndex, reasonCode: `unsupported_${criterion.kind}` });

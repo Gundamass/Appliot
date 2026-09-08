@@ -8,28 +8,17 @@ export interface ApplicationServiceRouterDependencies {
 }
 
 /**
- * A persisted ownership marker is the only routing authority during the
- * coexistence window. It prevents a process restart from accidentally moving
- * an in-flight XState task onto a graph checkpoint, or vice versa.
+ * Compatibility facade retained for callers that still import the old module.
+ * Runtime is the only production service; all task operations delegate to the
+ * supplied Runtime-backed service.
  */
 export function createApplicationServiceRouter(
   dependencies: ApplicationServiceRouterDependencies
 ): ApplicationService {
-  // A few internal callers predate persisted task ownership. Keep those
-  // process-local starts on XState for the bounded coexistence window.
-  const directLegacyTaskIds = new Set<string>();
-
-  const serviceFor = (taskId: string): ApplicationService => {
-    const task = dependencies.taskRepository.get(taskId);
-    if (task === undefined || directLegacyTaskIds.has(taskId)) return dependencies.legacy;
-    return task.orchestrator === "langgraph-v1" ? dependencies.graph : dependencies.legacy;
-  };
+  const serviceFor = (_taskId: string): ApplicationService => dependencies.graph;
 
   return {
     start(input) {
-      if (dependencies.taskRepository.get(input.taskId) === undefined) {
-        directLegacyTaskIds.add(input.taskId);
-      }
       serviceFor(input.taskId).start(input);
     },
     activeBrowserTaskId() {
@@ -54,7 +43,6 @@ export function createApplicationServiceRouter(
       return serviceFor(taskId).resumeWithProfile(taskId);
     },
     async refreshFromProfile() {
-      await dependencies.legacy.refreshFromProfile();
       await dependencies.graph.refreshFromProfile();
     },
     syncTaskFromProfile(taskId) {
@@ -81,7 +69,6 @@ export function createApplicationServiceRouter(
     dispose(taskId) {
       const service = serviceFor(taskId);
       const result = service.dispose(taskId);
-      directLegacyTaskIds.delete(taskId);
       return result;
     },
     runUntilPause(taskId, initialSnapshot) {

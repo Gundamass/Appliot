@@ -112,6 +112,42 @@ const SUITE_FILES = [
   "langsmith-review.jsonl"
 ] as const;
 
+const SCENARIO_FILES = ["intent-cases.json", "execution-cases.json", "safety-cases.json"] as const;
+
+export interface AgentScenarioCase {
+  readonly caseId: string;
+  readonly suiteVersion: string;
+  readonly privacy: "synthetic" | "hashed_reference" | "local_only";
+  readonly [key: string]: unknown;
+}
+
+export interface AgentScenarioDatasets {
+  readonly intent: AgentScenarioCase[];
+  readonly execution: AgentScenarioCase[];
+  readonly safety: AgentScenarioCase[];
+}
+
+export function readScenarioDatasets(rootDir?: string): AgentScenarioDatasets {
+  const resolvedRoot = rootDir ?? fileURLToPath(new URL("../../", import.meta.url));
+  const evalDir = join(resolvedRoot, "evals", "agent");
+  const rows = SCENARIO_FILES.map((name) => {
+    const parsed = JSON.parse(readFileSync(join(evalDir, name), "utf8")) as unknown;
+    if (!Array.isArray(parsed) || parsed.length === 0) throw new Error(`evaluation_suite_empty:${name}`);
+    const cases = parsed.map((item, index) => {
+      if (!isRecord(item)) throw new Error(`evaluation_case_invalid:${name}:${index + 1}`);
+      const candidate = item as AgentScenarioCase;
+      validateCase(candidate, `${name}:${index}`);
+      return candidate;
+    });
+    return [name, cases] as const;
+  });
+  return {
+    intent: rows.find(([name]) => name === "intent-cases.json")![1],
+    execution: rows.find(([name]) => name === "execution-cases.json")![1],
+    safety: rows.find(([name]) => name === "safety-cases.json")![1]
+  };
+}
+
 const emailPattern = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
 const phonePattern = /(?:^|\D)(?:\+?86[- ]?)?1[3-9]\d{9}(?:$|\D)/;
 const markupPattern = /<\/?[a-z][^>]*>/i;
@@ -309,8 +345,10 @@ export function runEvaluation(options: {
   const rootDir = options.rootDir ?? fileURLToPath(new URL("../../", import.meta.url));
   const evalDir = join(rootDir, "evals", "agent");
   const files = SUITE_FILES.map((name) => ({ name, contents: readFileSync(join(evalDir, name), "utf8") }));
-  const datasetHash = hashDataset(files);
+  const scenarioFiles = SCENARIO_FILES.map((name) => ({ name, contents: readFileSync(join(evalDir, name), "utf8") }));
+  const datasetHash = hashDataset([...files, ...scenarioFiles]);
   const rows = Object.fromEntries(files.map((file) => [file.name, parseJsonl(file.contents, file.name)]));
+  const scenarioDatasets = readScenarioDatasets(rootDir);
   for (const [name, suite] of Object.entries(rows)) {
     suite.forEach((item, index) => validateCase(item, `${name}:${index}`));
   }
@@ -413,7 +451,10 @@ export function runEvaluation(options: {
       jobMatching: jobRows.length,
       formReadback: formRows.length,
       ocrParity: ocrRows.length,
-      langsmithReview: langsmithRows.length
+      langsmithReview: langsmithRows.length,
+      intentScenarios: scenarioDatasets.intent.length,
+      executionScenarios: scenarioDatasets.execution.length,
+      safetyScenarios: scenarioDatasets.safety.length
     },
     failures: misSubmissionCount === 0 ? [] : ["automatic_submit_observed"],
     retrievalProvider: uniqueRetrievalProvider(retrievalCases),

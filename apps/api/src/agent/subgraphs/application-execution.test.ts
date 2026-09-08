@@ -13,6 +13,7 @@ import type {
   ReadbackResult
 } from "../application-tools.js";
 import type { TraceSink } from "../trace-sink.js";
+import { createFieldCoverageStore } from "../../applications/field-coverage.js";
 import { createApplicationExecutionSubgraph } from "./application-execution.js";
 
 const taskId = "task-1";
@@ -164,10 +165,14 @@ function execution(commandType: "fill" | "select" | "upload" | "click_intermedia
 }
 
 function traceCollector() {
-  const events: Array<{ node: string; reasonCode: string }> = [];
+  const events: Array<{ node: string; reasonCode: string; skill?: import("@resume/contracts").SkillTraceDimensions }> = [];
   const traceSink: TraceSink = {
     record(input) {
-      events.push({ node: input.node, reasonCode: input.reasonCode });
+      events.push({
+        node: input.node,
+        reasonCode: input.reasonCode,
+        ...(input.skill === undefined ? {} : { skill: input.skill })
+      });
       return `trace-${events.length}`;
     },
     list: () => []
@@ -305,6 +310,26 @@ describe("application execution subgraph", () => {
       pendingInterrupt: { kind: interruptKind, reasonCode }
     });
     expect(tools.buildPlan).not.toHaveBeenCalled();
+  });
+
+  it("records field coverage and marks the executed field filled after readback", async () => {
+    const page = snapshot();
+    const coverage = createFieldCoverageStore();
+    const { tools } = toolsFixture({ page });
+    const graph = createApplicationExecutionSubgraph({
+      tools,
+      fieldCoverage: coverage,
+      traceSink: traceCollector().traceSink,
+      now: () => new Date("2026-08-22T00:00:00.000Z")
+    });
+
+    await graph({ state: state() });
+
+    expect(coverage.snapshot(taskId)).toMatchObject({
+      total: 1,
+      filled: 1,
+      fields: [expect.objectContaining({ fieldId: "field-email", status: "filled" })]
+    });
   });
 
   it("forwards a generated content draft to the local review store before interrupting", async () => {
@@ -515,5 +540,131 @@ describe("application execution subgraph", () => {
 
     expect(tools.invalidate).toHaveBeenCalledOnce();
     expect(tools.release).toHaveBeenCalledOnce();
+  });
+
+  it("hands an unmatched Skill page off after observation without any browser write", async () => {
+    const { tools, execute } = toolsFixture();
+    const graph = createApplicationExecutionSubgraph({
+      tools,
+      traceSink: traceCollector().traceSink,
+      skillRuntime: {
+        resolve: vi.fn(async () => ({
+          kind: "observe_only_handoff" as const,
+          reason: "page_unmatched" as const
+        }))
+      },
+      now: () => new Date("2026-09-07T00:00:00.000Z")
+    });
+
+    await expect(graph({ state: state() })).resolves.toMatchObject({
+      status: "interrupted",
+      currentNode: "select_application_skill",
+      pendingInterrupt: {
+        kind: "field_semantics",
+        reasonCode: "application_skill_page_unmatched"
+      }
+    });
+    expect(tools.observe).toHaveBeenCalledOnce();
+    expect(tools.resolveFields).not.toHaveBeenCalled();
+    expect(tools.buildPlan).not.toHaveBeenCalled();
+    expect(tools.authorize).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
+  });
+
+  it("pins the selected Skill binding and passes its semantic order into safe plan construction", async () => {
+    const page = snapshot();
+    const { tools } = toolsFixture({ page });
+    const binding = {
+      skillId: "baidu-application",
+      version: "1.0.0",
+      site: "baidu" as const,
+      pageFingerprintHash: "b".repeat(64),
+      allocationId: "allocation-baidu-campus"
+    };
+    const trace = traceCollector();
+    const graph = createApplicationExecutionSubgraph({
+      tools,
+      traceSink: trace.traceSink,
+      skillRuntime: {
+        resolve: vi.fn(async () => ({
+          kind: "selected" as const,
+          binding,
+          pageVariantId: "application-form",
+          allocation: "champion" as const,
+          directives: [
+            { kind: "resolve-field" as const, semantic: "basics.email" as const, locatorKeys: ["candidate-email"] },
+            { kind: "verify-field" as const, semantic: "basics.email" as const }
+          ]
+        }))
+      },
+      now: () => new Date("2026-09-07T00:00:00.000Z")
+    });
+
+    const result = await graph({ state: state() });
+
+    expect(result.application).toMatchObject({
+      skillBinding: binding,
+      skillTrace: {
+        skillId: binding.skillId,
+        skillVersion: binding.version,
+        pageFingerprintHash: binding.pageFingerprintHash,
+        pageVariantId: "application-form",
+        allocation: "champion"
+      }
+    });
+    expect(tools.buildPlan).toHaveBeenCalledWith(expect.objectContaining({
+      skillSemanticOrder: ["basics.email"]
+    }));
+    expect(trace.events).toContainEqual(expect.objectContaining({
+      node: "select_application_skill",
+      skill: {
+        skillId: binding.skillId,
+        skillVersion: binding.version,
+        pageFingerprintHash: binding.pageFingerprintHash,
+        pageVariantId: "application-form",
+        allocation: "champion"
+      }
+    }));
+  });
+
+  it("fails closed if a resumed task is offered a different Skill binding", async () => {
+    const { tools, execute } = toolsFixture();
+    const originalBinding = {
+      skillId: "baidu-application",
+      version: "1.0.0",
+      site: "baidu" as const,
+      pageFingerprintHash: "b".repeat(64),
+      allocationId: "allocation-baidu-campus"
+    };
+    const graph = createApplicationExecutionSubgraph({
+      tools,
+      traceSink: traceCollector().traceSink,
+      skillRuntime: {
+        resolve: vi.fn(async () => ({
+          kind: "selected" as const,
+          binding: { ...originalBinding, version: "2.0.0" },
+          directives: []
+        }))
+      }
+    });
+
+    const result = await graph({ state: state({
+      application: {
+        applicationUrl: "https://jobs.example.test/application",
+        executionEpoch: 0,
+        retryCount: 0,
+        finalReviewLocked: false,
+        skillBinding: originalBinding
+      }
+    }) });
+
+    expect(result).toMatchObject({
+      status: "failed",
+      currentNode: "select_application_skill",
+      error: { code: "application_skill_binding_changed" },
+      application: { skillBinding: originalBinding }
+    });
+    expect(tools.resolveFields).not.toHaveBeenCalled();
+    expect(execute).not.toHaveBeenCalled();
   });
 });

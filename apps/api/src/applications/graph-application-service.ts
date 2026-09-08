@@ -1,8 +1,11 @@
 import type {
   AgentGraphState,
+  ApplicationExecutionState,
+  HumanResume,
   ApplicationDisplayCategory,
   ApplicationFieldCoverage,
   ApplicationQuestion,
+  SubgraphName,
   FormSnapshot,
   WorkerActivity
 } from "@resume/contracts";
@@ -20,6 +23,21 @@ import type { ApplicationTaskRepository, StoredApplicationTask } from "./applica
 import type { GraphApplicationReviewRepository } from "./graph-application-review-repository.js";
 import type { TaskEventBus } from "./task-events.js";
 
+interface GraphRuntimePort {
+  start(input: {
+    threadId: string;
+    runId: string;
+    taskId: string;
+    subgraph: SubgraphName;
+    profileRevision: number;
+    application?: ApplicationExecutionState;
+  }): Promise<AgentGraphState>;
+  run(threadId: string): Promise<AgentGraphState>;
+  resume(threadId: string, resume: HumanResume): Promise<AgentGraphState>;
+  state(threadId: string): Promise<AgentGraphState | undefined>;
+  cancel(threadId: string): Promise<AgentGraphState>;
+}
+
 interface GraphApplicationBrowserPort {
   open(taskId: string, url: string): Promise<unknown>;
   releaseTask?(taskId: string): Promise<void>;
@@ -27,7 +45,7 @@ interface GraphApplicationBrowserPort {
 
 export interface GraphApplicationServiceDependencies {
   taskRepository: ApplicationTaskRepository;
-  graph: Pick<GraphService, "start" | "run" | "resume" | "state" | "cancel">;
+  graph: GraphRuntimePort;
   profileRevision(): number;
   browserOwnershipLease: BrowserOwnershipLease;
   browser: GraphApplicationBrowserPort;
@@ -54,7 +72,7 @@ export function createGraphApplicationService(
   const requireTask = (taskId: string): StoredApplicationTask => {
     const task = dependencies.taskRepository.get(taskId);
     if (task === undefined) throw new Error("application_task_not_found");
-    if (task.orchestrator !== "langgraph-v1") throw new Error("application_task_not_graph_owned");
+    if (task.orchestrator !== "agent-runtime") throw new Error("application_task_not_runtime_owned");
     return task;
   };
 
@@ -174,7 +192,7 @@ export function createGraphApplicationService(
 
     async refreshFromProfile(): Promise<void> {
       for (const task of dependencies.taskRepository.list()) {
-        if (task.orchestrator !== "langgraph-v1") continue;
+        if (task.orchestrator !== "agent-runtime") continue;
         const current = await fetchState(task.id);
         if (current?.status === "interrupted" && current.pendingInterrupt?.kind === "missing_fact") {
           await resume(task.id, "confirm");
@@ -353,7 +371,7 @@ function snapshotFor(taskId: string, state: AgentGraphState): ApplicationService
     name: "",
     createdAt: "",
     updatedAt: "",
-    orchestrator: "langgraph-v1" as const,
+    orchestrator: "agent-runtime" as const,
     profileRevisionApplied: 0,
     profileSyncStatus: "current" as const
   };

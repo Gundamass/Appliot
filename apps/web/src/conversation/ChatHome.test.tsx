@@ -325,6 +325,27 @@ describe("ChatHome", () => {
     await waitFor(() => expect(api.confirm).toHaveBeenCalledWith(session.id, "confirmation-optimistic", true));
   });
 
+  it("labels a direct URL confirmation as filling instead of recommendation or generic application", async () => {
+    const confirmation: ConversationConfirmation = {
+      confirmationId: "confirmation-direct-url",
+      action: "start_application",
+      target: { kind: "application_url", url: "https://example.com/apply/123" }
+    };
+    const api = fakeConversationApi();
+    vi.mocked(api.send).mockResolvedValue(turn("开始填写前请确认", confirmation, 2));
+    vi.mocked(api.confirm).mockReturnValue(new Promise<ConversationTurnResponse>(() => undefined));
+    const user = userEvent.setup();
+    render(<ChatHome api={api} onOpenApplication={vi.fn()} />);
+
+    await user.type(screen.getByRole("textbox", { name: "输入消息" }), "填写 https://example.com/apply/123");
+    await user.click(screen.getByRole("button", { name: "发送" }));
+    await user.click(await screen.findByRole("button", { name: "确认开始填写" }));
+
+    const confirmationTurn = await screen.findByTestId("conversation-turn-3");
+    expect(within(confirmationTurn).getByText("确认开始填写")).toBeVisible();
+    expect(within(confirmationTurn).queryByText("确认开始投递")).toBeNull();
+  });
+
   it("keeps the follow-up recruitment confirmation actionable after approving an entry", async () => {
     const entryConfirmation: ConversationConfirmation = {
       confirmationId: "confirmation-entry",

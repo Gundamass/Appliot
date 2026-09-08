@@ -111,6 +111,7 @@ export function createApprovalGate(options: ApprovalGateOptions = {}): ApprovalG
 
   return {
     verify(input, expected) {
+      if (input === undefined || input === null) return { valid: false, reason: "approval_required" };
       const parsed = FinalSubmitApprovalSchema.safeParse(input);
       if (!parsed.success) return { valid: false, reason: "approval_invalid" };
       const approval = parsed.data;

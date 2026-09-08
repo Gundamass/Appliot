@@ -49,6 +49,26 @@ describe("Planner", () => {
     expect(finalStep?.dependsOn.length).toBeGreaterThan(0);
     expect(plan.steps.every((step) => step.maxAttempts > 0)).toBe(true);
   });
+
+  it("keeps reversible application fill and verification autonomous", async () => {
+    const planner = createPlanner({
+      idFactory: () => "plan-autonomous",
+      now: () => "2026-09-03T00:00:00.000Z"
+    });
+
+    const plan = await planner.create(CanonicalIntentSchema.parse({
+      ...intentForApplication,
+      intentId: "intent-autonomous-application",
+      subGoals: ["fill_application", "verify_application"]
+    }));
+
+    expect(plan.steps
+      .filter((step) => ["fill_application", "verify_application"].includes(step.objective))
+      .every((step) => step.risk === "low")).toBe(true);
+    expect(plan.approvalPoints).toEqual([
+      expect.objectContaining({ kind: "final_submit" })
+    ]);
+  });
 });
 
 export { intentForApplication };

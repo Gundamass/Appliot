@@ -8,6 +8,7 @@ export * from "./advisory.js";
 export {
   JOB_EXPECTATION_FIELDS,
   hasUsableJobExpectation,
+  isUnrestrictedLocationValue,
   jobExpectationSnapshot,
   projectJobExpectations,
   type ProjectedJobExpectation

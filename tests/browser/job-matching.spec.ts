@@ -91,6 +91,7 @@ test("identifies job detail, application, login and challenge boundaries without
 });
 
 test("maps the legacy apply view back to chat without exposing a job entry", async ({ page }) => {
+  await mockConversationWorkspace(page);
   await page.goto(`${webBaseUrl}/?view=apply`);
 
   await expect(page.getByRole("heading", { name: "和助手聊聊你的求职计划" })).toBeVisible();
@@ -99,6 +100,7 @@ test("maps the legacy apply view back to chat without exposing a job entry", asy
 });
 
 test("maps the legacy apply view to chat without creating an application task", async ({ page }) => {
+  await mockConversationWorkspace(page);
   let applicationCreateCount = 0;
   await page.route("**/api/applications", async (route) => {
     if (route.request().method() === "POST") applicationCreateCount += 1;
@@ -110,4 +112,39 @@ test("maps the legacy apply view to chat without creating an application task", 
   await expect(page.getByLabel("投递官网链接")).toHaveCount(0);
   expect(applicationCreateCount).toBe(0);
 });
+
+async function mockConversationWorkspace(page: import("@playwright/test").Page): Promise<void> {
+  const session = {
+    id: "conversation-legacy",
+    title: "Legacy conversation",
+    createdAt: "2026-09-02T00:00:00.000Z",
+    updatedAt: "2026-09-02T00:00:00.000Z"
+  };
+  await page.route("**/api/conversations", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify([session])
+    });
+  });
+  await page.route("**/api/conversations/conversation-legacy", async (route) => {
+    if (route.request().method() !== "GET") {
+      await route.continue();
+      return;
+    }
+    await route.fulfill({
+      status: 200,
+      contentType: "application/json",
+      body: JSON.stringify({
+        session,
+        messages: [],
+        context: { version: 0, recentPostingIds: [] }
+      })
+    });
+  });
+}
 

@@ -23,7 +23,7 @@ function fakeDependencies(): ConversationGraphDependencies & {
     applicationUrl: "https://jobs.example.test/apply/frontend",
     createdAt: "2026-08-22T00:00:00.000Z",
     updatedAt: "2026-08-22T00:00:00.000Z",
-    orchestrator: "langgraph-v1" as const,
+    orchestrator: "agent-runtime" as const,
     profileRevisionApplied: 0,
     profileSyncStatus: "current" as const
   }));
@@ -31,6 +31,9 @@ function fakeDependencies(): ConversationGraphDependencies & {
   const traceRecord = vi.fn(() => "trace-1");
 
   return {
+    conversations: {
+      linkJobMatchSession: vi.fn()
+    },
     jobMatchRepository: {
       get: vi.fn((sessionId: string): JobMatchAggregate | undefined => sessionId === "match-1" ? ({
         id: "match-1",
@@ -93,7 +96,7 @@ function fakeDependencies(): ConversationGraphDependencies & {
         applicationUrl: "https://jobs.example.test/apply/already",
         createdAt: "2026-08-21T00:00:00.000Z",
         updatedAt: "2026-08-21T00:00:00.000Z",
-        orchestrator: "langgraph-v1" as const,
+    orchestrator: "agent-runtime" as const,
         profileRevisionApplied: 0,
         profileSyncStatus: "current" as const
       }]),
@@ -336,6 +339,98 @@ describe("conversation graph", () => {
       candidates: [{ source: "user", url: "https://jobs.baidu.com/" }]
     });
     expect(recovered.context.verifiedRecruitmentSite).toBeUndefined();
+  });
+
+  it("routes an explicit filling URL ahead of stale recruitment context", async () => {
+    const base = fakeDependencies();
+    base.createFromJob.mockImplementation((input: { id: string; applicationUrl: string }) => ({
+      ...input,
+      name: "Direct application",
+      createdAt: "2026-09-07T00:00:00.000Z",
+      updatedAt: "2026-09-07T00:00:00.000Z",
+      orchestrator: "agent-runtime" as const,
+      profileRevisionApplied: 0,
+      profileSyncStatus: "current" as const
+    }));
+    const searchRecruitmentSites = vi.fn();
+    const createJobMatchSession = vi.fn();
+    const validatePublicHttpsUrl = vi.fn(async (url: string) => ({
+      url,
+      domain: "jobs.example.com"
+    }));
+    const graph = createConversationGraph({
+      ...base,
+      searchRecruitmentSites,
+      validatePublicHttpsUrl,
+      jobMatchService: {
+        create: createJobMatchSession,
+        select: vi.fn(),
+        convert: vi.fn()
+      }
+    });
+    const context: ConversationContext = {
+      version: 1,
+      recentPostingIds: [],
+      lastRecruitmentRequest: { companyName: "百度", recruitmentType: "campus" }
+    };
+
+    const response = (await graph.invoke({
+      conversationId: "conversation-direct-application-url",
+      turnSequence: 2,
+      text: "填写 https://jobs.example.com/apply/123",
+      context
+    })).response;
+
+    expect(response.message.intent).toMatchObject({
+      kind: "start_application",
+      target: { kind: "application_url", url: "https://jobs.example.com/apply/123" }
+    });
+    expect(response.pendingConfirmation?.target).toMatchObject({ kind: "application_url" });
+    expect(validatePublicHttpsUrl).toHaveBeenCalledWith("https://jobs.example.com/apply/123");
+    expect(searchRecruitmentSites).not.toHaveBeenCalled();
+    expect(createJobMatchSession).not.toHaveBeenCalled();
+
+    const confirmed = (await graph.invoke({
+      conversationId: "conversation-direct-application-url",
+      turnSequence: 3,
+      confirmationId: response.confirmationId!,
+      approved: true,
+      context: response.context
+    })).response;
+
+    expect(base.createFromJob).toHaveBeenCalledWith(expect.objectContaining({
+      applicationUrl: "https://jobs.example.com/apply/123"
+    }));
+    expect(base.startApplication).toHaveBeenCalledWith(expect.objectContaining({
+      applicationUrl: "https://jobs.example.com/apply/123"
+    }));
+    expect(confirmed.cards[0]).toMatchObject({
+      type: "application_task",
+      applicationUrl: "https://jobs.example.com/apply/123"
+    });
+  });
+
+  it("asks for purpose when a bare URL follows recruitment context", async () => {
+    const base = fakeDependencies();
+    const searchRecruitmentSites = vi.fn();
+    const graph = createConversationGraph({ ...base, searchRecruitmentSites });
+
+    const response = (await graph.invoke({
+      conversationId: "conversation-ambiguous-url",
+      turnSequence: 2,
+      text: "https://jobs.example.com/apply/456",
+      context: {
+        version: 1,
+        recentPostingIds: [],
+        lastRecruitmentRequest: { companyName: "百度", recruitmentType: "campus" }
+      }
+    })).response;
+
+    expect(response.message.text).toContain("你想填写这个申请页面，还是用它进行岗位推荐");
+    expect(response.pendingConfirmation).toBeUndefined();
+    expect(searchRecruitmentSites).not.toHaveBeenCalled();
+    expect(base.createFromJob).not.toHaveBeenCalled();
+    expect(base.startApplication).not.toHaveBeenCalled();
   });
 
   it.each([
@@ -736,6 +831,113 @@ describe("conversation graph", () => {
     );
     expect(failed.response.message.text).not.toContain("这项操作暂时无法完成");
     expect(create).toHaveBeenCalledWith({ url: candidate.url });
+  });
+
+  it("explains controlled-browser contention instead of returning a generic failure", async () => {
+    const dependencies = fakeDependencies();
+    const candidate = {
+      title: "百度校园招聘",
+      url: "https://talent.baidu.com/",
+      domain: "talent.baidu.com",
+      snippet: "校园招聘岗位",
+      source: "tavily" as const
+    };
+    const create = vi.fn(async () => {
+      throw new Error("browser_lease_in_use");
+    });
+    const graph = createConversationGraph({
+      ...dependencies,
+      searchRecruitmentSites: vi.fn(async () => ({
+        query: "百度 校园招聘 招聘 官网",
+        candidates: [candidate]
+      })),
+      jobMatchService: {
+        create,
+        select: vi.fn(),
+        convert: vi.fn()
+      }
+    });
+
+    const discovered = await graph.invoke({
+      conversationId: "conversation-browser-contention",
+      turnSequence: 1,
+      text: "帮我投递百度",
+      context: { version: 0, recentPostingIds: [] }
+    });
+    const siteApproved = await graph.invoke({
+      conversationId: "conversation-browser-contention",
+      turnSequence: 2,
+      confirmationId: discovered.response.confirmationId,
+      approved: true,
+      selectedUrl: candidate.url,
+      context: discovered.response.context
+    });
+    const failed = await graph.invoke({
+      conversationId: "conversation-browser-contention",
+      turnSequence: 3,
+      confirmationId: siteApproved.response.confirmationId,
+      approved: true,
+      context: siteApproved.response.context
+    });
+
+    expect(failed.response.message.text).toBe(
+      "受控浏览器正在处理其他岗位匹配或投递任务，请等待当前任务完成或先暂停它后再试。"
+    );
+    expect(failed.traceIds).not.toHaveLength(0);
+    expect(create).toHaveBeenCalledWith({ url: candidate.url });
+  });
+
+  it("explains a normalized job match execution failure instead of returning a generic failure", async () => {
+    const dependencies = fakeDependencies();
+    const candidate = {
+      title: "百度校园招聘",
+      url: "https://talent.baidu.com/",
+      domain: "talent.baidu.com",
+      snippet: "校园招聘岗位",
+      source: "tavily" as const
+    };
+    const create = vi.fn(async () => {
+      throw new Error("browser_observation_failed: page unavailable");
+    });
+    const graph = createConversationGraph({
+      ...dependencies,
+      searchRecruitmentSites: vi.fn(async () => ({
+        query: "百度 校园招聘 招聘 官网",
+        candidates: [candidate]
+      })),
+      jobMatchService: {
+        create,
+        select: vi.fn(),
+        convert: vi.fn()
+      }
+    });
+
+    const discovered = await graph.invoke({
+      conversationId: "conversation-normalized-create-failure",
+      turnSequence: 1,
+      text: "帮我投递百度",
+      context: { version: 0, recentPostingIds: [] }
+    });
+    const siteApproved = await graph.invoke({
+      conversationId: "conversation-normalized-create-failure",
+      turnSequence: 2,
+      confirmationId: discovered.response.confirmationId,
+      approved: true,
+      selectedUrl: candidate.url,
+      context: discovered.response.context
+    });
+    const failed = await graph.invoke({
+      conversationId: "conversation-normalized-create-failure",
+      turnSequence: 3,
+      confirmationId: siteApproved.response.confirmationId,
+      approved: true,
+      context: siteApproved.response.context
+    });
+
+    expect(failed.response.message.text).toBe(
+      "岗位推荐执行失败，请检查受控浏览器和招聘页面后重试。"
+    );
+    expect(failed.response.message.text).not.toContain("这项操作暂时无法完成");
   });
 
   it("uses the configured checkpoint saver for conversation state", async () => {

@@ -24,15 +24,15 @@ describe("PlanValidator", () => {
     ]));
   });
 
-  it("requires a mandatory high-risk approval point", async () => {
+  it("requires a mandatory irreversible approval point", async () => {
     const plan = await createPlanner({ idFactory: () => "plan-id", now: () => "2026-09-03T00:00:00.000Z" })
       .create(intentForApplication);
-    const highRiskStep = plan.steps.find((step) => step.risk === "high");
-    expect(highRiskStep).toBeDefined();
+    const irreversibleStep = plan.steps.find((step) => step.risk === "irreversible");
+    expect(irreversibleStep).toBeDefined();
     const invalid = PlanStateSchema.parse({
       ...plan,
-      approvalPoints: plan.approvalPoints.map((point) => point.stepId === highRiskStep?.id
-        ? { ...point, kind: "final_submit" as const, required: false }
+      approvalPoints: plan.approvalPoints.map((point) => point.stepId === irreversibleStep?.id
+        ? { ...point, kind: "high_risk_action" as const, required: false }
         : point)
     });
 
@@ -40,7 +40,7 @@ describe("PlanValidator", () => {
 
     expect(result.valid).toBe(false);
     expect(result.errors).toEqual(expect.arrayContaining([
-      expect.objectContaining({ code: "approval_point_missing", stepId: highRiskStep?.id })
+      expect.objectContaining({ code: "approval_point_missing", stepId: irreversibleStep?.id })
     ]));
   });
 

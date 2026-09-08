@@ -107,7 +107,7 @@ type Route = "read" | "side_effect" | "persist";
 type InputKind = "message" | "confirmation";
 
 interface ResolvedTarget {
-  kind: "recommendation" | "task" | "recruitment_site";
+  kind: "recommendation" | "task" | "recruitment_site" | "application_url";
   sessionId?: string;
   resultId?: string;
   postingId?: string;
@@ -116,6 +116,7 @@ interface ResolvedTarget {
   recruitmentSite?: VerifiedRecruitmentSite;
   recruitmentCompany?: string;
   recruitmentType?: RecruitmentSearchRequest["recruitmentType"];
+  applicationUrl?: string;
 }
 
 interface GraphState {
@@ -299,7 +300,25 @@ async function classifyIntent(
 
   const fallback = deterministicIntent(state.text!);
   const manualUrl = extractSingleHttpsUrl(state.text!);
-  if (manualUrl !== undefined && state.context.lastRecruitmentRequest !== undefined) {
+  if (manualUrl !== undefined && hasExplicitFillingIntent(state.text!)) {
+    const intent = ConversationIntentSchema.parse({
+      kind: "start_application",
+      target: { kind: "application_url", url: manualUrl },
+      requiresConfirmation: true
+    });
+    return finish({
+      intent,
+      traceIds: trace(dependencies, nodeEvent(state, "classify_intent", intent.kind, "direct_application_url"), state.traceIds)
+    });
+  }
+  if (manualUrl !== undefined && isBareUrlMessage(state.text!, manualUrl)) {
+    return finish({
+      intent: unknownIntent(),
+      assistantText: "你想填写这个申请页面，还是用它进行岗位推荐？请在网址前补充“填写”或“岗位推荐”。",
+      traceIds: trace(dependencies, nodeEvent(state, "classify_intent", "unknown", "application_url_purpose_required"), state.traceIds)
+    });
+  }
+  if (manualUrl !== undefined && state.context.lastRecruitmentRequest !== undefined && hasRecruitmentUrlIntent(state.text!)) {
     const last = state.context.lastRecruitmentRequest;
     const intent = ConversationIntentSchema.parse({
       kind: "discover_recruitment_site",
@@ -365,6 +384,12 @@ function resolveTarget(
           recruitmentSite
         },
         traceIds: trace(dependencies, nodeEvent(state, "resolve_target", "resolved", "recruitment_site_resolved"), state.traceIds)
+      };
+    }
+    if (pending.target.kind === "application_url") {
+      return {
+        target: { kind: "application_url", applicationUrl: pending.target.url },
+        traceIds: trace(dependencies, nodeEvent(state, "resolve_target", "resolved", "application_url_resolved"), state.traceIds)
       };
     }
     const target = resolveRecommendationByIds(dependencies, pending.target.sessionId, pending.target.resultId);
@@ -435,6 +460,13 @@ function resolveTarget(
         recruitmentCompany: target.company,
         recruitmentType: target.recruitmentType
       }
+    };
+  }
+  if (target.kind === "application_url") {
+    if (target.url === undefined) return { resolutionError: "application_url_required" };
+    return {
+      target: { kind: "application_url", applicationUrl: target.url },
+      traceIds: trace(dependencies, nodeEvent(state, "resolve_target", "resolved", "application_url_resolved"), state.traceIds)
     };
   }
   return { resolutionError: "job_match_session_target_unsupported" };
@@ -549,6 +581,10 @@ async function prepareSideEffect(
     return prepareRecruitmentRequestConfirmation(dependencies, confirmations, state);
   }
 
+  if (state.inputKind !== "confirmation" && state.target?.kind === "application_url") {
+    return prepareDirectApplicationConfirmation(dependencies, confirmations, state);
+  }
+
   if (pending?.action === "start_application") {
     const consumed = confirmations.consume(state.conversationId, state.confirmationId!);
     if (consumed === undefined) {
@@ -570,6 +606,32 @@ async function prepareSideEffect(
     }
     try {
       const target = state.target;
+      if (target?.kind === "application_url" && target.applicationUrl !== undefined) {
+        const invocation = await invokeTool(dependencies, registry, state, "prepare_side_effect", "create_application_task", {
+          applicationUrl: target.applicationUrl
+        });
+        if (!invocation.ok) {
+          const code = errorCode(invocation.error);
+          return finishProcessing({
+            cards: [],
+            assistantText: userFacingError(code),
+            consumedConfirmationId: consumed.confirmationId,
+            failureCode: code,
+            traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "failed", code), invocation.traceIds)
+          });
+        }
+        const toolResult = invocation.result;
+        return finishProcessing({
+          cards: toolResult.cards,
+          toolResult,
+          assistantText: "已创建受控填写任务，可以打开任务工作台继续处理。",
+          consumedConfirmationId: consumed.confirmationId,
+          contextPatch: {
+            ...(toolResult.task?.id === undefined ? {} : { activeApplicationTaskId: toolResult.task.id })
+          },
+          traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "completed", "direct_application_task_created"), invocation.traceIds)
+        });
+      }
       if (target?.kind !== "recommendation" || target.sessionId === undefined || target.resultId === undefined || target.postingContentHash === undefined) {
         throw new Error("recommendation_target_invalid");
       }
@@ -724,6 +786,43 @@ async function prepareRecruitmentDiscovery(
     contextPatch: { lastRecruitmentRequest: request, verifiedRecruitmentSite: undefined },
     assistantText: `已找到${company}的招聘入口候选，共 ${validatedSearch.candidates.length} 个。搜索候选，需你确认后才会继续。`,
     traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "pending", "recruitment_site_choices_confirmation_required"), invocation.traceIds)
+  };
+}
+
+async function prepareDirectApplicationConfirmation(
+  dependencies: ConversationGraphDependencies,
+  confirmations: ConversationConfirmationStore,
+  state: GraphState
+): Promise<Partial<GraphState>> {
+  const rawUrl = state.target?.kind === "application_url" ? state.target.applicationUrl : undefined;
+  if (rawUrl === undefined) {
+    return { cards: [], assistantText: userFacingError("application_url_required"), failureCode: "application_url_required" };
+  }
+  const validator = dependencies.validatePublicHttpsUrl ?? validatePublicHttpsUrl;
+  let validated: { url: string; domain: string };
+  try {
+    validated = await validator(rawUrl);
+  } catch {
+    return {
+      cards: [],
+      assistantText: userFacingError("unsafe_application_url"),
+      failureCode: "unsafe_application_url",
+      traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "rejected", "unsafe_application_url"), state.traceIds)
+    };
+  }
+  const confirmation: ConversationConfirmation = {
+    confirmationId: randomUUID(),
+    action: "start_application",
+    sourceTurnSequence: state.turnSequence,
+    target: { kind: "application_url", url: validated.url }
+  };
+  confirmations.put(state.conversationId, confirmation);
+  recordWaitingStep(dependencies, state, confirmation.action);
+  return {
+    cards: [confirmationCard(confirmation)],
+    pendingConfirmation: confirmation,
+    assistantText: "已识别为申请填写页面。开始识别并填写前需要你的确认。",
+    traceIds: trace(dependencies, nodeEvent(state, "prepare_side_effect", "pending", "direct_application_confirmation_required"), state.traceIds)
   };
 }
 
@@ -1167,6 +1266,13 @@ function persistTurn(
 
 function confirmationIntent(confirmation: ConversationConfirmation): ConversationIntent {
   if (confirmation.action === "start_application") {
+    if (confirmation.target.kind === "application_url") {
+      return ConversationIntentSchema.parse({
+        kind: "start_application",
+        target: confirmation.target,
+        requiresConfirmation: true
+      });
+    }
     return ConversationIntentSchema.parse({
       kind: "start_application",
       target: { kind: "recommendation", id: confirmation.target.resultId },
@@ -1330,6 +1436,18 @@ function toolContext(state: GraphState): ConversationToolContext {
     ...(state.context.activeApplicationTaskId === undefined ? {} : { activeApplicationTaskId: state.context.activeApplicationTaskId }),
     ...(state.context.verifiedRecruitmentSite === undefined ? {} : { verifiedRecruitmentSite: state.context.verifiedRecruitmentSite })
   };
+}
+
+function hasExplicitFillingIntent(text: string): boolean {
+  return /填写|填表|填写申请|申请表|开始识别并填写/u.test(text);
+}
+
+function hasRecruitmentUrlIntent(text: string): boolean {
+  return /招聘|岗位推荐|职位推荐|招聘入口|官方入口|招聘官网/u.test(text);
+}
+
+function isBareUrlMessage(text: string, url: string): boolean {
+  return text.trim().replace(/[),.;!?，。；！？]+$/u, "") === url;
 }
 
 function processTraceFor(
@@ -1511,6 +1629,8 @@ function userFacingError(code: string): string {
   if (code === "TAVILY_PROTOCOL_ERROR" || code === "NO_SAFE_CANDIDATE") return "暂时没有找到可确认的招聘入口。请换一种公司名称，或粘贴官方招聘链接。";
   if (code === "recruitment_site_selection_invalid") return "所选招聘入口已失效，请重新搜索并确认。";
   if (code === "unsafe_recruitment_url") return "这个招聘链接未通过公网 HTTPS 安全校验，请粘贴公开的官方招聘链接。";
+  if (code === "unsafe_application_url") return "这个填写链接未通过公网 HTTPS 安全校验，请粘贴公开的申请页面链接。";
+  if (code === "application_url_required") return "请提供要填写的完整 HTTPS 申请页面链接。";
   if (code === "recruitment_site_confirmation_required") return "请先确认已找到的官方招聘入口。";
   if (code === "recruitment_site_invalid") return "招聘入口校验失败，请重新搜索官方入口。";
   if (code === "job_match_create_unavailable") return "岗位匹配服务暂时不可用，请稍后重试。";
@@ -1519,6 +1639,10 @@ function userFacingError(code: string): string {
   if (code === "job_match_application_redirect") return "当前入口直接打开了申请页面，暂时无法从这里生成岗位推荐。";
   if (code === "job_match_session_missing") return "岗位匹配会话没有成功创建，请稍后重试。";
   switch (code) {
+    case "tool_execution_failed":
+      return "岗位推荐执行失败，请检查受控浏览器和招聘页面后重试。";
+    case "conversation_operation_failed":
+      return "对话操作执行失败，请稍后重试。";
     case "recommendation_context_missing":
     case "recommendation_ordinal_1_missing":
     case "recommendation_not_found":
@@ -1529,6 +1653,9 @@ function userFacingError(code: string): string {
     case "browser_worker_unavailable":
     case "browser_open_unavailable":
       return "受控浏览器暂时不可用，可以稍后重试或打开已有投递任务。";
+    case "browser_lease_in_use":
+    case "browser_task_in_use":
+      return "受控浏览器正在处理其他岗位匹配或投递任务，请等待当前任务完成或先暂停它后再试。";
     case "challenge_required":
     case "browser_challenge_required":
       return "投递页面需要额外验证，请手动接管浏览器完成验证后再继续。";

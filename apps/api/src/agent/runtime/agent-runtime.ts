@@ -32,14 +32,18 @@ import {
   createInMemoryArtifactStore,
   createSqliteRuntimeArtifactStore,
   createInitialRuntimeState,
+  toRuntimeRequestContext,
   RuntimeStateSchema,
   stateHash,
   type RuntimeArtifactStore,
+  type RuntimeRequestContext,
   type RuntimeState
 } from "./runtime-state.js";
 import { DEFAULT_BUDGET_LIMITS } from "./budget-manager.js";
 import type { BaseCheckpointSaver } from "@langchain/langgraph-checkpoint";
 import type { CallerAttestationToken } from "../policy/caller-attestation.js";
+import type { ApprovalGate } from "../policy/approval-gate.js";
+import type { AgentEventTraceSink } from "../events/trace-sink.js";
 
 export interface AgentRuntime {
   start(input: AgentRunInput | z.input<typeof AgentRunInputSchema>): Promise<AgentRunResult>;
@@ -60,6 +64,10 @@ export interface AgentRuntimeDependencies {
   cancellationManager?: CancellationManager;
   /** Issued by the trusted composition root; never accepted from AgentRunInput. */
   callerAttestation?: CallerAttestationToken;
+  /** Trusted gate for irreversible Runtime resumes. */
+  approvalGate?: ApprovalGate;
+  /** Authoritative append-only Runtime event log. */
+  eventSink?: AgentEventTraceSink;
   langGraphCheckpointer?: BaseCheckpointSaver;
   budgetLimits?: Partial<BudgetLimits>;
   idFactory?: () => string;
@@ -87,6 +95,8 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies): Agen
     ...(dependencies.callerAttestation === undefined
       ? {}
       : { callerAttestation: dependencies.callerAttestation }),
+    ...(dependencies.approvalGate === undefined ? {} : { approvalGate: dependencies.approvalGate }),
+    ...(dependencies.eventSink === undefined ? {} : { eventSink: dependencies.eventSink }),
     ...(dependencies.langGraphCheckpointer === undefined ? {} : { langGraphCheckpointer: dependencies.langGraphCheckpointer }),
     idFactory,
     now,
@@ -100,8 +110,15 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies): Agen
     if (checkpoint === undefined) throw new Error("agent_run_not_found");
     const intent = checkpoint.intentRef === undefined ? undefined : artifactStore.getIntent(checkpoint.intentRef);
     const plan = checkpoint.planRef === undefined ? undefined : artifactStore.getPlan(checkpoint.planRef);
+    const requestContext: RuntimeRequestContext | undefined = checkpoint.requestContextRef === undefined
+      ? undefined
+      : artifactStore.getRequestContext(checkpoint.requestContextRef);
+    if (checkpoint.requestContextRef !== undefined && requestContext === undefined) {
+      throw new Error("agent_request_context_missing");
+    }
     if (checkpoint.intentRef !== undefined && intent === undefined) throw new Error("agent_intent_artifact_missing");
     if (checkpoint.planRef !== undefined && plan === undefined) throw new Error("agent_plan_artifact_missing");
+    assertCheckpointIdentity(checkpoint, intent, plan);
     const budgetLimits = checkpoint.budgetLimits ?? defaultLimits;
     const inFlightStep = checkpoint.status === "running"
       ? plan?.steps.find((step) => step.status === "running")
@@ -118,12 +135,13 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies): Agen
             : checkpoint.planRef === undefined
               ? "plan"
               : "dispatch";
-    const candidateState = RuntimeStateSchema.parse({
+    const candidateState: RuntimeState = RuntimeStateSchema.parse({
       runId: checkpoint.runId,
-      requestedBy: "restored",
+      requestedBy: requestContext?.requestedBy ?? "restored",
       status: checkpoint.status,
       phase: checkpoint.phase ?? inferredPhase,
       executionEpoch: checkpoint.executionEpoch,
+      ...(checkpoint.requestContextRef === undefined ? {} : { requestContextRef: checkpoint.requestContextRef }),
       ...(checkpoint.intentRef === undefined ? {} : { intentRef: checkpoint.intentRef, intent }),
       ...(checkpoint.planRef === undefined ? {} : { planRef: checkpoint.planRef, plan }),
       ...(checkpoint.currentStepId === undefined ? {} : { currentStepId: checkpoint.currentStepId }),
@@ -137,17 +155,19 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies): Agen
       createdAt: checkpoint.createdAt,
       updatedAt: checkpoint.createdAt
     });
+    if (requestContext !== undefined) candidateState.requestContext = requestContext;
     const integrityInvalid = checkpoint.phase !== undefined && stateHash(candidateState) !== checkpoint.stateHash;
     const restoredStatus = !integrityInvalid && inFlightStep === undefined && exceededBudgetMetric === undefined
       ? checkpoint.status
       : "blocked";
     const phase = integrityInvalid ? "blocked" : checkpoint.phase ?? inferredPhase;
-    const state = RuntimeStateSchema.parse({
+    const state: RuntimeState = RuntimeStateSchema.parse({
       runId: checkpoint.runId,
-      requestedBy: "restored",
+      requestedBy: requestContext?.requestedBy ?? "restored",
       status: restoredStatus,
       phase,
       executionEpoch: checkpoint.executionEpoch,
+      ...(checkpoint.requestContextRef === undefined ? {} : { requestContextRef: checkpoint.requestContextRef }),
       ...(checkpoint.intentRef === undefined ? {} : { intentRef: checkpoint.intentRef, intent }),
       ...(checkpoint.planRef === undefined ? {} : { planRef: checkpoint.planRef, plan }),
       ...(checkpoint.currentStepId === undefined ? {} : { currentStepId: checkpoint.currentStepId }),
@@ -178,6 +198,7 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies): Agen
         }
       })
     });
+    if (requestContext !== undefined) state.requestContext = requestContext;
     if (integrityInvalid || inFlightStep !== undefined || exceededBudgetMetric !== undefined) {
       state.stateHash = stateHash(state);
       const { pendingInterrupt: _pendingInterrupt, ...checkpointWithoutInterrupt } = checkpoint;
@@ -199,6 +220,10 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies): Agen
       const runId = idFactory();
       const limits = BudgetLimitsSchema.parse({ ...defaultLimits, ...(parsed.budget ?? {}) });
       const state = createInitialRuntimeState(runId, parsed, limits, now());
+      const requestContext = toRuntimeRequestContext(parsed);
+      state.requestContextRef = artifactStore.saveRequestContext(requestContext);
+      state.requestContext = requestContext;
+      state.stateHash = stateHash(state);
       const result = await loop.start(state);
       return toCheckpointResult(result);
     },
@@ -240,6 +265,33 @@ export function createAgentRuntime(dependencies: AgentRuntimeDependencies): Agen
       });
     }
   };
+}
+
+function assertCheckpointIdentity(
+  checkpoint: import("@resume/contracts").RuntimeCheckpoint,
+  intent: import("@resume/contracts").CanonicalIntent | undefined,
+  plan: import("@resume/contracts").PlanState | undefined
+): void {
+  if (checkpoint.runId.length === 0) throw new Error("agent_checkpoint_identity_mismatch");
+  if (checkpoint.intentId !== undefined
+    && (intent === undefined || intent.intentId !== checkpoint.intentId)) {
+    throw new Error("agent_checkpoint_identity_mismatch");
+  }
+  if (checkpoint.planId !== undefined
+    && (plan === undefined || plan.planId !== checkpoint.planId)) {
+    throw new Error("agent_checkpoint_identity_mismatch");
+  }
+  if (plan !== undefined) {
+    if (checkpoint.intentId === undefined || plan.intentId !== checkpoint.intentId) {
+      throw new Error("agent_checkpoint_identity_mismatch");
+    }
+    if (checkpoint.planRevision === undefined || plan.revision !== checkpoint.planRevision) {
+      throw new Error("agent_checkpoint_identity_mismatch");
+    }
+    if (intent !== undefined && plan.intentId !== intent.intentId) {
+      throw new Error("agent_checkpoint_identity_mismatch");
+    }
+  }
 }
 
 function assertRunId(runId: string): string {

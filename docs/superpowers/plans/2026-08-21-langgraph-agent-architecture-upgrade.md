@@ -720,7 +720,7 @@ Expected: PASS for schema validation, timeout/retry classification, deterministi
 - [ ] **Step 6: Commit**
 
 ```bash
-rtk git add services/lightrag-worker apps/api/src/job-matching/lightrag-retrieval-client.ts apps/api/src/job-matching/lightrag-retrieval-client.test.ts apps/api/src/production-dependencies.ts
+rtk git add services/lightrag-worker apps/api/src/job-matching/lightrag-retrieval-client.ts apps/api/src/job-matching/lightrag-retrieval-client.test.ts apps/api/src/production-dependencies.ts packages/contracts/src/agent-graph.ts
 rtk git commit -m "feat: add LightRAG evidence retrieval port"
 ```
 

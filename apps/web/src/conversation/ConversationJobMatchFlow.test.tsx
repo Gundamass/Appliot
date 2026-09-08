@@ -177,11 +177,13 @@ describe("ConversationJobMatchFlow", () => {
       action: "confirm_filters",
       sessionId: awaitingFilters.id,
       sessionVersion: awaitingFilters.version,
+      idempotencyKey: `inline-job-match:${awaitingFilters.id}:confirm_filters:${awaitingFilters.version}`,
       expectation: awaitingFilters.expectation
     }));
   });
 
-  it("keeps the trace outside job cards and exposes failed and stale recovery", () => {
+  it("keeps the trace outside job cards and exposes failed and stale recovery", async () => {
+    const user = userEvent.setup();
     const onAction = vi.fn();
     const { staleSession, failedProcess } = makeJobMatchComponentFixtures();
 
@@ -198,5 +200,10 @@ describe("ConversationJobMatchFlow", () => {
     expect(screen.getByText("岗位匹配暂时失败")).toBeVisible();
     expect(screen.getByText("结果已变化")).toBeVisible();
     expect(screen.getByRole("button", { name: "重新匹配" })).toBeEnabled();
+    await user.click(screen.getByRole("button", { name: "重新匹配" }));
+    expect(onAction).toHaveBeenCalledWith(expect.objectContaining({
+      sessionId: staleSession.id,
+      idempotencyKey: `inline-job-match:${staleSession.id}:rematch:${staleSession.version}`
+    }));
   });
 });

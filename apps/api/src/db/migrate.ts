@@ -90,7 +90,7 @@ export function migrateDatabase(database: SqliteDatabase): void {
       profile_revision_applied INTEGER NOT NULL DEFAULT 0 CHECK (profile_revision_applied >= 0),
       profile_sync_status TEXT NOT NULL DEFAULT 'current' CHECK (profile_sync_status IN ('current', 'pending', 'failed')),
       profile_sync_error TEXT,
-      orchestrator TEXT NOT NULL DEFAULT 'xstate-v1' CHECK (orchestrator IN ('xstate-v1', 'langgraph-v1'))
+      orchestrator TEXT NOT NULL DEFAULT 'agent-runtime' CHECK (orchestrator = 'agent-runtime')
     );
 
     CREATE TABLE IF NOT EXISTS agent_application_reviews (
@@ -281,6 +281,8 @@ export function migrateDatabase(database: SqliteDatabase): void {
       DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
       DELETE FROM agent_application_reviews WHERE task_id = OLD.id;
       DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
+      DELETE FROM agent_runtime_application_states
+      WHERE json_extract(payload_json, '$.taskId') = OLD.id;
     END;
 
     CREATE TABLE IF NOT EXISTS embeddings (
@@ -332,6 +334,38 @@ export function migrateDatabase(database: SqliteDatabase): void {
     CREATE INDEX IF NOT EXISTS agent_trace_events_run_sequence_idx
       ON agent_trace_events(run_id, sequence);
 
+    CREATE TABLE IF NOT EXISTS agent_events (
+      event_id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      sequence INTEGER NOT NULL CHECK (sequence > 0),
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL,
+      UNIQUE (run_id, sequence)
+    );
+    CREATE INDEX IF NOT EXISTS agent_events_run_sequence_idx
+      ON agent_events(run_id, sequence);
+
+    CREATE TABLE IF NOT EXISTS agent_runtime_request_contexts (
+      ref TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      created_at TEXT NOT NULL
+    );
+
+    CREATE TABLE IF NOT EXISTS agent_evidence_records (
+      id TEXT PRIMARY KEY,
+      run_id TEXT NOT NULL,
+      step_id TEXT NOT NULL,
+      invocation_id TEXT NOT NULL,
+      kind TEXT NOT NULL,
+      source_ref TEXT NOT NULL,
+      content_hash TEXT NOT NULL,
+      locator TEXT,
+      registered_at TEXT NOT NULL,
+      UNIQUE (run_id, step_id, invocation_id, kind, source_ref, content_hash, locator)
+    );
+    CREATE INDEX IF NOT EXISTS agent_evidence_records_provenance_idx
+      ON agent_evidence_records(run_id, step_id, invocation_id);
+
     CREATE TABLE IF NOT EXISTS langsmith_trace_outbox (
       id TEXT PRIMARY KEY,
       trace_id TEXT NOT NULL UNIQUE,
@@ -376,6 +410,14 @@ export function migrateDatabase(database: SqliteDatabase): void {
       FOREIGN KEY (thread_id, checkpoint_ns, checkpoint_id)
         REFERENCES agent_checkpoints(thread_id, checkpoint_ns, checkpoint_id) ON DELETE CASCADE
     );
+
+    CREATE TABLE IF NOT EXISTS agent_runtime_application_states (
+      run_id TEXT PRIMARY KEY,
+      payload_json TEXT NOT NULL CHECK (json_valid(payload_json)),
+      updated_at TEXT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS agent_runtime_application_states_updated_idx
+      ON agent_runtime_application_states(updated_at, run_id);
 
     CREATE TABLE IF NOT EXISTS conversation_sessions (
       id TEXT PRIMARY KEY,
@@ -489,8 +531,10 @@ export function migrateDatabase(database: SqliteDatabase): void {
     database.exec("ALTER TABLE application_tasks ADD COLUMN profile_sync_error TEXT");
   }
   if (!taskColumns.some((column) => column.name === "orchestrator")) {
-    database.exec("ALTER TABLE application_tasks ADD COLUMN orchestrator TEXT NOT NULL DEFAULT 'xstate-v1' CHECK (orchestrator IN ('xstate-v1', 'langgraph-v1'))");
+    database.exec("ALTER TABLE application_tasks ADD COLUMN orchestrator TEXT NOT NULL DEFAULT 'agent-runtime' CHECK (orchestrator = 'agent-runtime')");
   }
+
+  upgradeApplicationTaskOrchestrator(database);
 
   const checkpointColumns = database.prepare("PRAGMA table_info(application_checkpoints)").all() as Array<{ name: string }>;
   if (!checkpointColumns.some((column) => column.name === "snapshot_json")) {
@@ -538,6 +582,66 @@ export function migrateDatabase(database: SqliteDatabase): void {
   `);
 
   migrateApplicationSkillSchema(database);
+}
+
+/**
+ * Collapse the old XState/LangGraph ownership marker into the Runtime-only
+ * contract. Existing task rows are deliberately re-owned by the Runtime so
+ * a restart cannot route them into a second orchestrator.
+ */
+function upgradeApplicationTaskOrchestrator(database: SqliteDatabase): void {
+  const sql = tableSql(database, "application_tasks");
+  const needsRebuild = sql.length > 0 && !sql.includes("orchestrator = 'agent-runtime'");
+  const foreignKeysWereEnabled = database.pragma("foreign_keys", { simple: true }) === 1;
+  if (foreignKeysWereEnabled) database.pragma("foreign_keys = OFF");
+  try {
+    const upgrade = database.transaction(() => {
+      database.exec("DROP TRIGGER IF EXISTS application_tasks_cleanup");
+      if (needsRebuild) {
+        database.exec(`
+          CREATE TABLE application_tasks_runtime_new (
+            id TEXT PRIMARY KEY,
+            name TEXT,
+            application_url TEXT NOT NULL,
+            created_at TEXT NOT NULL,
+            updated_at TEXT NOT NULL,
+            profile_revision_applied INTEGER NOT NULL DEFAULT 0 CHECK (profile_revision_applied >= 0),
+            profile_sync_status TEXT NOT NULL DEFAULT 'current' CHECK (profile_sync_status IN ('current', 'pending', 'failed')),
+            profile_sync_error TEXT,
+            orchestrator TEXT NOT NULL DEFAULT 'agent-runtime' CHECK (orchestrator = 'agent-runtime')
+          );
+          INSERT INTO application_tasks_runtime_new (
+            id, name, application_url, created_at, updated_at,
+            profile_revision_applied, profile_sync_status, profile_sync_error, orchestrator
+          )
+          SELECT
+            id, name, application_url, created_at, updated_at,
+            profile_revision_applied, profile_sync_status, profile_sync_error, 'agent-runtime'
+          FROM application_tasks;
+          DROP TABLE application_tasks;
+          ALTER TABLE application_tasks_runtime_new RENAME TO application_tasks;
+        `);
+      }
+      database.exec(`
+        CREATE TRIGGER application_tasks_cleanup
+        AFTER DELETE ON application_tasks
+        BEGIN
+          DELETE FROM application_task_events WHERE task_id = OLD.id;
+          DELETE FROM application_task_event_cursors WHERE task_id = OLD.id;
+          DELETE FROM application_checkpoints WHERE task_id = OLD.id;
+          DELETE FROM application_answers WHERE task_id = OLD.id;
+          DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
+          DELETE FROM agent_application_reviews WHERE task_id = OLD.id;
+          DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
+          DELETE FROM agent_runtime_application_states
+          WHERE json_extract(payload_json, '$.taskId') = OLD.id;
+        END;
+      `);
+    });
+    upgrade();
+  } finally {
+    if (foreignKeysWereEnabled) database.pragma("foreign_keys = ON");
+  }
 }
 
 function upgradeChallengeStateConstraints(database: SqliteDatabase): void {
@@ -617,6 +721,8 @@ function upgradeChallengeStateConstraints(database: SqliteDatabase): void {
         DELETE FROM self_evaluation_reviews WHERE task_id = OLD.id;
         DELETE FROM agent_application_reviews WHERE task_id = OLD.id;
         DELETE FROM profile_facts WHERE scope = 'application' AND task_id = OLD.id;
+        DELETE FROM agent_runtime_application_states
+        WHERE json_extract(payload_json, '$.taskId') = OLD.id;
       END;
     `);
   });

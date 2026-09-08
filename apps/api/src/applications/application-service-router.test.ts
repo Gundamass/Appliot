@@ -58,7 +58,7 @@ afterEach(() => {
 });
 
 describe("application service router", () => {
-  it("routes legacy and graph-owned tasks by their persisted orchestrator", () => {
+  it("routes every persisted task to the Runtime-backed service", () => {
     const database = createDatabase();
     const tasks = createApplicationTaskRepository(database);
     database.prepare(`
@@ -76,14 +76,15 @@ describe("application service router", () => {
     const graph = applicationService("awaiting_login");
     const routed = createApplicationServiceRouter({ taskRepository: tasks, legacy, graph });
 
-    expect(routed.state("legacy-task").value).toBe("created");
+    expect(routed.state("legacy-task").value).toBe("awaiting_login");
     expect(routed.state("graph-task").value).toBe("awaiting_login");
 
-    expect(legacy.state).toHaveBeenCalledWith("legacy-task");
+    expect(legacy.state).not.toHaveBeenCalled();
     expect(graph.state).toHaveBeenCalledWith("graph-task");
+    expect(graph.state).toHaveBeenCalledWith("legacy-task");
   });
 
-  it("keeps a direct non-persisted start on the legacy service", async () => {
+  it("keeps a direct non-persisted start on the Runtime service", async () => {
     const database = createDatabase();
     const tasks = createApplicationTaskRepository(database);
     const legacy = applicationService("created");
@@ -93,12 +94,12 @@ describe("application service router", () => {
     routed.start({ taskId: "direct-task", applicationUrl: "https://jobs.example.test/direct" });
     await routed.openBrowser("direct-task");
 
-    expect(legacy.start).toHaveBeenCalledWith({
+    expect(legacy.start).not.toHaveBeenCalled();
+    expect(graph.start).toHaveBeenCalledWith({
       taskId: "direct-task",
       applicationUrl: "https://jobs.example.test/direct"
     });
-    expect(legacy.openBrowser).toHaveBeenCalledWith("direct-task");
-    expect(graph.start).not.toHaveBeenCalled();
-    expect(graph.openBrowser).not.toHaveBeenCalled();
+    expect(legacy.openBrowser).not.toHaveBeenCalled();
+    expect(graph.openBrowser).toHaveBeenCalledWith("direct-task");
   });
 });

@@ -185,9 +185,10 @@ function ownerForSubGoal(subGoal: SubGoal): PlanStepOwner {
 
 function riskForSubGoal(subGoal: SubGoal, intent: CanonicalIntent): PlanRisk {
   if (subGoal === "submit_application") return "irreversible";
-  if (subGoal === "fill_application" || subGoal === "verify_application" || intent.riskProfile.level === "high") {
-    return "high";
-  }
+  // Filling and verifying are reversible, readback-validated browser
+  // operations. Keep them autonomous even when the overall intent is marked
+  // high because the only irreversible boundary is final submission.
+  if (subGoal === "fill_application" || subGoal === "verify_application") return "low";
   return "low";
 }
 

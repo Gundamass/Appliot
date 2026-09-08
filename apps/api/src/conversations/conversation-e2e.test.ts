@@ -68,7 +68,7 @@ function task(id = "task-created") {
     applicationUrl: "https://jobs.example.test/apply/frontend",
     createdAt: "2026-08-22T00:00:00.000Z",
     updatedAt: "2026-08-22T00:00:00.000Z",
-    orchestrator: "langgraph-v1" as const,
+    orchestrator: "agent-runtime" as const,
     profileRevisionApplied: 0,
     profileSyncStatus: "current" as const
   };
@@ -87,6 +87,7 @@ function dependencies(options: {
   const convert = vi.fn(async () => task("converted-task"));
   const get = vi.fn(() => aggregate(options.stale));
   const base = {
+    conversations: { linkJobMatchSession: vi.fn() },
     jobMatchRepository: { get } as Pick<JobMatchRepository, "get">,
     applicationTasks: {
       list: vi.fn(() => []),

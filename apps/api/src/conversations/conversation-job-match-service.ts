@@ -129,7 +129,7 @@ export function createConversationJobMatchService(
           sessionId: conversationId,
           sequence: turnSequence + 1,
           role: "assistant",
-          text: actionMessage(input),
+          text: actionMessage(input, aggregate),
           cards,
           createdAt: timestamp
         });
@@ -416,12 +416,27 @@ function actionUserMessage(input: ConversationJobMatchAction): string {
   return `岗位匹配操作：${actionLabel(input)}`;
 }
 
-function actionMessage(input: ConversationJobMatchAction): string {
+function actionMessage(input: ConversationJobMatchAction, aggregate: JobMatchAggregate): string {
   switch (input.action) {
-    case "confirm_filters": return "筛选条件已确认，正在提取岗位。";
-    case "adjust_filters": return "筛选条件已更新，正在重新匹配岗位。";
+    case "confirm_filters":
+      return aggregate.state === "awaiting_job_selection"
+        ? "筛选条件已确认，岗位推荐已生成。"
+        : aggregate.state === "paused"
+          ? "筛选条件已确认，岗位读取已暂停。"
+          : "筛选条件已确认，正在提取岗位。";
+    case "adjust_filters":
+      return aggregate.state === "awaiting_job_selection"
+        ? "筛选条件已更新，岗位推荐已重新生成。"
+        : aggregate.state === "paused"
+          ? "筛选条件已更新，岗位读取已暂停。"
+          : "筛选条件已更新，正在重新匹配岗位。";
     case "pause": return "岗位匹配已暂停。需要继续时可以再次启动。";
-    case "continue": return "已继续岗位匹配，正在读取招聘页面。";
+    case "continue":
+      return aggregate.state === "awaiting_job_selection"
+        ? "已继续岗位匹配，岗位推荐已生成。"
+        : aggregate.state === "paused"
+          ? "已继续岗位匹配，岗位读取已暂停。"
+          : "已继续岗位匹配，正在读取招聘页面。";
     case "rematch": return "已根据当前条件重新匹配岗位。";
     case "select_result": return "已选择这个岗位，下一步将进入受控投递确认。";
     case "select_conflict_result": return "已确认岗位信息中的冲突并选择该岗位，下一步将进入受控投递确认。";

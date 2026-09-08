@@ -278,13 +278,19 @@ export function createJobMatchRepository(database: SqliteDatabase): JobMatchRepo
     if (current.state !== "awaiting_filter_confirmation") throw new Error("job_filter_confirmation_not_allowed");
     const expectationValue = JobExpectationSnapshotSchema.parse(rawExpectation);
     const timestamp = new Date().toISOString();
-    insertExpectation.run(
-      sessionId,
-      expectationValue.revision,
-      JSON.stringify(expectationValue),
-      expectationValue.confirmedAt,
-      timestamp
-    );
+    const expectationPayload = JSON.stringify(expectationValue);
+    const existingExpectation = findExpectation.get(sessionId, expectationValue.revision) as JsonRow | undefined;
+    if (existingExpectation === undefined) {
+      insertExpectation.run(
+        sessionId,
+        expectationValue.revision,
+        expectationPayload,
+        expectationValue.confirmedAt,
+        timestamp
+      );
+    } else if (existingExpectation.payload_json !== expectationPayload) {
+      throw new Error("job_match_expectation_conflict");
+    }
     if (confirmExpectationSession.run(
       expectationValue.revision,
       timestamp,

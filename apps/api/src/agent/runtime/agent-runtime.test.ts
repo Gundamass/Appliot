@@ -6,6 +6,8 @@ import { createRuntimeCheckpointStore } from "./checkpoint-store.js";
 import { createCancellationManager } from "./cancellation-manager.js";
 import { createInMemoryArtifactStore, stateHash, type RuntimeState } from "./runtime-state.js";
 import type { RuntimeExecutorInput } from "./execution-loop.js";
+import { createApprovalSystem } from "../policy/approval-gate.js";
+import { createInMemoryAgentEventTraceSink } from "../events/trace-sink.js";
 
 const intent: CanonicalIntent = {
   intentId: "intent-1",
@@ -60,6 +62,12 @@ function applicationStep(id: string, risk: PlanStep["risk"]): PlanStep {
 describe("AgentRuntime", () => {
   it("saves a bounded checkpoint and resumes after an approval interruption", async () => {
     const checkpointStore = createRuntimeCheckpointStore();
+    const approvals = createApprovalSystem({
+      signingKey: Buffer.alloc(32, 17),
+      verifyHumanPrincipal: () => ({ subject: "user-1" }),
+      idFactory: () => "approval-1",
+      now: () => "2026-09-02T00:00:00.000Z"
+    });
     const runtime = createAgentRuntime({
       intentResolver: { resolve: async (): Promise<IntentResolution> => resolved },
       checkpointStore,
@@ -68,7 +76,14 @@ describe("AgentRuntime", () => {
           planId: "plan-1",
           intentId: "intent-1",
           revision: 1,
-          steps: [applicationStep("prepare", "medium"), applicationStep("submit", "irreversible")],
+          steps: [applicationStep("prepare", "medium"), {
+            ...applicationStep("submit", "irreversible"),
+            approvalBinding: {
+              snapshotId: "snapshot-1",
+              targetFingerprint: "target-1",
+              payloadHash: "a".repeat(64)
+            }
+          }],
           assumptions: [],
           approvalPoints: [{ id: "approval-1", kind: "final_submit", stepId: "submit", required: true }],
           estimatedCost: { steps: 2, toolCalls: 0, tokens: 0, durationMs: 1000 },
@@ -80,7 +95,8 @@ describe("AgentRuntime", () => {
         let index = 0;
         return () => `id-${++index}`;
       })(),
-      now: () => "2026-09-02T00:00:00.000Z"
+      now: () => "2026-09-02T00:00:00.000Z",
+      approvalGate: approvals.gate
     });
 
     const first = await runtime.start({ goal: "帮我投递这个岗位", requestedBy: "user-1" });
@@ -90,13 +106,284 @@ describe("AgentRuntime", () => {
     expect(snapshot.checkpoint.pendingInterrupt).toBeDefined();
     expect(JSON.stringify(snapshot)).not.toContain("cookie");
 
+    const approval = approvals.issuer.issue({
+      binding: {
+        runId: first.runId,
+        planRevision: 1,
+        executionEpoch: 0,
+        snapshotId: "snapshot-1",
+        targetFingerprint: "target-1",
+        payloadHash: "a".repeat(64)
+      },
+      principal: { subject: "user-1" }
+    });
     const resumed = await runtime.resume(first.runId, {
       interruptId: first.pendingInterrupt!.interruptId,
       action: "approve",
-      values: { approvalId: "human-approval" }
+      values: { approval }
     });
     expect(resumed.status).toBe("completed");
     expect((await runtime.inspect(first.runId)).checkpoint.executionEpoch).toBe(1);
+  });
+
+  it("does not treat a bare approve as a final-submit authorization", async () => {
+    let executorCalls = 0;
+    const approvals = createApprovalSystem({
+      signingKey: Buffer.alloc(32, 18),
+      verifyHumanPrincipal: () => ({ subject: "user-1" }),
+      now: () => "2026-09-02T00:00:00.000Z"
+    });
+    const runtime = createAgentRuntime({
+      intentResolver: { resolve: async (): Promise<IntentResolution> => resolved },
+      planner: {
+        create: async () => ({
+          planId: "plan-bare-approve",
+          intentId: "intent-1",
+          revision: 1,
+          steps: [{
+            ...applicationStep("submit", "irreversible"),
+            approvalBinding: {
+              snapshotId: "snapshot-1",
+              targetFingerprint: "target-1",
+              payloadHash: "b".repeat(64)
+            }
+          }],
+          assumptions: [],
+          approvalPoints: [{ id: "approval-submit", kind: "final_submit", stepId: "submit", required: true }],
+          estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1000 },
+          createdAt: "2026-09-02T00:00:00.000Z",
+          updatedAt: "2026-09-02T00:00:00.000Z"
+        })
+      },
+      executor: { execute: async () => { executorCalls += 1; return { status: "completed" as const }; } },
+      approvalGate: approvals.gate,
+      idFactory: () => "run-bare-approve",
+      now: () => "2026-09-02T00:00:00.000Z"
+    });
+
+    const first = await runtime.start({ goal: "submit application", requestedBy: "user-1" });
+    const rejected = await runtime.resume(first.runId, {
+      interruptId: first.pendingInterrupt!.interruptId,
+      action: "approve",
+      values: {}
+    });
+
+    expect(rejected.status).toBe("failed");
+    expect(rejected.error?.code).toBe("runtime_approval_required");
+    expect(executorCalls).toBe(0);
+  });
+
+  it("restores a safe request context for a resumed runtime without the raw request", async () => {
+    const checkpointStore = createRuntimeCheckpointStore();
+    const artifactStore = createInMemoryArtifactStore();
+    const approvals = createApprovalSystem({
+      signingKey: Buffer.alloc(32, 19),
+      verifyHumanPrincipal: () => ({ subject: "user-1" }),
+      idFactory: () => "approval-restart",
+      now: () => "2026-09-02T00:00:00.000Z"
+    });
+    const plan = {
+      planId: "plan-restart-context",
+      intentId: "intent-1",
+      revision: 1,
+      steps: [{
+        ...applicationStep("submit", "irreversible"),
+        approvalBinding: {
+          snapshotId: "snapshot-restart",
+          targetFingerprint: "target-restart",
+          payloadHash: "c".repeat(64)
+        }
+      }],
+      assumptions: [],
+      approvalPoints: [{ id: "approval-submit", kind: "final_submit" as const, stepId: "submit", required: true }],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1000 },
+      createdAt: "2026-09-02T00:00:00.000Z",
+      updatedAt: "2026-09-02T00:00:00.000Z"
+    };
+    const initial = createAgentRuntime({
+      intentResolver: { resolve: async (): Promise<IntentResolution> => resolved },
+      checkpointStore,
+      artifactStore,
+      planner: { create: async () => plan },
+      executor: { execute: async () => ({ status: "completed" as const }) },
+      approvalGate: approvals.gate,
+      idFactory: () => "run-restart-context",
+      now: () => "2026-09-02T00:00:00.000Z"
+    });
+    const first = await initial.start({
+      goal: "submit application without persisting this raw request",
+      requestedBy: "user-1",
+      contextRefs: ["context:profile-1"],
+      autonomyLevel: "execute_with_approval",
+      metadata: {
+        applicationTaskId: "task-restart",
+        applicationUrl: "https://jobs.example.test/restart",
+        profileRevision: 7
+      }
+    });
+    expect(first.status).toBe("interrupted");
+    const checkpoint = await checkpointStore.latest(first.runId);
+    expect(checkpoint?.requestContextRef).toMatch(/^request-context:/u);
+    expect(JSON.stringify(checkpoint)).not.toContain("submit application without persisting");
+
+    let resumedInput: RuntimeExecutorInput | undefined;
+    const restarted = createAgentRuntime({
+      intentResolver: { resolve: async (): Promise<IntentResolution> => resolved },
+      checkpointStore,
+      artifactStore,
+      executor: { execute: async (input) => { resumedInput = input; return { status: "completed" as const }; } },
+      approvalGate: approvals.gate,
+      now: () => "2026-09-02T00:00:00.000Z"
+    });
+    const approval = approvals.issuer.issue({
+      binding: {
+        runId: first.runId,
+        planRevision: 1,
+        executionEpoch: 0,
+        snapshotId: "snapshot-restart",
+        targetFingerprint: "target-restart",
+        payloadHash: "c".repeat(64)
+      },
+      principal: { subject: "user-1" }
+    });
+    const resumed = await restarted.resume(first.runId, {
+      interruptId: first.pendingInterrupt!.interruptId,
+      action: "approve",
+      values: { approval }
+    });
+
+    expect(resumed.status).toBe("completed");
+    expect(resumedInput?.request).toBeUndefined();
+    expect(resumedInput?.requestContext).toMatchObject({
+      requestedBy: "user-1",
+      contextRefs: ["context:profile-1"],
+      metadata: {
+        applicationTaskId: "task-restart",
+        applicationUrl: "https://jobs.example.test/restart",
+        profileRevision: 7
+      }
+    });
+  });
+
+  it("writes authoritative lifecycle events from the Runtime itself", async () => {
+    const events = createInMemoryAgentEventTraceSink({ now: () => "2026-09-04T00:00:00.000Z" });
+    const runtime = createAgentRuntime({
+      intentResolver: {
+        resolve: async (): Promise<IntentResolution> => ({
+          ...resolved,
+          intent: {
+            ...intent,
+            primaryGoal: "analyze_resume",
+            subGoals: ["review_result"],
+            riskProfile: { level: "low", requiresHumanApproval: false, reasons: [] },
+            autonomyLevel: "prepare"
+          }
+        })
+      },
+      planner: {
+        create: async () => ({
+          planId: "plan-authoritative-events",
+          intentId: "intent-1",
+          revision: 1,
+          steps: [applicationStep("review", "low")],
+          assumptions: [],
+          approvalPoints: [],
+          estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1000 },
+          createdAt: "2026-09-04T00:00:00.000Z",
+          updatedAt: "2026-09-04T00:00:00.000Z"
+        })
+      },
+      executor: { execute: async () => ({ status: "completed" as const }) },
+      eventSink: events,
+      idFactory: () => "run-authoritative-events",
+      now: () => "2026-09-04T00:00:00.000Z"
+    });
+
+    const result = await runtime.start({ goal: "analyze resume", requestedBy: "user-1" });
+    const runtimeEvents = events.list(result.runId);
+
+    expect(runtimeEvents.map((event) => event.type)).toEqual(expect.arrayContaining([
+      "run_started",
+      "intent_resolved",
+      "plan_created",
+      "agent_dispatched",
+      "checkpoint_saved",
+      "run_completed"
+    ]));
+    expect(runtimeEvents.every((event) => event.runId === result.runId)).toBe(true);
+  });
+
+  it("records a non-final human response in the Runtime event stream", async () => {
+    const events = createInMemoryAgentEventTraceSink({ now: () => "2026-09-04T00:00:00.000Z" });
+    let interrupted = false;
+    const runtime = createAgentRuntime({
+      intentResolver: { resolve: async (): Promise<IntentResolution> => ({
+        ...resolved,
+        intent: {
+          ...intent,
+          primaryGoal: "analyze_resume",
+          subGoals: ["review_result"],
+          riskProfile: { level: "low", requiresHumanApproval: false, reasons: [] },
+          autonomyLevel: "prepare"
+        }
+      }) },
+      planner: {
+        create: async () => ({
+          planId: "plan-human-response-events",
+          intentId: "intent-1",
+          revision: 1,
+          steps: [applicationStep("review", "low")],
+          assumptions: [],
+          approvalPoints: [],
+          estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1000 },
+          createdAt: "2026-09-04T00:00:00.000Z",
+          updatedAt: "2026-09-04T00:00:00.000Z"
+        })
+      },
+      supervisor: {
+        decide: ({ readyStep }) => {
+          if (readyStep === undefined) throw new Error("test_ready_step_missing");
+          return {
+          type: "dispatch_agent",
+          agent: "application_agent",
+          input: { stepId: readyStep.id },
+          reason: "test"
+          };
+        }
+      },
+      executor: {
+        execute: async () => {
+          if (!interrupted) {
+            interrupted = true;
+            return {
+              status: "interrupted" as const,
+              pendingInterrupt: {
+                interruptId: "interrupt-human-response-events",
+                reason: "high_risk_action" as const,
+                summary: "Human response required",
+                evidenceRefs: [],
+                expiresAt: "2026-09-04T00:15:00.000Z"
+              }
+            };
+          }
+          return { status: "completed" as const };
+        }
+      },
+      eventSink: events,
+      idFactory: () => "run-human-response-events",
+      now: () => "2026-09-04T00:00:00.000Z"
+    });
+
+    const first = await runtime.start({ goal: "analyze resume", requestedBy: "user-1" });
+    await runtime.resume(first.runId, {
+      interruptId: first.pendingInterrupt!.interruptId,
+      action: "confirm",
+      values: {}
+    });
+
+    const responseEvents = events.list(first.runId).filter((event) => event.type === "clarification_received");
+    expect(responseEvents).toHaveLength(1);
+    expect(responseEvents[0]?.actor).toBe("user");
   });
 
   it("cancels a running executor and prevents new work", async () => {
@@ -978,6 +1265,62 @@ describe("AgentRuntime", () => {
     expect(snapshot.checkpoint.status).toBe("blocked");
   });
 
+  it("rejects a checkpoint whose intent and plan identities do not match", async () => {
+    const checkpointStore = createRuntimeCheckpointStore();
+    const artifactStore = createInMemoryArtifactStore();
+    const intentRef = artifactStore.saveIntent(intent);
+    const mismatchedPlan = {
+      planId: "plan-other",
+      intentId: "intent-other",
+      revision: 1,
+      steps: [applicationStep("safe", "low")],
+      assumptions: [],
+      approvalPoints: [],
+      estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1_000 },
+      createdAt: "2026-09-02T00:00:00.000Z",
+      updatedAt: "2026-09-02T00:00:00.000Z"
+    };
+    const planRef = artifactStore.savePlan(mismatchedPlan);
+    await checkpointStore.save({
+      version: "2.0.0",
+      runId: "run-identity-mismatch",
+      intentId: intent.intentId,
+      planId: mismatchedPlan.planId,
+      planRevision: mismatchedPlan.revision,
+      executionEpoch: 0,
+      phase: "dispatch",
+      status: "running",
+      intentRef,
+      planRef,
+      memoryRefs: [],
+      evidenceRefs: [],
+      budget: { steps: 0, toolCalls: 0, retries: 0, replans: 0, tokens: 0, elapsedMs: 0 },
+      budgetLimits: {
+        maxAttemptsPerStep: 2,
+        maxRetries: 64,
+        maxReplans: 8,
+        maxSteps: 32,
+        maxToolCalls: 64,
+        maxTokens: 100_000,
+        maxDurationMs: 900_000
+      },
+      completedActionIds: [],
+      stateHash: "a".repeat(64),
+      createdAt: "2026-09-02T00:00:00.000Z"
+    });
+
+    const runtime = createAgentRuntime({
+      intentResolver: { resolve: async (): Promise<IntentResolution> => resolved },
+      checkpointStore,
+      artifactStore,
+      idFactory: () => "unused",
+      now: () => "2026-09-02T00:00:00.000Z"
+    });
+
+    await expect(runtime.inspect("run-identity-mismatch"))
+      .rejects.toThrow("agent_checkpoint_identity_mismatch");
+  });
+
   it("does not persist human resume values in the LangGraph checkpoint", async () => {
     const langGraphCheckpointer = new MemorySaver();
     const runtime = createAgentRuntime({
@@ -1038,6 +1381,12 @@ describe("AgentRuntime", () => {
   it("executes the approved irreversible step and passes the approval context to the executor", async () => {
     let executorCalls = 0;
     let executorInput: RuntimeExecutorInput | undefined;
+    const approvals = createApprovalSystem({
+      signingKey: Buffer.alloc(32, 20),
+      verifyHumanPrincipal: () => ({ subject: "user-1" }),
+      idFactory: () => "approval-executor",
+      now: () => "2026-09-02T00:00:00.000Z"
+    });
     const runtime = createAgentRuntime({
       intentResolver: { resolve: async (): Promise<IntentResolution> => resolved },
       planner: {
@@ -1045,7 +1394,14 @@ describe("AgentRuntime", () => {
           planId: "plan-approved-execution",
           intentId: "intent-1",
           revision: 1,
-          steps: [applicationStep("submit", "irreversible")],
+          steps: [{
+            ...applicationStep("submit", "irreversible"),
+            approvalBinding: {
+              snapshotId: "snapshot-executor",
+              targetFingerprint: "target-executor",
+              payloadHash: "d".repeat(64)
+            }
+          }],
           assumptions: [],
           approvalPoints: [{ id: "approval-submit", kind: "final_submit", stepId: "submit", required: true }],
           estimatedCost: { steps: 1, toolCalls: 0, tokens: 0, durationMs: 1000 },
@@ -1064,21 +1420,33 @@ describe("AgentRuntime", () => {
         let index = 0;
         return () => `approved-${++index}`;
       })(),
-      now: () => "2026-09-02T00:00:00.000Z"
+      now: () => "2026-09-02T00:00:00.000Z",
+      approvalGate: approvals.gate
     });
 
     const first = await runtime.start({ goal: "直接提交", requestedBy: "user-1" });
+    const approval = approvals.issuer.issue({
+      binding: {
+        runId: first.runId,
+        planRevision: 1,
+        executionEpoch: 0,
+        snapshotId: "snapshot-executor",
+        targetFingerprint: "target-executor",
+        payloadHash: "d".repeat(64)
+      },
+      principal: { subject: "user-1" }
+    });
     const resumed = await runtime.resume(first.runId, {
       interruptId: first.pendingInterrupt!.interruptId,
       action: "approve",
-      values: { approvalId: "human-approval" }
+      values: { approval }
     });
 
     expect(resumed.status).toBe("completed");
     expect(executorCalls).toBe(1);
     expect(executorInput?.step.id).toBe("submit");
     expect(executorInput?.decision.type).toBe("dispatch_agent");
-    expect(executorInput?.humanResume?.values).toEqual({ approvalId: "human-approval" });
+    expect(executorInput?.humanResume?.values).toEqual({ approval });
   });
 
   it("treats final submit rejection and cancellation as terminal user decisions", async () => {

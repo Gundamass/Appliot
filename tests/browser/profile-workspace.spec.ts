@@ -32,7 +32,7 @@ test("候选人工作区在桌面和手机端保持可读且聚焦缺失字段",
     await page.goto(`${baseUrl}/?view=profile`);
 
     await expect(page.getByRole("heading", { name: "我的简历", exact: true })).toBeVisible();
-    await expect(page.getByRole("navigation", { name: "候选人工作台" }).getByRole("button")).toHaveText([
+    await expect(page.getByRole("navigation", { name: "候选人工作台" }).locator(".workspace-conversation-home, :scope > button")).toHaveText([
       "对话首页",
       "投递进度",
       "我的简历"

@@ -8,6 +8,7 @@ import {
   computeFirstPassReadback,
   computeOcrCharacterAccuracy,
   computeOcrParityRegression,
+  readScenarioDatasets,
   wilsonInterval
 } from "./run-evals.js";
 
@@ -36,5 +37,12 @@ describe("agent evaluation metrics", () => {
     expect(() => assertNoAutomaticSubmit([{ commandType: "submit", actor: "graph" }]))
       .toThrow("automatic_submit_observed");
     expect(() => assertNoAutomaticSubmit([{ commandType: "fill", actor: "graph" }])).not.toThrow();
+  });
+
+  it("loads the intent, execution, and safety scenario datasets", () => {
+    const datasets = readScenarioDatasets();
+    expect(datasets.intent.length).toBeGreaterThan(0);
+    expect(datasets.execution.length).toBeGreaterThan(0);
+    expect(datasets.safety.length).toBeGreaterThan(0);
   });
 });

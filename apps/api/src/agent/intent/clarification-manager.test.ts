@@ -1,4 +1,5 @@
 import { describe, expect, it } from "vitest";
+import { CanonicalIntentSchema } from "@resume/contracts";
 import { createClarificationManager } from "./clarification-manager.js";
 
 describe("ClarificationManager", () => {
@@ -48,7 +49,7 @@ describe("ClarificationManager", () => {
 
   it("rejects clarification values outside the question binding and sensitive fields", () => {
     const manager = createClarificationManager();
-    const base = {
+    const base = CanonicalIntentSchema.parse({
       intentId: "intent-1",
       schemaVersion: "1.0.0",
       revision: 1,
@@ -66,7 +67,7 @@ describe("ClarificationManager", () => {
       autonomyLevel: "execute_with_approval" as const,
       evidenceRefs: [],
       createdAt: "2026-09-02T00:00:00.000Z"
-    };
+    });
 
     expect(() => manager.applyAnswer(base, {
       interruptId: "question-1",

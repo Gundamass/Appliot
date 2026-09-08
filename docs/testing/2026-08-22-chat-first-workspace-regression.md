@@ -1,6 +1,6 @@
 # Chat-First 工作区回归报告
 
-日期：2026-09-01
+首次记录：2026-09-01；最后更新：2026-09-02
 分支：`fix/mokahr-campus-apply`
 
 ## 本期范围
@@ -86,7 +86,7 @@ Browser Worker 的 13 个测试文件中有 `61/125` 通过，另外 `64` 条均
 | `rtk proxy corepack pnpm --filter @resume/web exec vitest run src/conversation/ConversationCards.test.tsx src/workspace/ProfileApplicationWorkspace.test.tsx src/router.test.tsx` | 3 | 21 | 0 | 0 | 3.93s |
 | `rtk proxy corepack pnpm --filter @resume/api exec vitest run src/applications/application-service-router.test.ts src/applications/graph-application-service.test.ts` | 2 | 7 | 0 | 0 | 1.00s |
 
-- 全仓测试：`rtk proxy corepack pnpm test` 退出码为 `0`；11 个 workspace 均通过，逐包结果为 Synthetic ATS `5/5`、Contracts `90/90`、Model Provider `53/53`、Action Policy `5/5`、Form Semantics `36/36`、Job Matching `65/65`、RAG `195/195`、Browser Worker `125/125`、Web `236/236`、Profile Domain `49/49`、API `725/725`，各包均为 `0` 失败、`0` 跳过；根命令未打印汇总耗时。
+- 全仓测试：`rtk proxy corepack pnpm test` 退出码为 `0`；11 个 workspace 均通过，逐包结果为 Synthetic ATS `5/5`、Contracts `96/96`、Model Provider `53/53`、Action Policy `5/5`、Form Semantics `36/36`、Job Matching `65/65`、RAG `195/195`、Browser Worker `125/125`、Web `256/256`、Profile Domain `49/49`、API `755/755`，各包均为 `0` 失败、`0` 跳过；根命令未打印汇总耗时。
 - 全仓门禁：`rtk proxy corepack pnpm typecheck` 退出码为 `0`；`rtk proxy corepack pnpm build` 退出码为 `0`；`rtk git diff --check` 退出码为 `0`。
 - 服务状态：重启后的最终 `service-control.ps1 status` 显示守护器、远程 OCR、远程 Embedding、SSH 隧道、API/浏览器 Worker 和前端均为“就绪”。
 - 桌面端结果：在 `http://127.0.0.1:5173/?conversation=3d652d8c-d09b-4860-9fad-b490143892ce` 发送“帮我投递一下百度校园招聘”后，用户消息下依次出现理解请求、Tavily Search、URL 安全校验、等待确认和生成回复；确认百度校园招聘入口后，新的“确认开始投递”用户轮次单独出现处理确认、受控浏览器和岗位匹配流程点，最终进入岗位匹配工作台，没有执行最终提交。截图：`playwright-artifacts/per-turn-trace-desktop.png`。
@@ -101,7 +101,7 @@ Browser Worker 的 13 个测试文件中有 `61/125` 通过，另外 `64` 条均
 
 | 命令 | 结果 |
 | --- | --- |
-| `rtk proxy corepack pnpm test` | 退出码 `0`；11 个 workspace 全部通过，共 168 个测试文件、1608 个测试，无失败、无跳过。各 workspace：Synthetic ATS `1/1` 文件、`5/5` 测试；Contracts `11/11`、`94/94`；Model Provider `4/4`、`53/53`；Action Policy `1/1`、`5/5`；Form Semantics `5/5`、`36/36`；Job Matching `7/7`、`65/65`；RAG `3/3`、`195/195`；Browser Worker `13/13`、`125/125`；Web `42/42`、`240/240`；Profile Domain `3/3`、`49/49`；API `78/78`、`741/741`。 |
+| `rtk proxy corepack pnpm test` | 退出码 `0`；11 个 workspace 全部通过，共 172 个测试文件、1640 个测试，无失败、无跳过。各 workspace：Synthetic ATS `1/1` 文件、`5/5` 测试；Contracts `12/12`、`96/96`；Model Provider `4/4`、`53/53`；Action Policy `1/1`、`5/5`；Form Semantics `5/5`、`36/36`；Job Matching `7/7`、`65/65`；RAG `3/3`、`195/195`；Browser Worker `13/13`、`125/125`；Web `44/44`、`256/256`；Profile Domain `3/3`、`49/49`；API `79/79`、`755/755`。 |
 | `rtk proxy corepack pnpm typecheck` | 退出码 `0`，无类型错误。 |
 | `rtk proxy corepack pnpm build` | 退出码 `0`；共享包、Web、API 和 Browser Worker 构建完成。 |
 | `rtk proxy corepack pnpm test:e2e -- --grep "conversation|job match|application task"` | `2/2` 通过，覆盖对话内流程点、岗位卡片、详情展开、旧地址回跳和窄屏无横向溢出。 |
@@ -116,3 +116,34 @@ Browser Worker 的 13 个测试文件中有 `61/125` 通过，另外 `64` 条均
 - `playwright-artifacts/conversation-job-match-flow-mobile.png`
 
 本期仍明确不实现企业招聘状态跟踪、外部状态轮询、Webhook、同步或通知；岗位匹配、受控投递、人工接管和最终提交锁定逻辑保持不变。
+
+## 最终收尾验收（2026-09-02）
+
+本轮按照 Task 1–8 逐项复跑对应测试，并修正了一个浏览器回归测试的定位范围：会话历史按钮属于“对话首页”组件，不应被计入三个主导航按钮。该修复只修改 `tests/browser/profile-workspace.spec.ts` 的测试选择器，没有改变生产业务逻辑。
+
+| 任务 | 验证范围 | 结果 |
+| --- | --- | ---: |
+| Task 1 | Contracts 全套测试 12 个文件 | 96/96 通过；类型检查通过 |
+| Task 2 | SQLite 迁移与会话 repository | 30/30 通过 |
+| Task 3 | Conversation tools、graph、graph service、LangSmith exporter | 28/28 通过 |
+| Task 4 | Conversation service/routes 与 job-match action routes | 30/30 通过 |
+| Task 5 | Web conversation API、ChatHome | 20/20 通过；Web 构建通过 |
+| Task 6 | Router、Workspace、ApplicationTaskPage | 45/45 通过 |
+| Task 7 | API conversation E2E 与 Web integration | 7/7 通过 |
+| Task 8 | 隐私、过程事件、过程摘要、trace、outbox | 19/19 通过 |
+
+完整门禁结果：
+
+- 全仓测试：11 个 workspace、172 个测试文件、1640 个测试，0 失败、0 跳过。
+- 全仓 TypeScript 类型检查：退出码 0，无类型错误。
+- 全仓生产构建：退出码 0，共享包、Web、API、Browser Worker 均完成构建。
+- 浏览器全量 E2E：44/44 通过，覆盖对话首页、岗位匹配、投递工作台、旧地址兼容、人工接管和最终提交锁定。
+- 服务状态：守护器、远程 OCR、远程 Embedding、SSH 隧道、API/浏览器 Worker 和前端均为“就绪”。重启最新构建后，API 与前端代理的 `GET /api/conversations` 均可返回历史会话。
+- 差异格式检查：`git diff --check` 通过。
+
+桌面端验收截图：
+
+- [对话首页、历史会话、快速开始和招聘入口确认卡片](../images/chat-first-workspace-desktop.png)
+- [窄屏下的蓝白工作区与招聘入口确认卡片](../images/chat-first-workspace-narrow.png)
+
+范围复核：代码中出现的岗位匹配轮询仅用于现有岗位匹配会话的读取刷新；未新增企业招聘结果跟踪、企业账号绑定、外部招聘状态轮询、Webhook、状态同步或通知。岗位匹配、受控投递、人工接管和最终提交锁定逻辑保持不变。

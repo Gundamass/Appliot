@@ -5,7 +5,7 @@ import type {
   JobPageSnapshot,
   JobPosting
 } from "@resume/contracts";
-import { mokaJobAdapter, type JobAdapter } from "@resume/job-matching";
+import { baiduJobAdapter, djiJobAdapter, mokaJobAdapter, type JobAdapter } from "@resume/job-matching";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import { createApplicationTaskRepository } from "../applications/application-task-repository.js";
 import { BrowserOwnershipLease } from "../browser/browser-ownership-lease.js";
@@ -129,6 +129,10 @@ function harness(
   const trace = new BoundedJobMatchTraceBuffer();
   const matcher = { match: vi.fn() };
   const browserOwnershipLease = new BrowserOwnershipLease();
+  const extraction = {
+    confirmFilters: vi.fn(),
+    runExtraction: vi.fn()
+  };
   const service = createJobMatchService({
     repository,
     applicationTasks,
@@ -137,10 +141,7 @@ function harness(
     adapters: [adapterOverride ?? adapter],
     expectationSnapshot: () => expectationSnapshot,
     profileRevision: () => profileRevision,
-    extraction: {
-      confirmFilters: vi.fn(),
-      runExtraction: vi.fn()
-    },
+    extraction,
     matcher,
     trace,
     createId: (kind) => kind === "session" ? "session-1" : "application-1",
@@ -153,6 +154,7 @@ function harness(
     browser,
     browserOwnershipLease,
     adapter: adapterOverride ?? adapter,
+    extraction,
     trace,
     matcher,
     get submissionCount() { return submissionCount; }
@@ -198,6 +200,36 @@ describe("JobMatchService entry handling", () => {
     expect(value.browser.execute).not.toHaveBeenCalled();
   });
 
+  it("presents only the six highest-ranked results", () => {
+    const value = harness();
+    const jobs = Array.from({ length: 8 }, (_item, index) => posting(`posting-${index + 1}`));
+    value.repository.create({
+      id: "session-1",
+      initialUrl: "https://jobs.example/list",
+      state: "awaiting_job_selection",
+      profileRevision: 7,
+      expectation
+    });
+    value.repository.saveExtractionPage({
+      sessionId: "session-1",
+      idempotencyKey: "seed-results",
+      postings: jobs,
+      cursor: { value: "complete", pagesRead: 1, elapsedMs: 1, newJobs: jobs.length, consecutiveNoNewPages: 0 },
+      event: { type: "seed", payload: {} }
+    });
+    value.repository.saveResults("session-1", jobs.map((job, index) => ({
+      ...result(job),
+      rankingScore: 80 - index
+    })));
+
+    const presented = value.service.get("session-1");
+
+    expect(presented.results).toHaveLength(6);
+    expect(presented.results.map((item) => item.postingId)).toEqual([
+      "posting-1", "posting-2", "posting-3", "posting-4", "posting-5", "posting-6"
+    ]);
+  });
+
   it("rejects an empty expectation before acquiring or opening the browser", async () => {
     const value = harness("job_list", 7, { ...expectation, criteria: [] });
 
@@ -240,6 +272,43 @@ describe("JobMatchService entry handling", () => {
     expect(value.browser.execute).not.toHaveBeenCalled();
   });
 
+  it("retries an initially empty SPA snapshot before rejecting the job entry", async () => {
+    const value = harness("job_list");
+    value.browser.observeJob
+      .mockResolvedValueOnce(snapshot("unknown", "session-1", "https://jobs.example/list"))
+      .mockResolvedValueOnce(snapshot("job_list", "session-1", "https://jobs.example/list"));
+
+    await expect(value.service.create({ url: "https://jobs.example/list" })).resolves.toMatchObject({
+      state: "awaiting_filter_confirmation",
+      entryKind: "job_list"
+    });
+    expect(value.browser.observeJob).toHaveBeenCalledTimes(2);
+  });
+
+  it("normalizes the Baidu official root before opening the campus list", async () => {
+    const campusListUrl = "https://talent.baidu.com/jobs/list?projectType=1&recruitType=GRADUATE";
+    const value = harness("job_list", 7, expectation, baiduJobAdapter, campusListUrl);
+
+    await expect(value.service.create({ url: "https://talent.baidu.com/" })).resolves.toMatchObject({
+      source: "baidu",
+      entryKind: "job_list"
+    });
+    expect(value.browser.open).toHaveBeenCalledWith("session-1", campusListUrl);
+  });
+
+  it("normalizes the current DJI campus landing page before opening its jobs portal", async () => {
+    const campusListUrl = "https://apply.careers.dji.com/campus-recruitment/dji/143359?locale=zh-CN#/";
+    const value = harness("job_list", 7, expectation, djiJobAdapter, campusListUrl);
+
+    await expect(value.service.create({ url: "https://careers.dji.com/zh-CN/campus?source=RM-Title" }))
+      .resolves.toMatchObject({
+        source: "dji",
+        entryKind: "job_list",
+        state: "awaiting_filter_confirmation"
+      });
+    expect(value.browser.open).toHaveBeenCalledWith("session-1", campusListUrl);
+  });
+
   it("persists the edited expectation when filters are confirmed", async () => {
     const value = harness("job_list");
     const created = await value.service.create({ url: "https://jobs.example/list" });
@@ -259,6 +328,42 @@ describe("JobMatchService entry handling", () => {
       expectationRevision: edited.revision,
       expectation: edited
     });
+  });
+
+  it("extracts and matches immediately after filter confirmation", async () => {
+    const value = harness("job_list");
+    const created = await value.service.create({ url: "https://jobs.example/list" });
+    if ("redirect" in created) throw new Error("expected a job match session");
+    const edited: JobExpectationSnapshot = {
+      revision: expectation.revision + 1,
+      confirmedAt: "2026-08-16T00:03:00.000Z",
+      criteria: [{ kind: "location", values: ["涓婃捣"], strength: "required" }]
+    };
+    value.extraction.runExtraction.mockImplementation(async (sessionId: string) => {
+      const current = value.repository.get(sessionId, { required: true });
+      value.repository.mutate(sessionId, current.version, (session) => ({
+        ...session,
+        state: "matching_jobs"
+      }));
+    });
+
+    await expect(value.service.confirmFilters("session-1", edited, {
+      sessionVersion: created.version,
+      idempotencyKey: "confirm-and-match"
+    })).resolves.toMatchObject({
+      version: 3,
+      state: "awaiting_job_selection",
+      expectationRevision: edited.revision,
+      expectation: edited
+    });
+    expect(value.extraction.runExtraction).toHaveBeenCalledWith("session-1");
+    expect(value.matcher.match).toHaveBeenCalledWith("session-1");
+    expect(value.browserOwnershipLease.current()).toBeUndefined();
+    expect(value.browser.releaseTask).toHaveBeenCalledWith("session-1");
+    expect(() => value.browserOwnershipLease.acquire({
+      ownerKind: "job_match",
+      ownerId: "session-2"
+    })).not.toThrow();
   });
 
   it("redirects application-form entries without creating a match session", async () => {
