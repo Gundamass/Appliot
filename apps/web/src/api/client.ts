@@ -1,4 +1,6 @@
 import {
+  CurrentProfileDocumentResponseSchema,
+  CurrentProfileDocumentSummarySchema,
   DocumentResponseSchema,
   ErrorResponseSchema,
   LatestProfileDocumentResponseSchema,
@@ -17,6 +19,7 @@ import {
   type ProfileFact,
   type ProfileCompleteness,
   type ProfileDocumentSummary,
+  type CurrentProfileDocumentSummary,
   ProfileFactRemovalInputSchema,
   ProfileFactRemovalResultSchema
 } from "@resume/contracts";
@@ -33,6 +36,9 @@ export class ProfileApiError extends Error {
 
 export interface ProfileApi {
   upload(file: File): Promise<{ documentId: string }>;
+  updateCurrentDocument(file: File): Promise<CurrentProfileDocumentSummary>;
+  parseCurrentDocument(documentId: string): Promise<CurrentProfileDocumentSummary>;
+  getCurrentDocument(): Promise<CurrentProfileDocumentSummary | undefined>;
   uploadAvatar(file: File): Promise<{ fileId: string }>;
   listFacts(): Promise<ProfileFact[]>;
   upsert(fieldPath: string, value: unknown): Promise<ProfileFact>;
@@ -52,6 +58,23 @@ export function createProfileApi(baseUrl = ""): ProfileApi {
       const payload = await readResponse(response);
       const parsed = DocumentResponseSchema.parse(payload);
       return { documentId: parsed.documentId };
+    },
+    async updateCurrentDocument(file) {
+      const form = new FormData();
+      form.append("file", file);
+      const response = await fetch(`${baseUrl}/api/profile/documents/current`, { method: "POST", body: form });
+      return CurrentProfileDocumentSummarySchema.parse(await readResponse(response));
+    },
+    async parseCurrentDocument(documentId) {
+      const response = await fetch(
+        `${baseUrl}/api/profile/documents/${encodeURIComponent(documentId)}/parse`,
+        { method: "POST" }
+      );
+      return CurrentProfileDocumentSummarySchema.parse(await readResponse(response));
+    },
+    async getCurrentDocument() {
+      const response = await fetch(`${baseUrl}/api/profile/documents/current`, { method: "GET" });
+      return CurrentProfileDocumentResponseSchema.parse(await readResponse(response)).document ?? undefined;
     },
     async uploadAvatar(file) {
       const form = new FormData();

@@ -153,6 +153,34 @@ describe("ProfileApi HTTP contract", () => {
     expect((init.headers as Record<string, string> | undefined)?.["Content-Type"]).toBeUndefined();
   });
 
+  it("updates, parses, and reads the current resume through strict endpoints", async () => {
+    const document = {
+      documentId: "0f8fad5b-d9cb-469f-a165-70867728950e",
+      filename: "resume.pdf",
+      importedAt: "2026-09-08T00:00:00.000Z",
+      extractedFactCount: 0,
+      importStatus: "retained" as const
+    };
+    const fetchMock = vi.fn<typeof fetch>(async (_input, init) => new Response(JSON.stringify(
+      init?.method === "GET" ? { document } : document
+    ), { status: 200, headers: { "Content-Type": "application/json" } }));
+    vi.stubGlobal("fetch", fetchMock);
+    const api = createProfileApi();
+    const file = new File(["%PDF"], "resume.pdf", { type: "application/pdf" });
+
+    await expect(api.updateCurrentDocument(file)).resolves.toEqual(document);
+    await expect(api.parseCurrentDocument(document.documentId)).resolves.toEqual(document);
+    await expect(api.getCurrentDocument()).resolves.toEqual(document);
+    expect(fetchMock.mock.calls.map(([input]) => String(input))).toEqual([
+      "/api/profile/documents/current",
+      `/api/profile/documents/${document.documentId}/parse`,
+      "/api/profile/documents/current"
+    ]);
+    expect(fetchMock.mock.calls[0]?.[1]?.body).toBeInstanceOf(FormData);
+    expect(fetchMock.mock.calls[1]?.[1]).toEqual({ method: "POST" });
+    expect(fetchMock.mock.calls[2]?.[1]).toEqual({ method: "GET" });
+  });
+
   it("parses list and mutation responses through the shared contract", async () => {
     const invalid = { ...fact, confidence: 4 };
     vi.stubGlobal("fetch", vi.fn(async () => new Response(JSON.stringify(invalid), {

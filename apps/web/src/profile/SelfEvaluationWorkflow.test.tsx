@@ -25,6 +25,9 @@ describe("self-evaluation workflow", () => {
   it("creates from job provenance and promotes only after explicit approval", async () => {
     const profileApi: ProfileApi = {
       upload: vi.fn(),
+      updateCurrentDocument: vi.fn(),
+      parseCurrentDocument: vi.fn(),
+      getCurrentDocument: vi.fn(async () => undefined),
       uploadAvatar: vi.fn(),
       listFacts: vi.fn(async () => []),
       upsert: vi.fn(),

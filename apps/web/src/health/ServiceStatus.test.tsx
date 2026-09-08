@@ -15,6 +15,9 @@ const statuses: AdapterStatus[] = [
 
 const profileApi: ProfileApi = {
     upload: vi.fn(),
+    updateCurrentDocument: vi.fn(),
+    parseCurrentDocument: vi.fn(),
+    getCurrentDocument: vi.fn(async () => undefined),
     uploadAvatar: vi.fn(),
   listFacts: vi.fn(async () => []),
   upsert: vi.fn(),

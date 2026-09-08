@@ -69,6 +69,9 @@ const emptyCompleteness: ProfileCompleteness = {
 function api(): ProfileApi {
   return {
     upload: vi.fn(),
+    updateCurrentDocument: vi.fn(),
+    parseCurrentDocument: vi.fn(),
+    getCurrentDocument: vi.fn(async () => undefined),
     uploadAvatar: vi.fn(async () => ({ fileId: "avatar-0f8fad5b-d9cb-469f-a165-70867728950e.webp" })),
     listFacts: vi.fn(async () => []),
     upsert: vi.fn(async (fieldPath, value) => fact(fieldPath, value, "user_corrected")),
