@@ -4,7 +4,10 @@ import { fileURLToPath } from "node:url";
 
 const repositoryRoot = resolve(fileURLToPath(new URL("..", import.meta.url)));
 const source = resolve(repositoryRoot, "apps/synthetic-ats/public");
-const target = resolve(repositoryRoot, "apps/api/dist/synthetic-ats-public");
+const target = resolve(
+  repositoryRoot,
+  process.env.SYNTHETIC_ATS_ASSET_TARGET ?? "apps/api/dist/synthetic-ats-public"
+);
 
 assertInsideRepository(source, "synthetic ATS source");
 assertInsideRepository(target, "synthetic ATS bundle target");
