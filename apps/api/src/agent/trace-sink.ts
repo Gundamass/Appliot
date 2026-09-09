@@ -26,7 +26,7 @@ interface TraceRow {
 }
 
 const emailPattern = /\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b/i;
-const phonePattern = /(?:^|\D)(?:\+?86[- ]?)?1[3-9]\d{9}(?:$|\D)/;
+const phonePattern = /(?<![A-Za-z0-9])(?:\+?86[- ]?)?1[3-9]\d{9}(?![A-Za-z0-9])/u;
 const markupPattern = /<\/?[a-z][^>]*>/i;
 const queryUrlPattern = /https?:\/\/[^\s?#]+[^\s#]*\?[^\s#]+/iu;
 const credentialPattern = /(?:approval|access|refresh|secret|auth|bearer|session|credential|private)[_.:-]?(?:token|key|secret)/iu;

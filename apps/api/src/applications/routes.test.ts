@@ -297,6 +297,34 @@ describe("application task routes", () => {
       .toEqual(sourceEventsBefore);
   });
 
+  it("restarts a task whose persisted terminal event is newer than its stale checkpoint", async () => {
+    const { app, eventBus, applicationService } = await buildApp();
+    const created = await app.inject({
+      method: "POST",
+      url: "/api/applications",
+      payload: { applicationUrl: "https://jobs.example.test/apply/stale-checkpoint" }
+    });
+    const sourceId = created.json().id as string;
+
+    await vi.waitFor(() => {
+      expect(applicationService.state(sourceId).value).toBe("awaiting_login");
+    });
+    eventBus.emit(sourceId, "failed");
+    await applicationService.dispose(sourceId);
+
+    const source = await app.inject({ method: "GET", url: `/api/applications/${sourceId}` });
+    expect(source.statusCode).toBe(200);
+    expect(source.json()).toMatchObject({ id: sourceId, state: "failed" });
+
+    const restarted = await app.inject({
+      method: "POST",
+      url: `/api/applications/${sourceId}/restart`,
+      payload: {}
+    });
+    expect(restarted.statusCode).toBe(201);
+    expect(restarted.json().id).not.toBe(sourceId);
+  });
+
   it("rejects restart for an active task", async () => {
     const { app } = await buildApp();
     const created = await app.inject({

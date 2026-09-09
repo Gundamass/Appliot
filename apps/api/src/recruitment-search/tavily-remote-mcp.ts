@@ -197,8 +197,14 @@ async function normalizeCandidates(
     } catch {
       continue;
     }
-    if (seenUrls.has(verified.url)) continue;
-    seenUrls.add(verified.url);
+    // Search results identify recruitment entry pages, where fragments are
+    // navigation noise for ranking/deduplication. Application task targets use
+    // validatePublicHttpsUrl directly and intentionally preserve hash routes.
+    const candidateUrl = new URL(verified.url);
+    candidateUrl.hash = "";
+    const normalizedCandidateUrl = candidateUrl.toString();
+    if (seenUrls.has(normalizedCandidateUrl)) continue;
+    seenUrls.add(normalizedCandidateUrl);
 
     const snippet = plainText(remoteResult.content).slice(0, 500);
     const sourceScore = remoteResult.score !== undefined
@@ -208,7 +214,7 @@ async function normalizeCandidates(
       : undefined;
     candidates.push({
       title,
-      url: verified.url,
+      url: normalizedCandidateUrl,
       domain: verified.domain,
       snippet,
       source: "tavily",

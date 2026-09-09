@@ -88,6 +88,29 @@ describe("SQLite TraceSink", () => {
     expect(sink.list("run-b")[0]?.sequence).toBe(1);
   });
 
+  it("does not mistake a phone-looking substring inside an opaque UUID for PII", () => {
+    const sink = createSqliteTraceSink(createDatabase());
+    const taskId = "72b3f53c-3cde-5953-a9d9-17245782939e";
+
+    expect(() => sink.record({
+      runId: `application-target:${taskId}`,
+      taskId,
+      node: "application_target_job_match",
+      kind: "checkpoint",
+      outcome: "prepared",
+      reasonCode: "explicit"
+    })).not.toThrow();
+    expect(() => sink.record({
+      runId: "run-phone",
+      taskId: "task-phone",
+      node: "judge",
+      kind: "model_decision",
+      outcome: "accepted",
+      reasonCode: "grounded",
+      candidateIds: ["17245782939"]
+    })).toThrow("trace_pii_rejected");
+  });
+
   it("writes a LangSmith projection atomically when enabled", () => {
     const database = createDatabase();
     const sink = createSqliteTraceSink(database, { langSmithEnabled: true });

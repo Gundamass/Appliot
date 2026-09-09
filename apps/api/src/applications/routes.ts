@@ -38,14 +38,23 @@ export interface ApplicationRouteDependencies {
 
 export function registerApplicationRoutes(app: FastifyInstance, dependencies: ApplicationRouteDependencies): void {
   const restartOperations = new Map<string, Promise<StoredApplicationTask>>();
+  const terminalStates = new Set<ApplicationTaskState>(["failed", "cancelled", "review_locked"]);
+  const projectedState = (taskId: string, runtimeState?: ApplicationTaskState): ApplicationTaskState => {
+    const current = runtimeState ?? toApiState(dependencies.applicationService.state(taskId).value);
+    if (terminalStates.has(current)) return current;
+    const latestPersisted = dependencies.taskEvents.history(taskId).at(-1)?.state;
+    return latestPersisted !== undefined && terminalStates.has(latestPersisted)
+      ? latestPersisted
+      : current;
+  };
   const taskResponse = (task: StoredApplicationTask): ApplicationTask => {
     const serviceState = dependencies.applicationService.state(task.id);
-    const state = toApiState(serviceState.value);
+    const state = projectedState(task.id, toApiState(serviceState.value));
     const contentReview = dependencies.applicationService.contentReview(task.id);
     const adapterReview = dependencies.applicationService.adapterReview(task.id);
     const fieldCoverage = dependencies.applicationService.fieldCoverage(task.id);
     const executionProgress = dependencies.applicationService.progress(task.id).executionProgress;
-    const commands = state === "awaiting_challenge" || state === "awaiting_adapter_review"
+    const commands = terminalStates.has(state) || state === "awaiting_challenge" || state === "awaiting_adapter_review"
       ? commandsForState(state)
       : dependencies.applicationService.requiresRecovery(task.id)
       ? ["cancel", "resume"] as ApplicationTask["commands"]
@@ -180,7 +189,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     if (!body.success) return sendError(reply, 400, "重启请求无效", "invalid_application_task_restart_input");
     const source = dependencies.tasks.get(params.data.id);
     if (!source) return sendError(reply, 404, "投递任务不存在", "application_task_not_found");
-    const sourceState = toApiState(dependencies.applicationService.state(source.id).value);
+    const sourceState = projectedState(source.id);
     if (sourceState !== "failed" && sourceState !== "cancelled") {
       return sendError(reply, 409, "当前任务状态不允许重新开始", "application_task_restart_not_allowed");
     }
@@ -192,6 +201,12 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
         `restart:${source.id}`
       );
     } catch (error) {
+      if (!(error instanceof ApplicationTargetError)) {
+        console.error(
+          "[application.restart.prepare] failed",
+          error instanceof Error ? error.message : "unknown_error"
+        );
+      }
       const code = error instanceof ApplicationTargetError ? error.code : "invalid_application_url";
       return sendError(reply, 400, "投递网址无效或不是公网 HTTPS 地址", code);
     }
