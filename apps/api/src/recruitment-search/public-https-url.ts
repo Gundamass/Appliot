@@ -40,7 +40,6 @@ export async function validatePublicHttpsUrl(
   }
 
   parsed.hostname = hostname;
-  parsed.hash = "";
   return { url: parsed.toString(), domain: hostname };
 }
 

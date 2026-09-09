@@ -22,13 +22,13 @@ describe("validatePublicHttpsUrl", () => {
     ])).rejects.toThrow("unsafe_recruitment_url");
   });
 
-  it("normalizes a public HTTPS URL and removes its fragment", async () => {
+  it("normalizes a public HTTPS URL and preserves its fragment", async () => {
     await expect(validatePublicHttpsUrl(
-      "https://Talent.Baidu.com/jobs#apply",
+      "https://App.Mokahr.com/campus-recruitment/whfhtx/73922#/job/a6cadf99-015c-42f6-a170-3252b540dae6/apply",
       publicDns
     )).resolves.toEqual({
-      url: "https://talent.baidu.com/jobs",
-      domain: "talent.baidu.com"
+      url: "https://app.mokahr.com/campus-recruitment/whfhtx/73922#/job/a6cadf99-015c-42f6-a170-3252b540dae6/apply",
+      domain: "app.mokahr.com"
     });
   });
 });

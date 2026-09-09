@@ -6,7 +6,103 @@ import { createTaskEventBus } from "./task-events.js";
 import { createApplicationTaskRepository } from "./application-task-repository.js";
 import { createRuntimeApplicationStateStore } from "../agent/runtime/application-state-store.js";
 
+const pollutedUrl = "https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440%E8%BF%99%E4%B8%AA%E9%A1%B5%E9%9D%A2%E5%8F%AF%E4%BB%A5%E6%8A%95%E9%80%92%E5%90%97";
+const recoveredUrl = "https://wondersharecampus.zhiye.com/form?fromPage=job&jobAdId=1e15df19-c887-41f5-b632-3845af9b5131&shareId=16002765-e0e5-4238-a46a-4f8b717777fc&userId=125079440";
+
+function runtimeState(runId: string, taskId: string, applicationUrl: string) {
+  return {
+    version: "1.1.0" as const,
+    runId,
+    taskId,
+    applicationUrl,
+    executionEpoch: 0,
+    plannedCommandIds: [],
+    completedCommandIds: [],
+    retryCount: 0,
+    finalReviewLocked: false,
+    updatedAt: "2026-09-09T00:00:00.000Z"
+  };
+}
+
 describe("application task repository", () => {
+  it.each(["get", "list"] as const)("repairs a recovered encoded suffix atomically through %s", async (method) => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createApplicationTaskRepository(database);
+    repository.create({ id: "historical-task", applicationUrl: pollutedUrl });
+    const states = createRuntimeApplicationStateStore(database);
+    await states.save(runtimeState("matching-run", "historical-task", pollutedUrl));
+    await states.save(runtimeState("same-task-other-url", "historical-task", "https://jobs.example.test/other"));
+    await states.save(runtimeState("other-task-same-url", "other-task", pollutedUrl));
+    database.prepare(`
+      INSERT INTO application_task_events (task_id, type, state, created_at)
+      VALUES ('historical-task', 'state_changed', 'created', '2026-09-09T00:00:00.000Z')
+    `).run();
+    database.prepare(`
+      INSERT INTO application_checkpoints (
+        task_id, sequence, state, url, stage, snapshot_id, field_ids_json, questions_json, created_at
+      ) VALUES ('historical-task', 1, 'created', ?, 'unknown', 'snapshot-history', '[]', '[]', '2026-09-09T00:00:00.000Z')
+    `).run(pollutedUrl);
+    database.prepare(`
+      INSERT INTO agent_trace_events (
+        id, run_id, task_id, sequence, node, kind, outcome, reason_code, payload_json, created_at
+      ) VALUES ('trace-history', 'matching-run', 'historical-task', 1, 'start', 'node', 'completed', 'historical', '{}', '2026-09-09T00:00:00.000Z')
+    `).run();
+
+    const beforeHistory = {
+      events: database.prepare("SELECT * FROM application_task_events").all(),
+      checkpoints: database.prepare("SELECT * FROM application_checkpoints").all(),
+      traces: database.prepare("SELECT * FROM agent_trace_events").all()
+    };
+    const result = method === "get" ? repository.get("historical-task") : repository.list()[0];
+
+    expect(result?.applicationUrl).toBe(recoveredUrl);
+    expect(database.prepare("SELECT application_url FROM application_tasks WHERE id = 'historical-task'").get())
+      .toEqual({ application_url: recoveredUrl });
+    await expect(states.get("matching-run")).resolves.toMatchObject({ applicationUrl: recoveredUrl });
+    await expect(states.get("same-task-other-url")).resolves.toMatchObject({ applicationUrl: "https://jobs.example.test/other" });
+    await expect(states.get("other-task-same-url")).resolves.toMatchObject({ applicationUrl: pollutedUrl });
+    expect({
+      events: database.prepare("SELECT * FROM application_task_events").all(),
+      checkpoints: database.prepare("SELECT * FROM application_checkpoints").all(),
+      traces: database.prepare("SELECT * FROM agent_trace_events").all()
+    }).toEqual(beforeHistory);
+    database.close();
+  });
+
+  it("does not rewrite valid encoded paths or legitimate Chinese query values", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createApplicationTaskRepository(database);
+    const urls = [
+      "https://jobs.example.test/%E6%8A%80%E6%9C%AF%E6%94%AF%E6%8C%81",
+      "https://jobs.example.test/apply?candidateId=abc%E5%BC%A0%E4%B8%89"
+    ];
+    urls.forEach((applicationUrl, index) => repository.create({ id: `valid-${index}`, applicationUrl }));
+
+    repository.list();
+    urls.forEach((applicationUrl, index) => {
+      expect(repository.get(`valid-${index}`)?.applicationUrl).toBe(applicationUrl);
+    });
+    database.close();
+  });
+
+  it("rolls back the task repair when a matching Runtime payload is corrupt", () => {
+    const database = new Database(":memory:");
+    migrateDatabase(database);
+    const repository = createApplicationTaskRepository(database);
+    repository.create({ id: "historical-task", applicationUrl: pollutedUrl });
+    database.prepare(`
+      INSERT INTO agent_runtime_application_states (run_id, payload_json, updated_at)
+      VALUES ('corrupt-run', ?, '2026-09-09T00:00:00.000Z')
+    `).run(JSON.stringify({ taskId: "historical-task", applicationUrl: pollutedUrl }));
+
+    expect(() => repository.get("historical-task")).toThrow("runtime_application_state_corrupt");
+    expect(database.prepare("SELECT application_url FROM application_tasks WHERE id = 'historical-task'").get())
+      .toEqual({ application_url: pollutedUrl });
+    database.close();
+  });
+
   it("persists profile synchronization state without moving the applied revision backwards", () => {
     const database = new Database(":memory:");
     migrateDatabase(database);

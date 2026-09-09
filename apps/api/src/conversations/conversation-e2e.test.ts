@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from "vitest";
 import type { ConversationContext, ConversationTurnResponse } from "@resume/contracts";
 import type { JobMatchAggregate, JobMatchRepository } from "../job-matching/job-match-repository.js";
 import { prepareApplicationTarget } from "../applications/application-target.js";
+import { validatePublicHttpsUrl } from "../recruitment-search/public-https-url.js";
 import { createConversationGraph, type ConversationGraphDependencies } from "./conversation-graph.js";
 
 const context: ConversationContext = {
@@ -113,6 +114,37 @@ async function send(graph: ReturnType<typeof createConversationGraph>, text: str
 }
 
 describe("conversation recommendation to application task handoff", () => {
+  it("preserves a SPA route through validation, confirmation, and direct task creation", async () => {
+    const applicationUrl = "https://app.mokahr.com/campus-recruitment/whfhtx/73922#/job/a6cadf99-015c-42f6-a170-3252b540dae6/apply";
+    const fakes = dependencies();
+    const createFromJob = vi.fn((input: { id: string; name?: string; applicationUrl: string }) => ({
+      ...task(input.id),
+      applicationUrl: input.applicationUrl
+    }));
+    const graph = createConversationGraph({
+      ...fakes.dependencies,
+      applicationTasks: { ...fakes.dependencies.applicationTasks, createFromJob },
+      modelProvider: {
+        generateStructured: vi.fn(async () => ({ kind: "start_application", requiresConfirmation: true }))
+      },
+      validatePublicHttpsUrl: (rawUrl) => validatePublicHttpsUrl(rawUrl, async () => ["220.181.7.203"])
+    });
+
+    const pending = await send(graph, `填写 ${applicationUrl}`);
+    expect(pending.pendingConfirmation?.target).toEqual({ kind: "application_url", url: applicationUrl });
+
+    await graph.invoke({
+      conversationId: "conversation-e2e",
+      turnSequence: 2,
+      confirmationId: pending.confirmationId,
+      approved: true,
+      context: pending.context
+    });
+
+    expect(createFromJob).toHaveBeenCalledWith(expect.objectContaining({ applicationUrl }));
+    expect(fakes.start).toHaveBeenCalledWith(expect.objectContaining({ applicationUrl }));
+  });
+
   it("resolves the first recommendation and hands the real result to selection and conversion after approval", async () => {
     const fakes = dependencies({ withJobMatchService: true });
     const graph = createConversationGraph(fakes.dependencies);
