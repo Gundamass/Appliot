@@ -61,6 +61,22 @@ describe("ApplicationApi", () => {
     }));
   });
 
+  it("restarts a task through the strict empty restart endpoint", async () => {
+    const fetchMock = vi.fn<typeof fetch>(async () => new Response(JSON.stringify(task), {
+      status: 200,
+      headers: { "Content-Type": "application/json" }
+    }));
+    vi.stubGlobal("fetch", fetchMock);
+
+    await createApplicationApi().restart!(task.id);
+
+    expect(fetchMock).toHaveBeenCalledWith(`/api/applications/${task.id}/restart`, {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({})
+    });
+  });
+
   it("accepts an empty 204 response when deleting a task", async () => {
     const fetchMock = vi.fn<typeof fetch>(async () => new Response(null, { status: 204 }));
     vi.stubGlobal("fetch", fetchMock);

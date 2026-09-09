@@ -41,6 +41,7 @@ export interface ApplicationApi {
   list(): Promise<ApplicationTask[]>;
   create(input: ApplicationTaskInput): Promise<ApplicationTask>;
   get(taskId: string): Promise<ApplicationTask>;
+  restart?(taskId: string): Promise<ApplicationTask>;
   delete?(taskId: string): Promise<void>;
   command(taskId: string, command: ApplicationCommand): Promise<ApplicationTask>;
   recover(taskId: string, command: ApplicationRecoveryCommand): Promise<ApplicationTask>;
@@ -65,6 +66,13 @@ export function createApplicationApi(baseUrl = ""): ApplicationApi {
     },
     async get(taskId) {
       return ApplicationTaskSchema.parse(await request(taskPath(taskId), { method: "GET" }));
+    },
+    async restart(taskId) {
+      return ApplicationTaskSchema.parse(await request(`${taskPath(taskId)}/restart`, {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({})
+      }));
     },
     async delete(taskId) {
       await request(taskPath(taskId), { method: "DELETE" });

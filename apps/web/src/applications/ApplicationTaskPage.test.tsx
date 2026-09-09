@@ -287,6 +287,44 @@ describe("ApplicationTaskPage", () => {
     await waitFor(() => expect(deleteTask).toHaveBeenCalledWith(task.id));
   });
 
+  it("keeps a terminal API failure authoritative over an older observing event", async () => {
+    const events = eventHarness();
+    const initial = deferred<ApplicationTask>();
+    const failedTask: ApplicationTask = { ...task, state: "failed", commands: [] };
+    const get = vi.fn().mockReturnValueOnce(initial.promise).mockResolvedValueOnce(failedTask);
+    render(<ApplicationTaskPage
+      taskId={task.id}
+      api={{ get, command: vi.fn() }}
+      connectEvents={events.connect}
+    />);
+
+    events.emit(event("observing_page", "1"));
+
+    expect(await screen.findByRole("heading", { name: "任务失败" })).toBeVisible();
+    expect(screen.getByText("未识别到可填写的申请表单，请检查目标页面后重新开始。")).toBeVisible();
+    initial.resolve({ ...task, state: "observing_page" });
+    expect(screen.getByRole("heading", { name: "任务失败" })).toBeVisible();
+  });
+
+  it("restarts a failed task and navigates only after the new task is returned", async () => {
+    const user = userEvent.setup();
+    const restarted = { ...task, id: "7c9e6679-7425-40de-944b-e07fc1f90ae7", state: "observing_page" as const };
+    const restart = vi.fn().mockResolvedValue(restarted);
+    const onNavigate = vi.fn();
+    const failedTask: ApplicationTask = { ...task, state: "failed", commands: [] };
+    render(<ApplicationTaskPage
+      taskId={task.id}
+      api={{ get: vi.fn().mockResolvedValue(failedTask), command: vi.fn(), restart }}
+      connectEvents={eventHarness().connect}
+      onNavigate={onNavigate}
+    />);
+
+    await user.click(await screen.findByRole("button", { name: "使用修正地址重新开始" }));
+
+    expect(restart).toHaveBeenCalledWith(task.id);
+    expect(onNavigate).toHaveBeenCalledWith(`/applications/${restarted.id}`);
+  });
+
   it("shows profile sync failures and retries only the current task sync", async () => {
     const user = userEvent.setup();
     const events = eventHarness();

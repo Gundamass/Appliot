@@ -16,7 +16,7 @@ import { WorkspaceFrame, type WorkspaceView } from "../workspace/WorkspaceFrame.
 
 interface ApplicationTaskPageProps {
   taskId: string;
-  api: Pick<ApplicationApi, "get" | "command"> & Partial<Pick<ApplicationApi, "recover" | "delete" | "adapterReview">>;
+  api: Pick<ApplicationApi, "get" | "command"> & Partial<Pick<ApplicationApi, "recover" | "restart" | "delete" | "adapterReview">>;
   connectEvents?: TaskEventConnection;
   onNavigate?(path: string): void;
 }
@@ -34,6 +34,7 @@ const EMPTY_ADAPTER_REVIEW: AdapterReviewSummary = {
   aiReviewUnavailable: true,
   writeBlocked: true
 };
+const TERMINAL_STATES = new Set<ApplicationTaskState>(["failed", "cancelled", "review_locked"]);
 
 function profileSyncErrorMessage(error: string | undefined): string {
   switch (error) {
@@ -61,6 +62,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
   const [error, setError] = useState<string>();
   const [busyCommand, setBusyCommand] = useState<ApplicationCommandType>();
   const [busyRecovery, setBusyRecovery] = useState<ApplicationRecoveryCommand>();
+  const [busyRestart, setBusyRestart] = useState(false);
   const [busyAdapterAction, setBusyAdapterAction] = useState<"replay" | "ai-review" | "revise" | "decision">();
   const [adapterReviewOverride, setAdapterReviewOverride] = useState<AdapterReviewSummary>();
   const [activities, setActivities] = useState<ApplicationTaskProgressEvent[]>([]);
@@ -76,9 +78,12 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     try {
       const next = await api.get(taskId);
       if (taskGeneration.current !== generation || projectionVersion.current !== version || next.id !== taskId) return;
+      const state = TERMINAL_STATES.has(next.state)
+        ? next.state
+        : latestEventState.current ?? next.state;
       setTask({
         ...next,
-        ...(latestEventState.current === undefined ? {} : { state: latestEventState.current }),
+        state,
         ...(latestExecutionProgress.current === undefined
           ? {}
           : { executionProgress: latestExecutionProgress.current })
@@ -103,6 +108,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     setError(undefined);
     setBusyCommand(undefined);
     setBusyRecovery(undefined);
+    setBusyRestart(false);
     setBusyAdapterAction(undefined);
     setAdapterReviewOverride(undefined);
     setActivities([]);
@@ -174,6 +180,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
   const canDeleteTask = currentTask !== undefined
     && api.delete !== undefined
     && ["review_locked", "cancelled", "failed"].includes(currentTask.state);
+  const canRestartTask = currentTask?.state === "failed" && api.restart !== undefined;
 
   const runCommand = async (command: ApplicationCommand) => {
     const generation = taskGeneration.current;
@@ -306,6 +313,25 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
     }
   };
 
+  const restartTask = async () => {
+    if (!api.restart) return;
+    const generation = taskGeneration.current;
+    setBusyRestart(true);
+    setError(undefined);
+    try {
+      const restarted = await api.restart(taskId);
+      if (taskGeneration.current === generation && activeTaskId.current === taskId) {
+        onNavigate?.(`/applications/${restarted.id}`);
+      }
+    } catch {
+      if (taskGeneration.current === generation && activeTaskId.current === taskId) {
+        setError("任务重新开始失败，请检查受控浏览器状态后重试");
+      }
+    } finally {
+      if (taskGeneration.current === generation) setBusyRestart(false);
+    }
+  };
+
   const submitQuestions = (submission: QuestionSubmission) => {
     const promote = new Set(submission.promoteFieldPaths);
     const questionsById = new Map(currentTask?.questions.map((question) => [question.id, question]));
@@ -385,11 +411,12 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
                     <p>请在受控浏览器中完成处理，然后点击继续填写。</p>
                   </div>
                 </section>}
-                {currentTask.state !== "needs_questions" && currentTask.state !== "awaiting_content_review" && currentTask.state !== "awaiting_challenge" && currentTask.state !== "awaiting_adapter_review" && <div className="detail-empty"><span>当前动作</span><strong>{selectedAttentionId ? "已选中处理项" : "系统正在安全推进"}</strong><p>需要人工判断的内容会在这里集中显示。</p></div>}
+                {currentTask.state === "failed" && <div className="detail-empty" role="alert"><span>当前状态</span><h3>任务失败</h3><p>未识别到可填写的申请表单，请检查目标页面后重新开始。</p></div>}
+                {currentTask.state !== "failed" && currentTask.state !== "needs_questions" && currentTask.state !== "awaiting_content_review" && currentTask.state !== "awaiting_challenge" && currentTask.state !== "awaiting_adapter_review" && <div className="detail-empty"><span>当前动作</span><strong>{selectedAttentionId ? "已选中处理项" : "系统正在安全推进"}</strong><p>需要人工判断的内容会在这里集中显示。</p></div>}
               </section>
             </div>
             <CompactActivityFeed activities={activities} />
-            {(hasVisibleCommand || canDeleteTask) && <section className="task-actions" aria-label="当前可用操作">
+            {(hasVisibleCommand || canRestartTask || canDeleteTask) && <section className="task-actions" aria-label="当前可用操作">
               {currentTask.commands.includes("open_browser") && <button className="button secondary" type="button" disabled={busyCommand !== undefined || busyAdapterAction !== undefined} onClick={() => void runCommand({ type: "open_browser" })}><MonitorUp aria-hidden="true" size={16} />打开受控浏览器</button>}
               {currentTask.commands.includes("resume") && <button className="button primary" type="button" disabled={busyCommand !== undefined || busyAdapterAction !== undefined} onClick={() => void runCommand({ type: "resume" })}><RotateCw aria-hidden="true" size={16} />我已完成登录，继续</button>}
               {currentTask.commands.includes("resume_after_challenge") && <button className="button primary" type="button" disabled={busyCommand !== undefined || busyAdapterAction !== undefined} onClick={() => void runCommand({ type: "resume_after_challenge" })}><RotateCw aria-hidden="true" size={16} />继续填写</button>}
@@ -397,6 +424,7 @@ export function ApplicationTaskPage({ taskId, api, connectEvents, onNavigate }: 
               {currentTask.commands.includes("resume_with_profile") && <button className="button primary" type="button" disabled={busyCommand !== undefined || busyAdapterAction !== undefined} onClick={() => void runCommand({ type: "resume_with_profile" })}><RotateCw aria-hidden="true" size={16} />我已补全档案，重新匹配</button>}
               {currentTask.commands.includes("sync_profile") && <button className="button primary" type="button" disabled={busyCommand !== undefined || busyAdapterAction !== undefined} onClick={() => void runCommand({ type: "sync_profile" })}><RotateCw aria-hidden="true" size={16} />重新同步档案</button>}
               {currentTask.commands.includes("cancel") && <button className="button quiet danger" type="button" disabled={busyCommand !== undefined || busyAdapterAction !== undefined} onClick={() => void runCommand({ type: "cancel" })}><X aria-hidden="true" size={16} />取消任务</button>}
+              {canRestartTask && <button className="button primary" type="button" disabled={busyRestart} onClick={() => void restartTask()}><RotateCw aria-hidden="true" size={16} />使用修正地址重新开始</button>}
               {canDeleteTask && <button className="button quiet danger" type="button" disabled={busyCommand !== undefined || busyAdapterAction !== undefined} onClick={() => void deleteTask()}><X aria-hidden="true" size={16} />删除任务</button>}
             </section>}
             {error && <p className="inline-error" role="alert">{error}</p>}
