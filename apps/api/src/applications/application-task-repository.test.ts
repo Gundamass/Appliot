@@ -92,10 +92,12 @@ describe("application task repository", () => {
     migrateDatabase(database);
     const repository = createApplicationTaskRepository(database);
     repository.create({ id: "historical-task", applicationUrl: pollutedUrl });
+    database.pragma("ignore_check_constraints = ON");
     database.prepare(`
       INSERT INTO agent_runtime_application_states (run_id, payload_json, updated_at)
       VALUES ('corrupt-run', ?, '2026-09-09T00:00:00.000Z')
-    `).run(JSON.stringify({ taskId: "historical-task", applicationUrl: pollutedUrl }));
+    `).run(`{"taskId":"historical-task","applicationUrl":${JSON.stringify(pollutedUrl)}`);
+    database.pragma("ignore_check_constraints = OFF");
 
     expect(() => repository.get("historical-task")).toThrow("runtime_application_state_corrupt");
     expect(database.prepare("SELECT application_url FROM application_tasks WHERE id = 'historical-task'").get())

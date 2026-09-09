@@ -60,8 +60,8 @@ export function createApplicationTaskRepository(database: SqliteDatabase): Appli
   const findMatchingRuntimeStates = database.prepare(`
     SELECT run_id, payload_json
     FROM agent_runtime_application_states
-    WHERE json_extract(payload_json, '$.taskId') = ?
-      AND json_extract(payload_json, '$.applicationUrl') = ?
+    WHERE instr(payload_json, ?) > 0
+      AND instr(payload_json, ?) > 0
   `);
   const updateRuntimeState = database.prepare(`
     UPDATE agent_runtime_application_states
@@ -96,12 +96,13 @@ export function createApplicationTaskRepository(database: SqliteDatabase): Appli
     if (extracted?.boundary !== "recovered_encoded_suffix") return row;
 
     const runtimeUpdates = (findMatchingRuntimeStates.all(
-      row.id,
-      row.application_url
+      JSON.stringify(row.id),
+      JSON.stringify(row.application_url)
     ) as RuntimeApplicationStateRow[]).map((runtimeRow) => ({
       runId: runtimeRow.run_id,
       payload: parseRuntimeApplicationState(runtimeRow.payload_json)
-    }));
+    })).filter((runtime) => runtime.payload.taskId === row.id
+      && runtime.payload.applicationUrl === row.application_url);
 
     for (const runtime of runtimeUpdates) {
       updateRuntimeState.run(
