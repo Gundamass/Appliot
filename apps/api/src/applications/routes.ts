@@ -77,7 +77,9 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       applicationUrl: task.applicationUrl,
       state,
       commands,
-      recoveryCommands: dependencies.applicationService.recoveryCommands(task.id),
+      recoveryCommands: terminalStates.has(state)
+        ? []
+        : dependencies.applicationService.recoveryCommands(task.id),
       questions: serviceState.context.questions,
       taskAnswers: taskAnswers.map((answer) => ({
         id: answer.id,
@@ -274,8 +276,8 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     if (!params.success) return sendError(reply, 400, "Invalid request", "invalid_task_id");
     const task = dependencies.tasks.get(params.data.id);
     if (!task) return sendError(reply, 404, "Application task not found", "application_task_not_found");
-    const state = dependencies.applicationService.state(task.id).value;
-    if (!(["review_locked", "cancelled", "failed"] as const).includes(state as "review_locked" | "cancelled" | "failed")) {
+    const state = projectedState(task.id);
+    if (!terminalStates.has(state)) {
       return sendError(reply, 409, "Application task cannot be deleted while active", "application_task_delete_not_allowed");
     }
     await dependencies.applicationService.dispose(task.id);
@@ -311,7 +313,8 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     if (!command.success) return sendError(reply, 400, "恢复操作无效", "invalid_recovery_command");
     const task = dependencies.tasks.get(params.data.id);
     if (!task) return sendError(reply, 404, "投递任务不存在", "application_task_not_found");
-    if (!dependencies.applicationService.recoveryCommands(task.id).includes(command.data.type)) {
+    if (terminalStates.has(projectedState(task.id))
+      || !dependencies.applicationService.recoveryCommands(task.id).includes(command.data.type)) {
       return sendError(reply, 409, "当前状态不允许该恢复操作", "recovery_command_not_allowed");
     }
     try {

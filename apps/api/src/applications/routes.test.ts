@@ -311,10 +311,21 @@ describe("application task routes", () => {
     });
     eventBus.emit(sourceId, "failed");
     await applicationService.dispose(sourceId);
+    const readRecoveryCommands = applicationService.recoveryCommands.bind(applicationService);
+    vi.spyOn(applicationService, "recoveryCommands").mockImplementation((taskId) => taskId === sourceId
+      ? ["retry_current"]
+      : readRecoveryCommands(taskId));
 
     const source = await app.inject({ method: "GET", url: `/api/applications/${sourceId}` });
     expect(source.statusCode).toBe(200);
-    expect(source.json()).toMatchObject({ id: sourceId, state: "failed" });
+    expect(source.json()).toMatchObject({ id: sourceId, state: "failed", recoveryCommands: [] });
+    const recovery = await app.inject({
+      method: "POST",
+      url: `/api/applications/${sourceId}/recovery`,
+      payload: { type: "retry_current" }
+    });
+    expect(recovery.statusCode).toBe(409);
+    expect(recovery.json()).toMatchObject({ code: "recovery_command_not_allowed" });
 
     const restarted = await app.inject({
       method: "POST",
@@ -323,6 +334,9 @@ describe("application task routes", () => {
     });
     expect(restarted.statusCode).toBe(201);
     expect(restarted.json().id).not.toBe(sourceId);
+
+    const deleted = await app.inject({ method: "DELETE", url: `/api/applications/${sourceId}` });
+    expect(deleted.statusCode).toBe(204);
   });
 
   it("rejects restart for an active task", async () => {
