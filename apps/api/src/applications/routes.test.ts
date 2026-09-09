@@ -44,6 +44,8 @@ async function buildApp(options: {
   const storageRoot = await mkdtemp(join(tmpdir(), "resume-application-routes-"));
   const profileRepository = createProfileRepository(database);
   const open = vi.fn(async () => ({ type: "opened" as const }));
+  const prepareTarget = vi.fn((rawUrl: string, identity: string) =>
+    prepareApplicationTarget(rawUrl, identity, async () => ["220.181.7.203"]));
   const stages = [...(options.observeStages ?? ["login"] as const)];
   let observed = 0;
   const applicationService = createApplicationService({
@@ -103,11 +105,11 @@ async function buildApp(options: {
     extractFacts: async () => [],
     applicationService,
     taskEvents: eventBus,
-    prepareApplicationTarget: (rawUrl, identity) => prepareApplicationTarget(rawUrl, identity, async () => ["220.181.7.203"]),
+    prepareApplicationTarget: prepareTarget,
     ...(options.sseHeartbeatMs === undefined ? {} : { applicationSseHeartbeatMs: options.sseHeartbeatMs })
   });
   resources.push({ app, database, storageRoot });
-  return { app, eventBus, profileRepository, database, storageRoot, open, applicationService };
+  return { app, eventBus, profileRepository, database, storageRoot, open, prepareTarget, applicationService };
 }
 
 async function buildQuestionApp() {
@@ -274,6 +276,9 @@ describe("application task routes", () => {
       url: `/api/applications/${sourceId}/commands`,
       payload: { type: "cancel" }
     });
+    const sourceEventsBefore = database.prepare(
+      "SELECT * FROM application_task_events WHERE task_id = ? ORDER BY id"
+    ).all(sourceId);
 
     const first = await app.inject({ method: "POST", url: `/api/applications/${sourceId}/restart`, payload: {} });
     expect(first.statusCode).toBe(201);
@@ -288,6 +293,8 @@ describe("application task routes", () => {
     expect(replay.json().id).toBe(first.json().id);
     expect(database.prepare("SELECT COUNT(*) AS count FROM application_tasks").get()).toEqual({ count: 2 });
     expect(database.prepare("SELECT id FROM application_tasks WHERE id = ?").get(sourceId)).toEqual({ id: sourceId });
+    expect(database.prepare("SELECT * FROM application_task_events WHERE task_id = ? ORDER BY id").all(sourceId))
+      .toEqual(sourceEventsBefore);
   });
 
   it("rejects restart for an active task", async () => {
@@ -305,6 +312,58 @@ describe("application task routes", () => {
     });
     expect(response.statusCode).toBe(409);
     expect(response.json()).toMatchObject({ code: "application_task_restart_not_allowed" });
+  });
+
+  it.each([
+    ["missing", undefined],
+    ["null", null],
+    ["array", []],
+    ["scalar", "restart"],
+    ["extra property", { unexpected: true }]
+  ])("rejects a %s restart body", async (_label, payload) => {
+    const { app } = await buildApp();
+    const created = await app.inject({
+      method: "POST", url: "/api/applications", payload: { applicationUrl: "https://jobs.example.test/apply/body" }
+    });
+    const sourceId = created.json().id as string;
+    await app.inject({ method: "POST", url: `/api/applications/${sourceId}/commands`, payload: { type: "cancel" } });
+
+    const response = await app.inject({
+      method: "POST",
+      url: `/api/applications/${sourceId}/restart`,
+      ...(payload === undefined ? {} : { payload: payload as Exclude<typeof payload, null | undefined> })
+    });
+    expect(response.statusCode).toBe(400);
+    if (_label !== "scalar") {
+      expect(response.json()).toMatchObject({ code: "invalid_application_task_restart_input" });
+    }
+  });
+
+  it("does not acknowledge an in-flight replay when startup later fails", async () => {
+    const { app, database, applicationService, prepareTarget } = await buildApp();
+    const created = await app.inject({
+      method: "POST", url: "/api/applications", payload: { applicationUrl: "https://jobs.example.test/apply/concurrent" }
+    });
+    const sourceId = created.json().id as string;
+    await app.inject({ method: "POST", url: `/api/applications/${sourceId}/commands`, payload: { type: "cancel" } });
+    let rejectOpen!: (error: Error) => void;
+    const pendingOpen = new Promise<never>((_resolve, reject) => { rejectOpen = reject; });
+    const openBrowser = vi.spyOn(applicationService, "openBrowser").mockImplementationOnce(() => pendingOpen);
+    const consoleError = vi.spyOn(console, "error").mockImplementation(() => undefined);
+
+    const firstPromise = app.inject({ method: "POST", url: `/api/applications/${sourceId}/restart`, payload: {} });
+    await waitFor(() => openBrowser.mock.calls.length === 1);
+    const replayPromise = app.inject({ method: "POST", url: `/api/applications/${sourceId}/restart`, payload: {} });
+    await waitFor(() => prepareTarget.mock.calls.filter(([, identity]) => identity === `restart:${sourceId}`).length === 2);
+    await new Promise<void>((resolve) => setImmediate(resolve));
+    rejectOpen(new Error("startup failed"));
+    const [first, replay] = await Promise.all([firstPromise, replayPromise]);
+    consoleError.mockRestore();
+
+    expect(first.statusCode).toBe(409);
+    expect(replay.statusCode).toBe(409);
+    expect(replay.json()).toMatchObject({ code: "application_task_creation_failed" });
+    expect(database.prepare("SELECT COUNT(*) AS count FROM application_tasks").get()).toEqual({ count: 1 });
   });
 
   it("accepts a failed source state", async () => {

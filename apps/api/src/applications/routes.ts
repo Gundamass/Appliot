@@ -37,6 +37,7 @@ export interface ApplicationRouteDependencies {
 }
 
 export function registerApplicationRoutes(app: FastifyInstance, dependencies: ApplicationRouteDependencies): void {
+  const restartOperations = new Map<string, Promise<StoredApplicationTask>>();
   const taskResponse = (task: StoredApplicationTask): ApplicationTask => {
     const serviceState = dependencies.applicationService.state(task.id);
     const state = toApiState(serviceState.value);
@@ -174,7 +175,7 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
 
   app.post("/api/applications/:id/restart", async (request, reply) => {
     const params = TaskParamsSchema.safeParse(request.params);
-    const body = ApplicationTaskRestartInputSchema.safeParse(request.body ?? {});
+    const body = ApplicationTaskRestartInputSchema.safeParse(request.body);
     if (!params.success) return sendError(reply, 400, "请求参数无效", "invalid_task_id");
     if (!body.success) return sendError(reply, 400, "重启请求无效", "invalid_application_task_restart_input");
     const source = dependencies.tasks.get(params.data.id);
@@ -195,6 +196,18 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       return sendError(reply, 400, "投递网址无效或不是公网 HTTPS 地址", code);
     }
 
+    const inFlight = restartOperations.get(prepared.id);
+    if (inFlight !== undefined) {
+      try {
+        return reply.code(200).send(taskResponse(await inFlight));
+      } catch (error) {
+        const code = error instanceof Error && error.message === "browser_task_in_use"
+          ? "browser_task_in_use"
+          : "application_task_creation_failed";
+        return sendError(reply, 409, "任务重新开始失败，请检查受控浏览器状态后重试", code);
+      }
+    }
+
     const existing = dependencies.tasks.get(prepared.id);
     if (existing !== undefined) return reply.code(200).send(taskResponse(existing));
     const activeTaskId = dependencies.applicationService.activeBrowserTaskId();
@@ -208,12 +221,14 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
       );
     }
 
-    try {
-      const task = await startPreparedTask({
+    const operation = startPreparedTask({
         id: prepared.id,
         name: source.name,
         applicationUrl: prepared.applicationUrl
       });
+    restartOperations.set(prepared.id, operation);
+    try {
+      const task = await operation;
       return reply.code(201).send(taskResponse(task));
     } catch (error) {
       console.error("[application.restart] failed", error instanceof Error ? error.stack ?? error.message : error);
@@ -221,6 +236,8 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
         ? "browser_task_in_use"
         : "application_task_creation_failed";
       return sendError(reply, 409, "任务重新开始失败，请检查受控浏览器状态后重试", code);
+    } finally {
+      if (restartOperations.get(prepared.id) === operation) restartOperations.delete(prepared.id);
     }
   });
 
