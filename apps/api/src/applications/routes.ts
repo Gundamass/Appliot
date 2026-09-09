@@ -3,6 +3,7 @@ import {
   ApplicationCommandSchema,
   ApplicationTaskIdSchema,
   ApplicationTaskInputSchema,
+  ApplicationTaskRestartInputSchema,
   ApplicationTaskSchema,
   suggestApplicationTaskName,
   type ApplicationCommand,
@@ -100,6 +101,37 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
     dependencies.taskEvents.emit(taskId, toApiState(dependencies.applicationService.state(taskId).value));
   };
 
+  const startPreparedTask = async (taskInput: {
+    id: string;
+    name: string;
+    applicationUrl: string;
+  }): Promise<StoredApplicationTask> => {
+    let serviceStarted = false;
+    let task: StoredApplicationTask | undefined;
+    try {
+      task = dependencies.tasks.createFromJob(taskInput);
+      dependencies.applicationService.start({ taskId: taskInput.id, applicationUrl: taskInput.applicationUrl });
+      serviceStarted = true;
+      emitState(task.id);
+      await dependencies.applicationService.openBrowser(task.id);
+      await dependencies.applicationService.runUntilPause(task.id);
+      emitState(task.id);
+      return task;
+    } catch (error) {
+      if (serviceStarted) {
+        try {
+          await dependencies.applicationService.cancel(taskInput.id);
+        } catch {
+          // Cleanup below must still run when cancellation observes a terminal actor.
+        } finally {
+          await dependencies.applicationService.dispose(taskInput.id);
+        }
+      }
+      if (task !== undefined) dependencies.tasks.delete(taskInput.id);
+      throw error;
+    }
+  };
+
   app.post("/api/applications", async (request, reply) => {
     const body = ApplicationTaskInputSchema.safeParse(request.body);
     if (!body.success) return sendError(reply, 400, "Invalid request", "invalid_application_task_input");
@@ -128,33 +160,67 @@ export function registerApplicationRoutes(app: FastifyInstance, dependencies: Ap
 
     const name = body.data.name ?? suggestApplicationTaskName(prepared.applicationUrl);
     const taskInput = { id: prepared.id, name, applicationUrl: prepared.applicationUrl };
-    let serviceStarted = false;
-    let task: StoredApplicationTask | undefined;
     try {
-      task = dependencies.tasks.createFromJob(taskInput);
-      dependencies.applicationService.start({ taskId: taskInput.id, applicationUrl: taskInput.applicationUrl });
-      serviceStarted = true;
-      emitState(task.id);
-      await dependencies.applicationService.openBrowser(task.id);
-      await dependencies.applicationService.runUntilPause(task.id);
-      emitState(task.id);
+      const task = await startPreparedTask(taskInput);
       return reply.code(201).send(taskResponse(task));
     } catch (error) {
       console.error("[application.create] failed", error instanceof Error ? error.stack ?? error.message : error);
-      if (serviceStarted) {
-        try {
-          await dependencies.applicationService.cancel(taskInput.id);
-        } catch {
-          // Cleanup below must still run when cancellation observes a terminal actor.
-        } finally {
-          await dependencies.applicationService.dispose(taskInput.id);
-        }
-      }
-      if (task !== undefined) dependencies.tasks.delete(taskInput.id);
       const code = error instanceof Error && error.message === "browser_task_in_use"
         ? "browser_task_in_use"
         : "application_task_creation_failed";
       return sendError(reply, 409, "任务创建失败，请检查受控浏览器状态后重试", code);
+    }
+  });
+
+  app.post("/api/applications/:id/restart", async (request, reply) => {
+    const params = TaskParamsSchema.safeParse(request.params);
+    const body = ApplicationTaskRestartInputSchema.safeParse(request.body ?? {});
+    if (!params.success) return sendError(reply, 400, "请求参数无效", "invalid_task_id");
+    if (!body.success) return sendError(reply, 400, "重启请求无效", "invalid_application_task_restart_input");
+    const source = dependencies.tasks.get(params.data.id);
+    if (!source) return sendError(reply, 404, "投递任务不存在", "application_task_not_found");
+    const sourceState = toApiState(dependencies.applicationService.state(source.id).value);
+    if (sourceState !== "failed" && sourceState !== "cancelled") {
+      return sendError(reply, 409, "当前任务状态不允许重新开始", "application_task_restart_not_allowed");
+    }
+
+    let prepared: Awaited<ReturnType<PrepareApplicationTarget>>;
+    try {
+      prepared = await (dependencies.prepareApplicationTarget ?? prepareTarget)(
+        source.applicationUrl,
+        `restart:${source.id}`
+      );
+    } catch (error) {
+      const code = error instanceof ApplicationTargetError ? error.code : "invalid_application_url";
+      return sendError(reply, 400, "投递网址无效或不是公网 HTTPS 地址", code);
+    }
+
+    const existing = dependencies.tasks.get(prepared.id);
+    if (existing !== undefined) return reply.code(200).send(taskResponse(existing));
+    const activeTaskId = dependencies.applicationService.activeBrowserTaskId();
+    if (activeTaskId !== undefined) {
+      return sendError(
+        reply,
+        409,
+        "受控浏览器正在处理另一个投递任务，请先完成或取消该任务。",
+        "browser_task_in_use",
+        activeTaskId
+      );
+    }
+
+    try {
+      const task = await startPreparedTask({
+        id: prepared.id,
+        name: source.name,
+        applicationUrl: prepared.applicationUrl
+      });
+      return reply.code(201).send(taskResponse(task));
+    } catch (error) {
+      console.error("[application.restart] failed", error instanceof Error ? error.stack ?? error.message : error);
+      const code = error instanceof Error && error.message === "browser_task_in_use"
+        ? "browser_task_in_use"
+        : "application_task_creation_failed";
+      return sendError(reply, 409, "任务重新开始失败，请检查受控浏览器状态后重试", code);
     }
   });
 

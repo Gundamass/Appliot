@@ -74,6 +74,8 @@ export const ApplicationTaskInputSchema = z.object({
   name: ApplicationTaskNameSchema.optional()
 }).strict();
 
+export const ApplicationTaskRestartInputSchema = z.object({}).strict();
+
 export const ApplicationAnswerSchema = z.object({
   id: z.string().min(1).max(128),
   value: JsonValueSchema,
@@ -371,6 +373,7 @@ export type ApplicationPhaseStatus = z.infer<typeof ApplicationPhaseStatusSchema
 export type ApplicationExecutionCounts = z.infer<typeof ApplicationExecutionCountsSchema>;
 export type ApplicationExecutionProgress = z.infer<typeof ApplicationExecutionProgressSchema>;
 export type ApplicationTaskInput = z.infer<typeof ApplicationTaskInputSchema>;
+export type ApplicationTaskRestartInput = z.infer<typeof ApplicationTaskRestartInputSchema>;
 export type ApplicationAnswer = z.infer<typeof ApplicationAnswerSchema>;
 export type ApplicationQuestion = z.infer<typeof ApplicationQuestionSchema>;
 export type ApplicationCommand = z.infer<typeof ApplicationCommandSchema>;

@@ -6,6 +6,7 @@ import {
   ApplicationExecutionProgressSchema,
   ApplicationFieldAssessmentSchema,
   ApplicationTaskIdSchema,
+  ApplicationTaskRestartInputSchema,
   ApplicationTaskEventSchema,
   ApplicationTaskHistoryResetSchema,
   ApplicationTaskSchema,
@@ -15,6 +16,11 @@ import {
 const taskId = "91dc4bd6-425a-4cab-a38d-d13e33cda771";
 
 describe("application contracts", () => {
+  it("defines a strict empty restart input", () => {
+    expect(ApplicationTaskRestartInputSchema.safeParse({}).success).toBe(true);
+    expect(ApplicationTaskRestartInputSchema.safeParse({ unexpected: true }).success).toBe(false);
+  });
+
   it("accepts UUIDs and only the exact legacy application id shapes", () => {
     expect(ApplicationTaskIdSchema.parse("91dc4bd6-425a-4cab-a38d-d13e33cda771"))
       .toBe("91dc4bd6-425a-4cab-a38d-d13e33cda771");
